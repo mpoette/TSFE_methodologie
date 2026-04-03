@@ -1,1 +1,4 @@
-.code-workspace
+*.code-workspace
+Datasets/
+__pycache__/
+*.pyc
