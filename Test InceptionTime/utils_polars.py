@@ -403,7 +403,7 @@ def apply_generic_imputation(
                     pl.Series(col, pdf[col])
                 )
             
-                continue  # important pour éviter de passer après le else
+                continue  # important pour éviter de faire ce qui se trouve après les branchements conditionnels
  
             elif method == "ffill":
                 expr = (

@@ -50,7 +50,7 @@ def prepare_data(df, hour_offset=0):
     df = df.with_columns(
     (
         pl.col("heure_entiere")
-        - pl.col("heure_entiere").max().over(cfg.ID_COL)
+        - pl.col("heure_entiere").max().over(cfg.ID_COL) - hour_offset
     ).alias("heure_calibree")
     )
  
@@ -73,6 +73,9 @@ def prepare_data(df, hour_offset=0):
         .group_by(cfg.ID_COL)
         .agg(
             pl.col("heure_calibree").min().alias("start_h")
+        )
+        .with_columns(
+            (pl.col("start_h") + hour_offset).alias("start_h")
         )
         .with_columns(
             (pl.col("start_h") + (cfg.WINDOW_SIZE - 1)).alias("end_h")
