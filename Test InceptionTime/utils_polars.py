@@ -397,6 +397,7 @@ def apply_generic_imputation(
                 pdf[col] = (
                     pdf.groupby(id_col)[col]
                     .transform(lambda x: x.interpolate(method="linear", limit=6).ffill().bfill())
+                    .fillna(default)
                 )
             
                 df = df.with_columns(
