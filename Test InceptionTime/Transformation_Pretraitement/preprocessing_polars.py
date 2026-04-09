@@ -76,7 +76,6 @@ def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribut
                 (-pl.col("min_h")).alias("max_h")
             )
             real_distribution = patients["max_h"].to_numpy()
-
             offsets = []
             count = 0
             for max_h in real_distribution:
@@ -102,7 +101,7 @@ def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribut
         x_filtered = x[x <= q99]
 
         plt.hist(x_filtered, bins=200)
-        plt.title(f"Distribution de l'offset pour une distribution {used_distribution}")
+        plt.title(f"Distribution de l'offset pour une loi '{used_distribution}'")
         plt.show()
 
         patients = patients.with_columns(
