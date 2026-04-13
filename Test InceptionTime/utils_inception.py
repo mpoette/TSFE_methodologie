@@ -1,29 +1,12 @@
 import numpy as np
-import pandas as pd
 import polars as pl
-import matplotlib.pyplot as plt
-import seaborn as sns
 import optuna
-import math
-from sklearn.calibration import calibration_curve
-from sklearn.metrics import (
-    confusion_matrix,
-    f1_score,
-    roc_auc_score,
-    roc_curve,
-)
-from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
  
-from Extraction import extract
-from Transformation_Pretraitement import preprocessing_polars
 from inceptionTimeModified import (
-    evaluate_on_test,
-    load_model_from_checkpoint,
-    predict_proba,
     train_inception_time,
 )
-import utils_inception as ui
+
 # nommage des variables et fixation des paramètres
 patient_col="encounterId"
 time_col="heure_calibree"

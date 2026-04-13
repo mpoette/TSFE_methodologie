@@ -2,3 +2,8 @@
 Datasets/
 __pycache__/
 *.pyc
+*.pt
+*.db
+*/outputs/
+*/.ipynb_checkpoints/
+*.png

@@ -6,7 +6,7 @@ import random as rd
 import pandas as pd
 from datetime import timedelta
 import matplotlib.pyplot as plt
-def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribution = "uniform"):
+def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribution = "uniform", strict_mode = False):
     # Extraction des features importantes
     thesaurus = utils.load_thesaurus("thesaurus.json")
  
@@ -111,47 +111,40 @@ def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribut
         patients = patients.with_columns(
             pl.lit(hour_offset).alias("hour_offset")
         )
-    df_windows = (
-        patients
-        .with_columns(
-            (pl.col("min_h") + pl.col("hour_offset")).alias("start_h")
+    if hour_offset == -1:
+        df_windows = (
+            patients
+            .with_columns(
+                pl.int_ranges(
+                    -(cfg.WINDOW_SIZE - 1) - max_hour,
+                    1 - max_hour
+                ).alias("heure_calibree")
+            )
+            .explode("heure_calibree")
+            .select([cfg.ID_COL, "heure_calibree"])
         )
-        .with_columns(
-            (pl.col("start_h") + (cfg.WINDOW_SIZE - 1)).alias("end_h")
-        )
-        .with_columns(
-            pl.int_ranges(
-                pl.col("start_h"),
-                pl.col("end_h") + 1,
-            ).alias("heure_calibree")
-        )
-        .explode("heure_calibree")
-        .select([cfg.ID_COL, "heure_calibree"])
-)
-    # df_windows = (
-    #     df_agg
-    #     .group_by(cfg.ID_COL)
-    #     .agg(
-    #         pl.col("heure_calibree").min().alias("start_h")
-    #     )
-    #     .with_columns(
-    #         (pl.col("start_h") + hour_offset).alias("start_h")
-    #     )
-    #     .with_columns(
-    #         (pl.col("start_h") + (cfg.WINDOW_SIZE - 1)).alias("end_h")
-    #     )
-    #     .with_columns(
-    #         pl.int_ranges(
-    #             pl.col("start_h"),
-    #             pl.col("end_h") + 1,
-    #         ).alias("heure_calibree")
-    #     )
-    #     .explode("heure_calibree")
-    #     .select([cfg.ID_COL, "heure_calibree"])
-    # )
-    
+    else:
+        df_windows = (
+            patients
+            .with_columns(
+                (pl.col("min_h") + pl.col("hour_offset")).alias("start_h")
+            )
+            .with_columns(
+                (pl.col("start_h") + (cfg.WINDOW_SIZE - 1)).alias("end_h")
+            )
+            .with_columns(
+                pl.int_ranges(
+                    pl.col("start_h"),
+                    pl.col("end_h") + 1,
+                ).alias("heure_calibree")
+            )
+            .explode("heure_calibree")
+            .select([cfg.ID_COL, "heure_calibree"])
+            )
     # Join avec les données agrégées pour faire apparaître les heures manquantes
-    df_agg = df_agg.with_columns(pl.col("heure_calibree").cast(pl.Int64))
+    df_agg = df_agg.with_columns([pl.col("heure_calibree").cast(pl.Int64),
+                                  pl.lit(1).alias("real_hour"),
+                                  ])
     df_full = (
         df_windows
         .join(
@@ -162,6 +155,15 @@ def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribut
         .sort([cfg.ID_COL, "heure_calibree"])
     )
     
+    if strict_mode:
+        valid_ids = (df_full.group_by(cfg.ID_COL).agg(
+            pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present")
+        )
+        .filter(pl.col("nb_hour_present") >= cfg.WINDOW_SIZE).select(cfg.ID_COL)
+        )
+        df_full = df_full.join(valid_ids, on = cfg.ID_COL, how = "inner")
+    # df_full = df_full.drop('real_hour')
+
     if df_full.is_empty():
         print(f" │   ├─ {time_str} (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
         return pl.DataFrame()
