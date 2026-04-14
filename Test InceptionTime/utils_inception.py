@@ -16,7 +16,7 @@ expected_length=24
 
 # PREPROCESSING
 
-def scaling(df_train, df_test, target_col):
+def scaling(df_train, df_test):
     """
     Fonction qui permet de scaler en utilisant StandardScaler, uniquement les entiers et pas les booléens
     """
@@ -28,7 +28,7 @@ def scaling(df_train, df_test, target_col):
     num_cols = df_train_pd.select_dtypes(include=["number"]).columns
     bool_cols = df_train_pd.select_dtypes(include=["bool"]).columns
     
-    num_cols = [c for c in num_cols if c not in bool_cols and c not in [patient_col, target_col]]
+    num_cols = [c for c in num_cols if c not in bool_cols and c not in [patient_col]]
     
     scaler = StandardScaler()
     
