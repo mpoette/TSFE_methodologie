@@ -117,7 +117,54 @@ def _():
             target_name = "isDeceased")
 
     }
-    return CLEAN, MODELS, MODES, Y
+
+    all_features = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf', 'fr', 'pas']
+
+
+    @dataclass(frozen=True)
+    class ConfigFeatures:
+        keep_feats : list
+    FEAT = {
+        "Mode classique" : ConfigFeatures(
+            keep_feats = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf']
+        ),
+        "Mode NEWS" : ConfigFeatures(
+            keep_feats = ["fio2_corr", "fr", "spo2", "temp", "is_conscious", "pas", "heart_rate"]
+        ),
+        "Mode Custom" : ConfigFeatures(
+            keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
+        )
+    }
+
+
+
+    dico_terme = {
+        "fr" : "Fréquence Respiratoire",
+        "pas" : "Pression Artérielle Systolique",
+        "pam" : "Pression Artérielle Moyenne",
+        "heure_calibree" : "Heure relative à la fin du séjour",
+        "pad" : "Pression Artérielle Diastolique",
+        "heart_rate" : "Fréquence Cardiaque",
+        "spo2" : "Saturation en Oxygène",
+        "temp" : "Température",
+        "fio2_corr" : "Fraction Inspirée en Oxygène (calculée)",
+        "glyc_cap" : "Glycémie Capilaire",
+        "nad_dose_poids" : "Dosage de nicotinamide adénine di-nucléotide",
+        "is_ventilated" : "Patient avec ventilation invasive ou non",
+        "is_conscious" : "Conscient ou non",
+        "is_sedated" : "Sédaté ou non",
+        "is_not_alert" : "Alerte ou non",
+        "age" : "Age",
+        "creat" : "quantité de créatine",
+        "num_plq" : "numération plaquettaire", 
+        "bili_tot" : "Billirubine totale",
+        "tp" : "Taux de prothrombine",
+        "abs_dialyse" : "Dialyse ou non",
+        "dialyse_hdi" : "Dialyse HDI ou non",
+        "dialyse_cvvhf" : "Dialyse CVVHF ou non",
+    }
+
+    return CLEAN, FEAT, MODELS, MODES, Y, all_features, dico_terme
 
 
 @app.cell(hide_code=True)
@@ -156,6 +203,7 @@ def _():
         train_inception_time,
     )
     import utils_inception as ui
+    import old_utils_inception as oui
 
     return (
         StratifiedGroupKFold,
@@ -558,6 +606,70 @@ def _(mo):
 
 
 @app.cell
+def _(df_clean_2, df_test_1, ui):
+    df_clean_3 = df_clean_2.join(df_test_1[["encounterId","fr", "pas"]], on = ui.patient_col, how = "inner")
+    return (df_clean_3,)
+
+
+@app.cell
+def _(df_clean_3, pl):
+    df_clean_48 = df_clean_3.with_columns(
+        # Supplémentation en oxygène
+        (pl.when(pl.col("fio2_corr") != 21).then(2).otherwise(0)
+         +
+        # Fréquence respiratoire
+        pl.when((pl.col("fr") <= 8) |
+               (pl.col("fr") >=25)).then(3)
+            .when((pl.col("fr") >= 21)
+                  & (pl.col("fr") <= 24)).then(2)
+            .when((pl.col("fr")) <= 20 
+                  & (pl.col("fr") >= 12)).then(0)
+            .otherwise(1)
+        +
+        # Saturation en oxygène
+        pl.when((pl.col("spo2") <= 91.0)).then(3)
+        .when((pl.col("spo2") >= 92.0)
+            & (pl.col("spo2") <= 93.0)).then(2)
+        .when((pl.col("spo2") >= 94.0)
+             & (pl.col("spo2") <= 95)).then(1)
+        .otherwise(0)
+        +
+        # Température
+        pl.when((pl.col("temp") <= 35.0)).then(3)
+        .when(((pl.col('temp') >= 35.1)
+             & (pl.col("temp") <= 36.0))
+             |
+             ((pl.col("temp") <= 39.0)
+             & (pl.col("temp") >= 38.1))).then(1)
+        .when((pl.col("temp") >= 39.1)).then(2)
+         .otherwise(0)
+         +
+         # Consience
+         pl.when((pl.col("is_conscious")) == 0).then(0)
+         .otherwise(3)
+         +
+         # Pression Artérielle Systolique
+         pl.when((pl.col("pas") <= 90.0)
+                | (pl.col('pas') >= 220.0)).then(3)
+         .when((pl.col("pas") <= 110.0)
+              & (pl.col("pas") >= 101.0)).then(1)
+         .when((pl.col("pas") <= 219.0)
+              & (pl.col("pas") >= 111)).then(0)
+         .otherwise(2)
+         +
+         # Fréquence cardiaque
+         pl.when((pl.col("heart_rate") <= 40)
+                |(pl.col("heart_rate") >= 131)).then(3)
+         .when((pl.col("heart_rate") <= 90) 
+              & (pl.col("heart_rate") >= 51)).then(0)
+         .when((pl.col("heart_rate") >= 111)
+              & (pl.col("heart_rate") <= 130)).then(2)
+         .otherwise(1)
+        ).alias("news"))
+    return
+
+
+@app.cell
 def _():
     # df_clean_3 = df_clean2.with_columns(
     #     pl.when(pl.col("fio2_corr") != 21 then )
@@ -579,9 +691,49 @@ def _(mo):
 
 
 @app.cell
-def _(ui):
-    keep_features = [ui.patient_col, 'heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf']
-    return (keep_features,)
+def _(FEAT, mo):
+    modex = mo.ui.dropdown(
+        options = list(FEAT.keys()),
+        value = "Mode classique",
+        label = "Choix du mode",
+    )
+    return (modex,)
+
+
+@app.cell
+def _(FEAT, all_features, mo):
+    custom_features = mo.ui.multiselect(
+        options=all_features,
+        value= FEAT["Mode Custom"].keep_feats,
+        label="(features sélectionnables)",
+    )
+
+    return (custom_features,)
+
+
+@app.cell
+def _(FEAT, config_dropdown_color, custom_features, dico_terme, mo, modex):
+
+    if modex.value =="Mode classique":
+        keep_feats = FEAT["Mode classique"].keep_feats
+    elif modex.value == "Mode NEWS":
+        keep_feats = FEAT["Mode NEWS"].keep_feats
+    else:
+        keep_feats = custom_features.value
+
+    str_keep_feats = ""
+
+    for kf in keep_feats:
+        str_keep_feats += f"- {dico_terme[kf]} \n"
+    mo.vstack([
+        mo.md(config_dropdown_color),
+        modex,
+        custom_features if modex.value == "Mode Custom" else "(features fixe)",
+        mo.md(f"**Features gardées :** `{keep_feats}`"),
+        mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
+        mo.md("</div>")
+    ])
+    return (keep_feats,)
 
 
 @app.cell(hide_code=True)
@@ -631,7 +783,8 @@ def _(test_df):
 
 
 @app.cell
-def _(StratifiedGroupKFold, config4, df_clean_2, keep_features, pl, ui):
+def _(StratifiedGroupKFold, config4, df_clean_2, keep_feats, pl, ui):
+    keep_features = keep_feats
     patient_col = ui.patient_col
     time_col = ui.time_col
     target_col = config4.target_name
@@ -651,7 +804,7 @@ def _(StratifiedGroupKFold, config4, df_clean_2, keep_features, pl, ui):
     train_df = df_clean_4[train_idx].sort([patient_col, time_col])
     test_df = df_clean_4[test_idx].sort([patient_col, time_col])
     # On prépare le jeu d'entraînement
-    (train_pd, test_pd) = ui.scaling(train_df, test_df)
+    (train_pd, test_pd) = ui.scaling(train_df, test_df, target_col)
     (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
     (X_train_3d, y_train_seq) = ui.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
     # On prend un split (comme train/test mais adapté aux individus)
@@ -666,12 +819,20 @@ def _(StratifiedGroupKFold, config4, df_clean_2, keep_features, pl, ui):
     return (
         X_test_3d,
         X_train_3d,
+        df_clean_4,
+        patient_col,
         target_col,
         test_df,
         train_df,
         y_test_seq,
         y_train_seq,
     )
+
+
+@app.cell
+def _(df_clean_4, patient_col, pl, target_col):
+    df_clean_4.select(pl.exclude(target_col, patient_col, "DeceasedTimeType", "isDeceased_lt_24h", "isDeceased_lt_28d", "isDeceased_lt_7d", "isDeceased_lt_3m", "isDeceased_gt_3m", "deces_datediff_days")).columns
+    return
 
 
 @app.cell
@@ -704,10 +865,10 @@ def _(mo):
 
 
 @app.cell
-def _(config, config2, config3, config4, config_dropdown_color, mo):
+def _(config, config2, config3, config4, config_dropdown_color, mo, modex):
     mo.vstack([
         mo.md(config_dropdown_color),
-        mo.md(f"### Entraînement avec les paramètres suivants : \n - typeFenêtrage = {config.name} \n - Modèle utilisé = {config2.models_name} \n - Nettoyage des Surveillances Continues = {config3.clean} \n - Cible à prédire = {config4.target_name}"),
+        mo.md(f"### Entraînement avec les paramètres suivants : \n - typeFenêtrage = {config.name} \n - Modèle utilisé = {config2.models_name} \n - Nettoyage des Surveillances Continues = {config3.clean} \n - Cible à prédire = {config4.target_name} \n - Mode de features = {modex.value}"),
         mo.md("</div>")
     ])
     return
@@ -734,6 +895,7 @@ def _(
     config3,
     config4,
     mo,
+    modex,
     run,
     train_inception_time,
     y_train_seq,
@@ -754,7 +916,7 @@ def _(
             use_scheduler = False,
             epochs=100,
             patience=10,
-            save_best_path=f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}.pt"
+            save_best_path=f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}.pt"
         )
     else :
         print("oups tu t'es trompé")
@@ -778,9 +940,10 @@ def _(
     config4,
     evaluate_on_test,
     load_model_from_checkpoint,
+    modex,
     y_test_seq,
 ):
-    loaded_model = f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}.pt"
+    loaded_model = f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}.pt"
     (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
     (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
     return T_1, model_1
@@ -899,7 +1062,7 @@ def _(f1_score, np, plt, probas, y_test):
 
 @app.cell
 def _(confusion_matrix, plt, probas, sns, y_test):
-    threshold = 0.44
+    threshold = 0.48
     y_pred = (probas >= threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred)
     plt.figure()
