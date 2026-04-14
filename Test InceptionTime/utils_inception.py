@@ -10,14 +10,13 @@ from inceptionTimeModified import (
 # nommage des variables et fixation des paramètres
 patient_col="encounterId"
 time_col="heure_calibree"
-target_col="isDeceased"
 expected_length=24
 
 
 
 # PREPROCESSING
 
-def scaling(df_train, df_test):
+def scaling(df_train, df_test, target_col):
     """
     Fonction qui permet de scaler en utilisant StandardScaler, uniquement les entiers et pas les booléens
     """
@@ -38,7 +37,7 @@ def scaling(df_train, df_test):
     return df_train_pd, df_test_pd
 
 
-def build_sequences(df, patient_col, target_col, expected_length, target2_col = "deces_datediff_days"):
+def build_sequences(df, patient_col, target_col, expected_length, keep_features):
     """
     Fonction qui permet d'extraire des dataframes train et test, les features appropriées et les split entre X et y
     """
@@ -49,7 +48,7 @@ def build_sequences(df, patient_col, target_col, expected_length, target2_col = 
         if subdf.height != expected_length:
             raise ValueError(f"Le groupe {subdf[patient_col][0]} n'a pas {expected_length} lignes.")
  
-        X_list.append(subdf.select(pl.exclude(target_col, patient_col, target2_col)).to_numpy())
+        X_list.append(subdf.select(keep_features).to_numpy())
         y_list.append(subdf[target_col][0])  # un seul label par séquence
  
     X_3d = np.stack(X_list).astype(np.float32)

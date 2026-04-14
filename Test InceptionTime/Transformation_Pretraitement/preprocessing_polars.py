@@ -162,7 +162,7 @@ def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribut
         .filter(pl.col("nb_hour_present") >= cfg.WINDOW_SIZE).select(cfg.ID_COL)
         )
         df_full = df_full.join(valid_ids, on = cfg.ID_COL, how = "inner")
-    # df_full = df_full.drop('real_hour')
+    df_full = df_full.drop('real_hour')
 
     if df_full.is_empty():
         print(f" │   ├─ {time_str} (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
