@@ -14,7 +14,6 @@ def _(mo):
 
 @app.cell
 def _():
-    from dataclasses import dataclass
     import marimo as mo
     import numpy as np
     import pandas as pd
@@ -35,16 +34,15 @@ def _():
     from pathlib import Path
     from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.preprocessing import StandardScaler
-
-    from Extraction import extract
-    from Transformation_Pretraitement import preprocessing_polars
-    from inceptionTimeModified import (
+    from utilitaries.models.inceptionTimeModified import (
         evaluate_on_test,
         load_model_from_checkpoint,
         predict_proba,
         train_inception_time,
     )
-    import utils_inception as ui
+    import utilitaries.inception_utils as ui
+    import utilitaries.marimo_utils as mo_utils
+    import utilitaries.extract_data_utils as extract
 
     return (
         Path,
@@ -52,17 +50,16 @@ def _():
         brier_score_loss,
         calibration_curve,
         confusion_matrix,
-        dataclass,
         evaluate_on_test,
         extract,
         f1_score,
         load_model_from_checkpoint,
         mo,
+        mo_utils,
         np,
         pl,
         plt,
         predict_proba,
-        preprocessing_polars,
         roc_auc_score,
         roc_curve,
         sns,
@@ -74,180 +71,15 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    #### Widgets Marimo
+    #### Widgets Marimo utilisés dans ce notebook
     """)
     return
 
 
 @app.cell
-def _():
-    config_dropdown_color = "<div style='background:#F0FFD4;padding:8px;border-radius:6px'>"
-
-    config_run_button = "<div style='background:#FFFA7A;padding:8px;border-radius:6px'>"
-
-    config_msg = "<div style='background:#FFABAB;padding:8px;border-radius:6px>"
-
-    config_sidebar = "<div style='background:#F9F9F9;padding:8px;border-radius:6px'>"
-    return config_dropdown_color, config_run_button, config_sidebar
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigFenetrage:
-        name : str
-        hour_offset: int
-        random: bool
-        max_hour: int
-        strict_mode: bool
-        used_distribution : str
-
-    MODES = {
-        "24h début réanimation avec remplissage": ConfigFenetrage(
-            name = "24h_debut_rea_fill",
-            hour_offset = 0,
-            random = False,
-            max_hour = 12,
-            strict_mode = False,
-            used_distribution = "uniform",
-        ),
-        "24h début réanimation sans remplissage": ConfigFenetrage(
-            name = "24h_debut_rea_no-fill",
-            hour_offset = 0,
-            random = False,
-            max_hour = 12,
-            strict_mode = True,
-            used_distribution = "uniform", # pas utilisé
-        ),
-        "24h fin réanimation avec remplissage" : ConfigFenetrage(
-            name = "24h_fin_rea-fill",
-            hour_offset = -1,
-            max_hour = 12,
-            strict_mode = False,
-            random = False,
-            used_distribution = "uniform", # pas utilisé
-        ),
-         "24h fin réanimation sans remplissage" : ConfigFenetrage(
-            name = "24h_fin_rea_no-fill",
-            hour_offset = -1,
-            max_hour = 12,
-            strict_mode = True,
-            random = False,
-            used_distribution = "uniform", # pas utilisé
-         ),
-        "24h aléatoire 'real' avec remplissage": ConfigFenetrage(
-            name = "24h_alea_real_fill",
-            hour_offset = 0, # pas utilisé en pratique
-            random = True,
-            max_hour = 12,
-            strict_mode = False,
-            used_distribution = "real",
-        ),
-        "24h aléatoire 'real' sans remplissage": ConfigFenetrage(
-            name = "24h_alea_real_no-fill",
-            hour_offset = 0,
-            random = True,
-            max_hour = 12,
-            strict_mode = True,
-            used_distribution = "real",
-        ),
-    }
-    return (MODES,)
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigPopulation:
-        keep_population : str
-    POPULATION = {
-        "Tout" : ConfigPopulation(
-            keep_population = "all_diseases"
-        ),
-        "Sepsis" : ConfigPopulation(
-            keep_population = "sepsis"
-        ),
-    }
-    return (POPULATION,)
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigModels:
-        models_name : str
-    MODELS = {
-        "InceptionTimeModified" : ConfigModels(
-            models_name = "InceptionTimeModified"
-        )
-    }
-    return (MODELS,)
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigCleaning:
-        clean : bool
-    CLEAN = {
-        "Enlever Surveillance Continue" : ConfigCleaning(
-            clean = True
-        ),
-        "Garder le dataset intact" : ConfigCleaning(
-            clean = False
-        ),
-    }
-    return (CLEAN,)
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigY:
-        target_name : str
-    Y = {
-        "Survie à 24 heures" : ConfigY(
-            target_name = "isDeceased_lt_24h"
-        ),
-        "Survie à 7 jours" : ConfigY(
-            target_name = "isDeceased_lt_7d"
-        ),
-        "Survie à 28 jours" : ConfigY(
-            target_name = "isDeceased_lt_28d"
-        ),
-        "Survie à 3 mois" : ConfigY(
-            target_name = "isDeceased_lt_3m"
-        ),
-        "Survie (isDeceased)" : ConfigY(
-            target_name = "isDeceased")
-
-    }
-    return (Y,)
-
-
-@app.cell
-def _(dataclass):
-    @dataclass(frozen=True)
-    class ConfigFeatures:
-        keep_feats : list
-    FEAT = {
-        "Mode classique" : ConfigFeatures(
-            keep_feats = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf']
-        ),
-        "Mode NEWS" : ConfigFeatures(
-            keep_feats = ["fio2_corr", "fr", "spo2", "temp", "is_conscious", "pas", "heart_rate"]
-        ),
-        "Mode Custom" : ConfigFeatures(
-            keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
-        )
-    }
-    return (FEAT,)
-
-
-@app.cell
-def _(CLEAN, mo):
+def _(mo, mo_utils):
     cleaning = mo.ui.dropdown(
-        options=CLEAN,
+        options=mo_utils.CLEAN,
         value = "Enlever Surveillance Continue",
         label = "Nettoyage des patients en SC",
     )
@@ -255,9 +87,9 @@ def _(CLEAN, mo):
 
 
 @app.cell
-def _(MODES, mo):
+def _(mo, mo_utils):
     mode = mo.ui.dropdown(
-        options=MODES,
+        options=mo_utils.MODES,
         value="24h début réanimation avec remplissage",
         label="Mode de fenêtrage",
     )
@@ -265,9 +97,9 @@ def _(MODES, mo):
 
 
 @app.cell
-def _(MODELS, mo):
+def _(mo, mo_utils):
     models = mo.ui.dropdown(
-        options=MODELS,
+        options=mo_utils.MODELS,
         value="InceptionTimeModified",
         label="Modèle utilisé",
     )
@@ -275,9 +107,9 @@ def _(MODELS, mo):
 
 
 @app.cell
-def _(FEAT, mo):
+def _(mo, mo_utils):
     modex = mo.ui.dropdown(
-        options = list(FEAT.keys()),
+        options = list(mo_utils.FEAT.keys()),
         value = "Mode classique",
         label = "Choix des features gardées",
     )
@@ -285,9 +117,9 @@ def _(FEAT, mo):
 
 
 @app.cell
-def _(Y, mo):
+def _(mo, mo_utils):
     y_dd =  mo.ui.dropdown(
-        options=Y,
+        options=mo_utils.Y,
         value="Survie (isDeceased)",
         label="Cible (y) à prédire",
     )
@@ -311,20 +143,20 @@ def _(mo):
 
 
 @app.cell
-def _(POPULATION, mo):
+def _(mo, mo_utils):
     keep_pop = mo.ui.dropdown(
-        options = POPULATION,
+        options = mo_utils.POPULATION,
         value = "Tout",
         label = "Type de patients que l'on veut garder (ICU_DP filter)")
     return (keep_pop,)
 
 
 @app.cell
-def _(config_dropdown_color, mo, save_figure):
+def _(mo, mo_utils, save_figure):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         save_figure,
-        mo.md("</div>")
+        mo.md(mo_utils.config_end)
     ])
     return
 
@@ -514,11 +346,11 @@ def _(mo):
 
 
 @app.cell
-def _(config_dropdown_color, keep_pop, mo):
+def _(keep_pop, mo, mo_utils):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         keep_pop,
-        mo.md("</div>")])
+        mo.md(mo_utils.config_end)])
     return
 
 
@@ -646,17 +478,17 @@ def _(mo):
 
 
 @app.cell
-def _(config_dropdown_color, mo, mode):
+def _(mo, mo_utils, mode):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         mode,
-        mo.md("</div>")])
+        mo.md(mo_utils.config_end)])
     return
 
 
 @app.cell
-def _(config, df_test_1, preprocessing_polars):
-    df_clean = preprocessing_polars.prepare_data(df_test_1, 
+def _(config, df_test_1, extract):
+    df_clean = extract.prepare_data(df_test_1, 
                                                  hour_offset = config.hour_offset, 
                                                  random = config.random, 
                                                  max_hour = config.max_hour,
@@ -808,11 +640,11 @@ def _(df_clean_2, pl, ui):
 
 
 @app.cell
-def _(config_dropdown_color, mo, models):
+def _(mo, mo_utils, models):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         models,
-        mo.md("</div>")])
+        mo.md(mo_utils.config_end)])
     return
 
 
@@ -913,22 +745,22 @@ def _(mo):
 
 
 @app.cell
-def _(FEAT, all_features, mo):
+def _(all_features, mo, mo_utils):
     custom_features = mo.ui.multiselect(
         options=all_features,
-        value= FEAT["Mode Custom"].keep_feats,
+        value= mo_utils.FEAT["Mode Custom"].keep_feats,
         label="(features sélectionnables)",
     )
     return (custom_features,)
 
 
 @app.cell
-def _(FEAT, config_dropdown_color, custom_features, dico_terme, mo, modex):
+def _(custom_features, dico_terme, mo, mo_utils, modex):
 
     if modex.value =="Mode classique":
-        keep_feats = FEAT["Mode classique"].keep_feats
+        keep_feats = mo_utils.FEAT["Mode classique"].keep_feats
     elif modex.value == "Mode NEWS":
-        keep_feats = FEAT["Mode NEWS"].keep_feats
+        keep_feats = mo_utils.FEAT["Mode NEWS"].keep_feats
     else:
         keep_feats = custom_features.value
 
@@ -937,12 +769,12 @@ def _(FEAT, config_dropdown_color, custom_features, dico_terme, mo, modex):
     for kf in keep_feats:
         str_keep_feats += f"- {dico_terme[kf]} \n"
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         modex,
         custom_features if modex.value == "Mode Custom" else "(features fixe)",
         mo.md(f"**Features gardées :** `{keep_feats}`"),
         mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
-        mo.md("</div>")
+        mo.md(mo_utils.config_end)
     ])
     return keep_feats, str_keep_feats
 
@@ -956,11 +788,11 @@ def _(mo):
 
 
 @app.cell
-def _(config_dropdown_color, mo, y_dd):
+def _(mo, mo_utils, y_dd):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         y_dd,
-        mo.md("</div>")])
+        mo.md(mo_utils.config_end)])
     return
 
 
@@ -1066,21 +898,21 @@ def _(mo):
 
 
 @app.cell
-def _(config, config2, config3, config4, config_dropdown_color, mo, modex):
+def _(config, config2, config3, config4, mo, mo_utils, modex):
     mo.vstack([
-        mo.md(config_dropdown_color),
+        mo.md(mo_utils.config_dropdown_color),
         mo.md(f"### Entraînement avec les paramètres suivants : \n - typeFenêtrage = {config.name} \n - Modèle utilisé = {config2.models_name} \n - Nettoyage des Surveillances Continues = {config3.clean} \n - Cible à prédire = {config4.target_name} \n - Mode de features = {modex.value}"),
-        mo.md("</div>")
+        mo.md(mo_utils.config_end)
     ])
     return
 
 
 @app.cell
-def _(config_run_button, mo, run):
+def _(mo, mo_utils, run):
     mo.vstack([
-        mo.md(config_run_button),
+        mo.md(mo_utils.config_run_button),
         run,
-        mo.md("</div>")])
+        mo.md(mo_utils.config_end)])
     return
 
 
@@ -1103,7 +935,7 @@ def _(
     str_pop = ""
     if config5.keep_population != "all_diseases":
         str_pop = "_"+config5.keep_population
-    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}_{config5.keep_population}{str_pop}.pt")
+    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}{str_pop}.pt")
 
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
@@ -1174,7 +1006,6 @@ def _(Path, loaded_model):
 @app.cell
 def _(T_1, X_test_3d, model_1, predict_proba):
     probas = predict_proba(model_1, X_test_3d, T=T_1)
-    print(probas)
     return (probas,)
 
 
@@ -1559,11 +1390,11 @@ def _(
 @app.cell
 def _(
     cleaning,
-    config_sidebar,
     custom_features,
     keep_feats,
     keep_pop,
     mo,
+    mo_utils,
     mode,
     models,
     modex,
@@ -1574,7 +1405,7 @@ def _(
 ):
     mo.sidebar(
     mo.vstack([
-        mo.md(config_sidebar),
+        mo.md(mo_utils.config_sidebar),
         mode,
         models,
         cleaning,
@@ -1589,7 +1420,7 @@ def _(
         run,
         mo.md("==============================================="),
         mo.md(f" \n \n **Modification Thesaurus** : Afin d'avoir des valeurs cohérentes, avec une bonne imputation notamment, j'ai rajouté la pression artérielle systolique ainsi que la fréquence respiratoire. Il faudra voir aussi si on laisse les valeurs par défaut à 0 ou non. J'ai pris le parti pris pour la pas et fr de mettre en valeur par défaut une valeur qui fait un score de 0 sur news, sinon ça augmenterait le score juste parce qu'on a pas l'info ce qui n'est pas optimal... J'ai donc 130 pour pas en imputation method ffill_bfill et 16 pour fr en ffill_bfill aussi. Je me suis rendu compte que la valeur par défaut de heart_rate et spo2 était aussi de 0. Cela classe donc instantanément le patient en grave, alors qu'on a juste pas l'information... j'ai mis pour heart_rate une valeur par défaut de 60 et un spo2 de 96%. Je pense qu'il faudra qu'on fasse un point sur les valeurs par défaut du thesaurus car la majorité sont à 0, ce qui peut poser problème"),
-        mo.md("</div>")]),
+        mo.md(mo_utils.config_end)]),
     width = "550px")
     return
 

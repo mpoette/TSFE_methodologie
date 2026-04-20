@@ -3,7 +3,7 @@ import polars as pl
 import optuna
 from sklearn.preprocessing import StandardScaler
  
-from inceptionTimeModified import (
+from utilitaries.models.inceptionTimeModified import (
     train_inception_time,
 )
 
