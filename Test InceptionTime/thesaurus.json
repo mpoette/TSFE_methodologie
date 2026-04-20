@@ -1,5 +1,41 @@
 {
   "features": {
+    "PAS" : {
+      "column" : "pas",
+      "table" : "PtAssessment",
+      "type" : "standard",
+      "label" : [
+        "hémodynamique"
+      ],
+      "codes" : {
+        "INV" : [
+          "arterialBPInt.systolic",
+          "arterialBPInt.systolic.ptAdult"
+        ],
+        "NON_INV" : [
+          "nonInvasiveBPInt.systolic",
+          "nonInvasiveBPInt.systolic.ptAdult"
+        ]
+      },
+      "agg_method" : "median",
+      "imputation_method" : "interpolate_ffill_bfill",
+      "default_value" : 130.0
+    },
+    "FR" : {
+      "column" : "fr",
+      "table" : "PtAssessment",
+      "type" : "standard",
+      "label" : [
+        "respiratoire"
+      ],
+      "codes" : ["RespirationRateInt.Frquence_Respiratoire",
+                 "AirwayRespiratoryRateInt.Frquence_respiratoire",
+                 "AirwayRespiratoryRateInt.RespirationRateMsmt",
+                 "AirwayRespiratoryRateInt.RespirationRateMsmt.ptAdult"],
+      "agg_method" : "median",
+      "imputation_method" : "interpolate_ffill_bfill",
+      "default_value" : 16.0
+    },
     "PAM": {
       "column": "pam",
       "table": "PtAssessment",
@@ -20,7 +56,7 @@
       },
       "agg_method": "median",
       "imputation_method": "interpolate_ffill_bfill",
-      "default_value": 0.0
+      "default_value": 12.0
     },
     "PAD": {
       "column": "pad",
@@ -59,7 +95,7 @@
       ],
       "agg_method": "median",
       "imputation_method": "interpolate_ffill_bfill",
-      "default_value": 0.0
+      "default_value": 60.0
     },
     "SPO2": {
       "column": "spo2",
@@ -75,7 +111,7 @@
       ],
       "agg_method": "median",
       "imputation_method": "interpolate_ffill_bfill",
-      "default_value": 0.0
+      "default_value": 96.0
     },
     "TEMPERATURE": {
       "column": "temp",
@@ -184,7 +220,7 @@
       },
       "agg_method": "max",
       "imputation_method": "ffill_zero",
-      "default_value": 0
+      "default_value": 1
     },
     "AGE": {
       "column": "age",

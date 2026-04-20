@@ -4,19 +4,71 @@ __generated_with = "0.23.1"
 app = marimo.App()
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Importation des bibliothèques
+    """)
+    return
+
+
 @app.cell
 def _():
+    from dataclasses import dataclass
     import marimo as mo
+    import numpy as np
+    import pandas as pd
+    import polars as pl
+    import time
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import optuna
+    import math
+    from sklearn.calibration import calibration_curve
+    from sklearn.metrics import (
+        confusion_matrix,
+        f1_score,
+        roc_auc_score,
+        roc_curve,
+        brier_score_loss
+    )
+    from pathlib import Path
+    from sklearn.model_selection import StratifiedGroupKFold
+    from sklearn.preprocessing import StandardScaler
 
-    return (mo,)
+    from Extraction import extract
+    from Transformation_Pretraitement import preprocessing_polars
+    from inceptionTimeModified import (
+        evaluate_on_test,
+        load_model_from_checkpoint,
+        predict_proba,
+        train_inception_time,
+    )
+    import utils_inception as ui
 
-
-@app.cell
-def _():
-    config_dropdown_color = "<div style='background:#F0FFD4;padding:8px;border-radius:6px'>"
-
-    config_run_button = "<div style='background:#FFFA7A;padding:8px;border-radius:6px'>"
-    return config_dropdown_color, config_run_button
+    return (
+        Path,
+        StratifiedGroupKFold,
+        brier_score_loss,
+        calibration_curve,
+        confusion_matrix,
+        dataclass,
+        evaluate_on_test,
+        extract,
+        f1_score,
+        load_model_from_checkpoint,
+        mo,
+        np,
+        pl,
+        plt,
+        predict_proba,
+        preprocessing_polars,
+        roc_auc_score,
+        roc_curve,
+        sns,
+        train_inception_time,
+        ui,
+    )
 
 
 @app.cell(hide_code=True)
@@ -29,8 +81,18 @@ def _(mo):
 
 @app.cell
 def _():
-    from dataclasses import dataclass
+    config_dropdown_color = "<div style='background:#F0FFD4;padding:8px;border-radius:6px'>"
 
+    config_run_button = "<div style='background:#FFFA7A;padding:8px;border-radius:6px'>"
+
+    config_msg = "<div style='background:#FFABAB;padding:8px;border-radius:6px>"
+
+    config_sidebar = "<div style='background:#F9F9F9;padding:8px;border-radius:6px'>"
+    return config_dropdown_color, config_run_button, config_sidebar
+
+
+@app.cell
+def _(dataclass):
     @dataclass(frozen=True)
     class ConfigFenetrage:
         name : str
@@ -55,8 +117,24 @@ def _():
             random = False,
             max_hour = 12,
             strict_mode = True,
-            used_distribution = "uniform",
+            used_distribution = "uniform", # pas utilisé
         ),
+        "24h fin réanimation avec remplissage" : ConfigFenetrage(
+            name = "24h_fin_rea-fill",
+            hour_offset = -1,
+            max_hour = 12,
+            strict_mode = False,
+            random = False,
+            used_distribution = "uniform", # pas utilisé
+        ),
+         "24h fin réanimation sans remplissage" : ConfigFenetrage(
+            name = "24h_fin_rea_no-fill",
+            hour_offset = -1,
+            max_hour = 12,
+            strict_mode = True,
+            random = False,
+            used_distribution = "uniform", # pas utilisé
+         ),
         "24h aléatoire 'real' avec remplissage": ConfigFenetrage(
             name = "24h_alea_real_fill",
             hour_offset = 0, # pas utilisé en pratique
@@ -74,7 +152,27 @@ def _():
             used_distribution = "real",
         ),
     }
+    return (MODES,)
 
+
+@app.cell
+def _(dataclass):
+    @dataclass(frozen=True)
+    class ConfigPopulation:
+        keep_population : str
+    POPULATION = {
+        "Tout" : ConfigPopulation(
+            keep_population = "all_diseases"
+        ),
+        "Sepsis" : ConfigPopulation(
+            keep_population = "sepsis"
+        ),
+    }
+    return (POPULATION,)
+
+
+@app.cell
+def _(dataclass):
     @dataclass(frozen=True)
     class ConfigModels:
         models_name : str
@@ -83,7 +181,11 @@ def _():
             models_name = "InceptionTimeModified"
         )
     }
+    return (MODELS,)
 
+
+@app.cell
+def _(dataclass):
     @dataclass(frozen=True)
     class ConfigCleaning:
         clean : bool
@@ -95,8 +197,11 @@ def _():
             clean = False
         ),
     }
+    return (CLEAN,)
 
 
+@app.cell
+def _(dataclass):
     @dataclass(frozen=True)
     class ConfigY:
         target_name : str
@@ -117,10 +222,11 @@ def _():
             target_name = "isDeceased")
 
     }
+    return (Y,)
 
-    all_features = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf', 'fr', 'pas']
 
-
+@app.cell
+def _(dataclass):
     @dataclass(frozen=True)
     class ConfigFeatures:
         keep_feats : list
@@ -135,9 +241,146 @@ def _():
             keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
         )
     }
+    return (FEAT,)
 
 
+@app.cell
+def _(CLEAN, mo):
+    cleaning = mo.ui.dropdown(
+        options=CLEAN,
+        value = "Enlever Surveillance Continue",
+        label = "Nettoyage des patients en SC",
+    )
+    return (cleaning,)
 
+
+@app.cell
+def _(MODES, mo):
+    mode = mo.ui.dropdown(
+        options=MODES,
+        value="24h début réanimation avec remplissage",
+        label="Mode de fenêtrage",
+    )
+    return (mode,)
+
+
+@app.cell
+def _(MODELS, mo):
+    models = mo.ui.dropdown(
+        options=MODELS,
+        value="InceptionTimeModified",
+        label="Modèle utilisé",
+    )
+    return (models,)
+
+
+@app.cell
+def _(FEAT, mo):
+    modex = mo.ui.dropdown(
+        options = list(FEAT.keys()),
+        value = "Mode classique",
+        label = "Choix des features gardées",
+    )
+    return (modex,)
+
+
+@app.cell
+def _(Y, mo):
+    y_dd =  mo.ui.dropdown(
+        options=Y,
+        value="Survie (isDeceased)",
+        label="Cible (y) à prédire",
+    )
+    return (y_dd,)
+
+
+@app.cell
+def _(config2, mo):
+    run = mo.ui.run_button(
+        label=f"Lancer l'entraînement du modèle {config2.models_name}"
+    )
+    return (run,)
+
+
+@app.cell
+def _(mo):
+    save_figure = mo.ui.dropdown(options = {"Oui" : True, "Non" : False},
+                                value = "Oui",
+                                label = "Sauvegarde des figures")
+    return (save_figure,)
+
+
+@app.cell
+def _(POPULATION, mo):
+    keep_pop = mo.ui.dropdown(
+        options = POPULATION,
+        value = "Tout",
+        label = "Type de patients que l'on veut garder (ICU_DP filter)")
+    return (keep_pop,)
+
+
+@app.cell
+def _(config_dropdown_color, mo, save_figure):
+    mo.vstack([
+        mo.md(config_dropdown_color),
+        save_figure,
+        mo.md("</div>")
+    ])
+    return
+
+
+@app.cell
+def _(save_figure):
+    save_figure.value
+    return
+
+
+@app.cell
+def _(mode):
+    config = mode.value
+    return (config,)
+
+
+@app.cell
+def _(models):
+    config2 = models.value
+    return (config2,)
+
+
+@app.cell
+def _(cleaning):
+    config3 = cleaning.value
+    return (config3,)
+
+
+@app.cell
+def _(y_dd):
+    config4 = y_dd.value
+    return (config4,)
+
+
+@app.cell
+def _(keep_pop):
+    config5 = keep_pop.value
+    return (config5,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Définitions utiles
+    """)
+    return
+
+
+@app.cell
+def _():
+    all_features = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf', 'fr', 'pas']
+    return (all_features,)
+
+
+@app.cell
+def _():
     dico_terme = {
         "fr" : "Fréquence Respiratoire",
         "pas" : "Pression Artérielle Systolique",
@@ -163,74 +406,38 @@ def _():
         "dialyse_hdi" : "Dialyse HDI ou non",
         "dialyse_cvvhf" : "Dialyse CVVHF ou non",
     }
-
-    return CLEAN, FEAT, MODELS, MODES, Y, all_features, dico_terme
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    #### Importation des bibliothèques
-    """)
-    return
+    return (dico_terme,)
 
 
 @app.cell
-def _():
-    import numpy as np
-    import pandas as pd
-    import polars as pl
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import optuna
-    import math
-    from sklearn.calibration import calibration_curve
-    from sklearn.metrics import (
-        confusion_matrix,
-        f1_score,
-        roc_auc_score,
-        roc_curve,
-    )
-    from sklearn.model_selection import StratifiedGroupKFold
-    from sklearn.preprocessing import StandardScaler
+def _(Path):
+    def get_unique_path(path):
+        path = Path(path)
 
-    from Extraction import extract
-    from Transformation_Pretraitement import preprocessing_polars
-    from inceptionTimeModified import (
-        evaluate_on_test,
-        load_model_from_checkpoint,
-        predict_proba,
-        train_inception_time,
-    )
-    import utils_inception as ui
-    import old_utils_inception as oui
+        if not path.exists():
+            return path
 
-    return (
-        StratifiedGroupKFold,
-        calibration_curve,
-        confusion_matrix,
-        evaluate_on_test,
-        extract,
-        f1_score,
-        load_model_from_checkpoint,
-        np,
-        pd,
-        pl,
-        plt,
-        predict_proba,
-        preprocessing_polars,
-        roc_auc_score,
-        roc_curve,
-        sns,
-        train_inception_time,
-        ui,
-    )
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+
+        i = 1
+        new_path = parent / f"{stem}_{i}{suffix}"
+
+        while new_path.exists():
+            i += 1
+            new_path = parent / f"{stem}_{i}{suffix}"
+
+        return new_path
+
+
+    return (get_unique_path,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    #### Extraction
+    ### Extraction
     """)
     return
 
@@ -264,38 +471,6 @@ def _(df_static):
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    A partir d'ici, le notebook devient intéractif. On peut :
-
-    - Sélectionner le type de calcul pour la fenêtre
-    - Sélectionner si on veut enlever ou non la surveillance continue
-    - Selectionner le modèle utilisé
-    """)
-    return
-
-
-@app.cell
-def _(CLEAN, config_dropdown_color, mo):
-    cleaning = mo.ui.dropdown(
-        options=CLEAN,
-        value = "Enlever Surveillance Continue",
-        label = "Nettoyage ou non des patients en surveillance continue",
-    )
-    mo.vstack([
-        mo.md(config_dropdown_color),
-        cleaning,
-        mo.md("</div>")])
-    return (cleaning,)
-
-
-@app.cell
-def _(cleaning):
-    config3 = cleaning.value
-    return (config3,)
-
-
 @app.cell
 def _(config3, df_static, pl):
     if config3.clean :
@@ -320,7 +495,80 @@ def _(mo):
 
 @app.cell
 def _(df_static_bis, pl):
-    df_static_1 = df_static_bis.with_columns(pl.when(pl.col('deces_datediff_days').is_between(-1, 0)).then(0).otherwise(pl.col('deces_datediff_days')).alias('deces_datediff_days')).filter((pl.col('deces_datediff_days') >= 0) | pl.col('deces_datediff_days').is_null())
+    df_static_0 = df_static_bis.with_columns(pl.when(pl.col('deces_datediff_days').is_between(-1, 0)).then(0).otherwise(pl.col('deces_datediff_days')).alias('deces_datediff_days')).filter((pl.col('deces_datediff_days') >= 0) | pl.col('deces_datediff_days').is_null())
+    return (df_static_0,)
+
+
+@app.cell
+def _(df_static_0):
+    df_static_0
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    On peut aussi trier en fonction du diagnostic principal envisagé
+    """)
+    return
+
+
+@app.cell
+def _(config_dropdown_color, keep_pop, mo):
+    mo.vstack([
+        mo.md(config_dropdown_color),
+        keep_pop,
+        mo.md("</div>")])
+    return
+
+
+@app.cell
+def _(config5, df_static_0, pl):
+    patterns = {
+
+        "Oncology": r"tumeur maligne|cancer|carcinome|lymphome|leucémie|métastase|néoplasie|sarcome",
+
+        "Neurological": r"cerveau|méninges|cérébrale|sous-durale|sous-arachnoïdienne|intracrânienne|intracérébrale|coma|épilepsie|neurologique|avc|encéphalopathie|carotide|nerfs crâniens|vaisseaux cérébraux|grand mal|épileptique|hydrocéphalie|encéphale",
+
+        "Sepsis_Infection": r"septique|sepsis|septicémie|infection|choc septique|endocardite|péritonite|pyonéphrose|abcès|prostatite",
+
+        "Respiratory": r"respiratoire|covid-19|pneumonie|pneumopathie|poumon|broncho|asthme|pleurale|détresse respiratoire|pneumothorax|obstructive chronique|asphyxie|hémoptysie|asthmatique|épanchement pleural|fibrose",
+
+        "Cardiovascular": r"myocarde|cardiaque|aortique|aorte|mitrale|valvule|ischémique|infarctus|cœur|coronaire|arythmie|embolie|thrombose|artère|cardiogénique|ventriculaire|rupture d'une artère|choc|syncope|collapsus|péricarde|cardiopulmonaire",
+
+        "Trauma_Toxicology": r"traumatique|fracture|accident|brûlure|plaie|contusion|intoxication|overdose|substances|bêta-bloquants|benzodiazépines|toxique|monoxyde",
+
+        "Gastro_Renal_Metabolic": r"rénale|rein|hépatique|foie|pancréatite|estomac|intestin|gastrique|œsophage|diabète|acidocétose|varices oesophagiennes|hématémèse|ulcère|néphrite|hypokaliémie|hémopéritoine",
+
+        "Surgical_Procedures": r"dispositif|sutures|pansements|chirurgicaux|soins|examen|greffe"
+
+    }
+
+
+
+    df_static_1 = df_static_0.with_columns(
+
+        pl.col("icu_DP").str.to_lowercase().alias("temp_lower"),
+    )
+
+    condition = pl.when(pl.col("temp_lower").is_null()).then(pl.lit("Unknown"))
+
+    for cat_name, regex in patterns.items():
+
+        condition = condition.when(pl.col("temp_lower").str.contains(regex)).then(pl.lit(cat_name))
+
+    df_static_1 = df_static_1.with_columns(
+
+        condition.otherwise(pl.lit("Other")).alias("category")
+
+    ).to_dummies("category").cast(
+
+        {'encounterId' : pl.Int32}
+
+    )
+
+    if config5.keep_population == "sepsis":
+        df_static_1 = df_static_1.filter(pl.col("category_Sepsis_Infection") == 1)
     return (df_static_1,)
 
 
@@ -362,7 +610,7 @@ def _(extract):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    #### Transformation_Prétraitement
+    ### Transformation_Prétraitement
     """)
     return
 
@@ -398,23 +646,12 @@ def _(mo):
 
 
 @app.cell
-def _(MODES, config_dropdown_color, mo):
-    mode = mo.ui.dropdown(
-        options=MODES,
-        value="24h début réanimation avec remplissage",
-        label="Mode de fonctionnement du fenêtrage",
-    )
+def _(config_dropdown_color, mo, mode):
     mo.vstack([
         mo.md(config_dropdown_color),
         mode,
         mo.md("</div>")])
-    return (mode,)
-
-
-@app.cell
-def _(mode):
-    config = mode.value
-    return (config,)
+    return
 
 
 @app.cell
@@ -563,6 +800,7 @@ def _(df_clean_2, pl, ui):
                                                                                                  | (pl.col("isDeceased_gt_3m") == True)).select(pl.col(ui.patient_col).n_unique()).item())
 
     print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h') == True).select(pl.col(ui.patient_col).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 7 jours après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_7d') == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts moins de 28 jours après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_28d") == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts moins de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_3m") == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts plus de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_gt_3m') == True).select(pl.col(ui.patient_col).n_unique()).item())
@@ -570,23 +808,17 @@ def _(df_clean_2, pl, ui):
 
 
 @app.cell
-def _(MODELS, config_dropdown_color, mo):
-    models = mo.ui.dropdown(
-        options=MODELS,
-        value="InceptionTimeModified",
-        label="Modèle utilisé",
-    )
+def _(config_dropdown_color, mo, models):
     mo.vstack([
         mo.md(config_dropdown_color),
         models,
         mo.md("</div>")])
-    return (models,)
+    return
 
 
 @app.cell
-def _(models):
-    config2 = models.value
-    return (config2,)
+def _():
+    return
 
 
 @app.cell
@@ -605,15 +837,18 @@ def _(mo):
     return
 
 
-@app.cell
-def _(df_clean_2, df_test_1, ui):
-    df_clean_3 = df_clean_2.join(df_test_1[["encounterId","fr", "pas"]], on = ui.patient_col, how = "inner")
-    return (df_clean_3,)
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+ 
+    """)
+    return
 
 
 @app.cell
-def _(df_clean_3, pl):
-    df_clean_48 = df_clean_3.with_columns(
+def _(df_clean_2, pl):
+    # si on a pas la pression artérielle systolique, 
+    df_clean_3 = df_clean_2.with_columns(
         # Supplémentation en oxygène
         (pl.when(pl.col("fio2_corr") != 21).then(2).otherwise(0)
          +
@@ -666,20 +901,7 @@ def _(df_clean_3, pl):
               & (pl.col("heart_rate") <= 130)).then(2)
          .otherwise(1)
         ).alias("news"))
-    return
-
-
-@app.cell
-def _():
-    # df_clean_3 = df_clean2.with_columns(
-    #     pl.when(pl.col("fio2_corr") != 21 then )
-    # )
-    return
-
-
-@app.cell
-def _():
-    return
+    return (df_clean_3,)
 
 
 @app.cell(hide_code=True)
@@ -691,23 +913,12 @@ def _(mo):
 
 
 @app.cell
-def _(FEAT, mo):
-    modex = mo.ui.dropdown(
-        options = list(FEAT.keys()),
-        value = "Mode classique",
-        label = "Choix du mode",
-    )
-    return (modex,)
-
-
-@app.cell
 def _(FEAT, all_features, mo):
     custom_features = mo.ui.multiselect(
         options=all_features,
         value= FEAT["Mode Custom"].keep_feats,
         label="(features sélectionnables)",
     )
-
     return (custom_features,)
 
 
@@ -733,7 +944,7 @@ def _(FEAT, config_dropdown_color, custom_features, dico_terme, mo, modex):
         mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
         mo.md("</div>")
     ])
-    return (keep_feats,)
+    return keep_feats, str_keep_feats
 
 
 @app.cell(hide_code=True)
@@ -745,34 +956,16 @@ def _(mo):
 
 
 @app.cell
-def _(Y, config_dropdown_color, mo):
-    y_dd =  mo.ui.dropdown(
-        options=Y,
-        value="Survie (isDeceased)",
-        label="Cible (y) que le modèle doit prédire",
-    )
+def _(config_dropdown_color, mo, y_dd):
     mo.vstack([
         mo.md(config_dropdown_color),
         y_dd,
         mo.md("</div>")])
-    return (y_dd,)
-
-
-@app.cell
-def _(y_dd):
-    config4 = y_dd.value
-    return (config4,)
-
-
-@app.cell
-def _(config4):
-    print(config4.target_name)
     return
 
 
 @app.cell
-def _(df_clean_2, target_col):
-    print(df_clean_2[target_col].describe())
+def _():
     return
 
 
@@ -783,15 +976,15 @@ def _(test_df):
 
 
 @app.cell
-def _(StratifiedGroupKFold, config4, df_clean_2, keep_feats, pl, ui):
+def _(StratifiedGroupKFold, config4, df_clean_3, keep_feats, pl, ui):
     keep_features = keep_feats
     patient_col = ui.patient_col
     time_col = ui.time_col
     target_col = config4.target_name
     expected_length = 24
-    valid_ids = df_clean_2.group_by(patient_col).len().filter(pl.col('len') == expected_length).select(patient_col)
+    valid_ids = df_clean_3.group_by(patient_col).len().filter(pl.col('len') == expected_length).select(patient_col)
     # On garde les encounters de longueur exacte 
-    df_clean_4 = df_clean_2.join(valid_ids, on=patient_col, how='inner')
+    df_clean_4 = df_clean_3.join(valid_ids, on=patient_col, how='inner')
     if df_clean_4.is_empty():
         raise ValueError("Aucun patient n'a exactement la longueur attendue.")
     df_clean_4 = df_clean_4.sort(patient_col, time_col)
@@ -804,7 +997,7 @@ def _(StratifiedGroupKFold, config4, df_clean_2, keep_feats, pl, ui):
     train_df = df_clean_4[train_idx].sort([patient_col, time_col])
     test_df = df_clean_4[test_idx].sort([patient_col, time_col])
     # On prépare le jeu d'entraînement
-    (train_pd, test_pd) = ui.scaling(train_df, test_df, target_col)
+    (train_pd, test_pd) = ui.scaling(train_df, test_df)
     (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
     (X_train_3d, y_train_seq) = ui.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
     # On prend un split (comme train/test mais adapté aux individus)
@@ -814,8 +1007,6 @@ def _(StratifiedGroupKFold, config4, df_clean_2, keep_feats, pl, ui):
     # On construit la séquence attendue (N, T, F) à partir des deux dataframes train/test
 
     (X_test_3d, y_test_seq) = ui.build_sequences(test_df, patient_col, target_col, expected_length, keep_features)
-
-    print(y_test_seq)
     return (
         X_test_3d,
         X_train_3d,
@@ -827,6 +1018,16 @@ def _(StratifiedGroupKFold, config4, df_clean_2, keep_feats, pl, ui):
         y_test_seq,
         y_train_seq,
     )
+
+
+@app.cell
+def _():
+    # print(train_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+
+    # print(test_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+
+    # print(df_clean_4.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+    return
 
 
 @app.cell
@@ -859,7 +1060,7 @@ def _(train_df):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    #### Training sur InceptionTime
+    ### Training sur InceptionTime
     """)
     return
 
@@ -875,16 +1076,12 @@ def _(config, config2, config3, config4, config_dropdown_color, mo, modex):
 
 
 @app.cell
-def _(config2, config_run_button, mo):
-    import time
-    run = mo.ui.run_button(
-        label=f"Lancer l'entraînement du modèle {config2.models_name}"
-    )
+def _(config_run_button, mo, run):
     mo.vstack([
         mo.md(config_run_button),
         run,
         mo.md("</div>")])
-    return (run,)
+    return
 
 
 @app.cell
@@ -894,33 +1091,47 @@ def _(
     config2,
     config3,
     config4,
+    config5,
+    get_unique_path,
     mo,
     modex,
     run,
     train_inception_time,
     y_train_seq,
 ):
+    # on créé un nom unique de modèle
+    str_pop = ""
+    if config5.keep_population != "all_diseases":
+        str_pop = "_"+config5.keep_population
+    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}_{config5.keep_population}{str_pop}.pt")
+
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
     if config2.models_name == "InceptionTimeModified":
+        # model, T, history, splits = train_inception_time(
+        #     X_train_3d, y_train_seq,
+        #     num_blocks = 6,
+        #     out_channels = 32,
+        #     bottleneck_channels = 8,
+        #     kernel_sizes = 21,
+        #     batch_size = 16,
+        #     lr = 0.0009572131781501278,
+        #     weight_decay = 1.216426840149487e-06,
+        #     clip_grad = 0.5,
+        #     use_scheduler = False,
+        #     epochs=100,
+        #     patience=10,
+        #     save_best_path=path)
         model, T, history, splits = train_inception_time(
             X_train_3d, y_train_seq,
-            num_blocks = 6,
-            out_channels = 32,
-            bottleneck_channels = 8,
-            kernel_sizes = 21,
-            batch_size = 16,
-            lr = 0.0009572131781501278,
-            weight_decay = 1.216426840149487e-06,
-            clip_grad = 0.5,
-            use_scheduler = False,
             epochs=100,
             patience=10,
-            save_best_path=f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}.pt"
-        )
+            save_best_path=model_path
+            )
+
     else :
         print("oups tu t'es trompé")
-    return
+    return (str_pop,)
 
 
 @app.cell(hide_code=True)
@@ -941,12 +1152,23 @@ def _(
     evaluate_on_test,
     load_model_from_checkpoint,
     modex,
+    str_pop,
     y_test_seq,
 ):
-    loaded_model = f"models/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}.pt"
+    loaded_model = f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}{str_pop}.pt"
     (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
     (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
-    return T_1, model_1
+    return T_1, loaded_model, model_1
+
+
+@app.cell
+def _(Path, loaded_model):
+    # construire le dossier output correspondant
+    output_dir = Path("outputs") / Path(loaded_model).stem
+
+    # créer le dossier s'il n'existe pas
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return (output_dir,)
 
 
 @app.cell
@@ -957,23 +1179,54 @@ def _(T_1, X_test_3d, model_1, predict_proba):
 
 
 @app.cell
-def _(plt, probas, roc_auc_score, roc_curve, y_test_seq):
+def _(
+    Path,
+    df_clean_3,
+    modex,
+    output_dir,
+    plt,
+    probas,
+    roc_auc_score,
+    roc_curve,
+    save_figure,
+    target_col,
+    y_test_seq,
+):
     (fpr, tpr, _thresholds) = roc_curve(y_test_seq, probas)
-    _auc = roc_auc_score(y_test_seq, probas)
+    auc = roc_auc_score(y_test_seq, probas)
+    df_temp =  df_clean_3.group_by("encounterId")
     plt.figure(figsize=(6, 6))
-    plt.plot(fpr, tpr, label=f'ROC (AUC = {_auc:.3f})')
-    plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard')
+    plt.plot(fpr, tpr, label=f'ROC trainedModel (AUC = {auc:.3f})')
+    if modex.value == "Mode NEWS" :
+        # Une ligne par patient = dernière heure disponible
+        df_news_patient = (
+            df_clean_3
+            .sort(["encounterId", "heure_calibree"])
+            .group_by("encounterId")
+            .last()
+        )
+
+        # Extraire y_true et NEWS
+        y_news = df_news_patient[target_col].to_numpy()   
+
+        news_score = df_news_patient["news"].to_numpy()
+        fpr_news, tpr_news, _ = roc_curve(y_news, news_score)
+        auc_news = roc_auc_score(y_news, news_score)
+        plt.plot(fpr_news, tpr_news, label=f'ROC NEWS (AUC = {auc_news:.3f})', color = "orange")
+    plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard', color = "green")
     plt.xlabel('Taux de faux positifs')
     plt.ylabel('Taux de vrais positifs')
     plt.title('Courbe ROC')
     plt.legend(loc='lower right')
     plt.grid(True)
+    if save_figure.value :
+        plt.savefig(output_dir / Path("Courbe_ROC"))
     plt.show()
-    return
+    return (auc,)
 
 
 @app.cell
-def _(plt, probas, sns, y_test_seq):
+def _(Path, output_dir, plt, probas, save_figure, sns, y_test_seq):
     plt.figure()
 
     sns.kdeplot(probas[y_test_seq == 0], label="Survivants", fill=True)
@@ -984,45 +1237,23 @@ def _(plt, probas, sns, y_test_seq):
     plt.title("Distribution des scores (KDE)")
     plt.legend()
     plt.grid()
+    if save_figure.value :
+        plt.savefig(output_dir / Path("KDE"))
     plt.show()
     return
 
 
 @app.cell
-def _(plt, probas, sns, y_test_seq):
+def _(
+    Path,
+    calibration_curve,
+    output_dir,
+    plt,
+    probas,
+    save_figure,
+    y_test_seq,
+):
     y_test = y_test_seq
-
-    plt.figure()
-
-    # Survivants
-    data_0 = probas[y_test == 0]
-    sns.kdeplot(data_0, color="lightblue")
-    x0, y0 = plt.gca().lines[-1].get_data()
-    y0 = y0 * len(data_0)  # conversion densité → counts
-    plt.plot(x0, y0, color="blue", label="Survivants")
-    plt.fill_between(x0, y0, alpha=0.3, color="lightblue")
-
-    # Décès
-    data_1 = probas[y_test == 1]
-    sns.kdeplot(data_1, color="orange")
-    x1, y1 = plt.gca().lines[-1].get_data()
-    y1 = y1 * len(data_1)
-    plt.plot(x1, y1, color="orange", label="Décès")
-    plt.fill_between(x1, y1, alpha=0.3, color="orange")
-
-    plt.xlabel("Probabilité prédite")
-    plt.ylabel("Nombre de patients")
-    plt.title("Distribution des scores")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.style.use("seaborn-v0_8")
-    plt.show()
-    return (y_test,)
-
-
-@app.cell
-def _(calibration_curve, plt, probas, y_test):
     prob_true, prob_pred = calibration_curve(y_test, probas, n_bins=10)
 
     plt.figure()
@@ -1034,12 +1265,14 @@ def _(calibration_curve, plt, probas, y_test):
     plt.title("Calibration curve")
     plt.legend()
     plt.grid()
+    if save_figure.value :
+        plt.savefig(output_dir / Path("Calibration_curve"))
     plt.show()
-    return
+    return (y_test,)
 
 
 @app.cell
-def _(f1_score, np, plt, probas, y_test):
+def _(Path, f1_score, np, output_dir, plt, probas, save_figure, y_test):
     _thresholds = np.linspace(0.1, 0.9, 50)
     f1s = []
     best_f1 = 0
@@ -1055,60 +1288,309 @@ def _(f1_score, np, plt, probas, y_test):
     plt.ylabel('F1 score')
     plt.title('F1 vs Threshold')
     plt.grid()
+    if save_figure.value :
+        plt.savefig(output_dir / Path("threshold"))
     plt.show()
     print(f'Le meilleur f1 score de{best_f1: .2f} est atteint lorsque le threshold est égal à{best_t: .2f}')
-    return
+    return (best_t,)
 
 
 @app.cell
-def _(confusion_matrix, plt, probas, sns, y_test):
-    threshold = 0.48
-    y_pred = (probas >= threshold).astype(int)
+def _(
+    Path,
+    best_t,
+    confusion_matrix,
+    output_dir,
+    plt,
+    probas,
+    save_figure,
+    sns,
+    y_test,
+):
+    y_pred = (probas >= best_t).astype(int)
     cm = confusion_matrix(y_test, y_pred)
     plt.figure()
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
     plt.xlabel('Prédit')
     plt.ylabel('Réel')
-    plt.title(f'Confusion matrix (threshold={threshold})')
-    plt.show()
-    return (y_pred,)
-
-
-@app.cell
-def _(pd, plt, y_pred, y_test):
-    df = pd.DataFrame({"y_true" : y_test,
-                       "y_pred" : y_pred})
-
-    df["decile"] = pd.qcut(df["y_pred"], 10, labels = False, duplicates="drop") + 1
-
-    calib = (
-        df.groupby("decile", as_index=False)
-          .agg(
-              n=("y_true", "size"),
-              pred_mean=("y_pred", "mean"),
-              obs_rate=("y_true", "mean"),
-          )
-    )
-
-    fig, ax1 = plt.subplots(figsize=(9, 5))
-    ax2 = ax1.twinx()
-
-    # fond: effectifs
-    ax2.bar(calib["decile"], calib["n"], alpha=0.25)
-    ax2.set_ylabel("Nombre d'individus")
-
-    # premier plan: calibration
-    ax1.plot(calib["decile"], calib["pred_mean"], marker="o", label="Prédit")
-    ax1.plot(calib["decile"], calib["obs_rate"], marker="o", label="Observé")
-    ax1.set_xlabel("Décile de probabilité prédite")
-    ax1.set_ylabel("Probabilité / taux observé")
-    ax1.legend()
+    plt.title(f'Confusion matrix (threshold={ best_t: .2f})')
+    if save_figure.value :
+        plt.savefig(output_dir / Path("confusion_matrix"))
     plt.show()
     return
 
 
 @app.cell
-def _():
+def _(
+    Path,
+    brier_score_loss,
+    output_dir,
+    pl,
+    plt,
+    probas,
+    save_figure,
+    y_test,
+):
+    df_brier = pl.DataFrame({"y" : y_test, "pred" : probas})
+
+    df_brier = df_brier.with_columns(
+        ((pl.col("pred") - pl.col("y")) ** 2).alias("brier")
+    )
+
+    # score global de brier
+    global_brier = brier_score_loss(df_brier["y"], df_brier["pred"])
+
+    # bins fixes de risque
+    df_brier_fixed = (
+        df_brier.with_columns(
+            (
+                pl.col("pred")
+                .clip(0, 0.999999)
+                .mul(10)
+                .floor()
+                .cast(pl.Int64)
+            ).alias("bin_fixed")
+        )
+        .group_by("bin_fixed")
+        .agg([
+            pl.col("brier").mean().alias("brier_mean"),
+            pl.len().alias("n"),
+            pl.col("pred").mean().alias("pred_mean"),
+            pl.col("y").mean().alias("obs_rate"),
+        ])
+        .sort("bin_fixed")
+        .with_columns(
+            ((pl.col("bin_fixed") + 0.5) / 10).alias("x")
+        )
+    )
+
+    # déciles de patients 
+    n_total = df_brier.height
+
+    df_brier_dec = (
+        df_brier.sort("pred")
+        .with_row_count("row_idx")
+        .with_columns(
+            (
+                (pl.col("row_idx") * 10 / n_total)
+                .floor()
+                .clip(upper_bound=9)
+                .cast(pl.Int64)
+            ).alias("decile")
+        )
+        .group_by("decile")
+        .agg([
+            pl.col("brier").mean().alias("brier_mean"),
+            pl.len().alias("n"),
+            pl.col("pred").mean().alias("pred_mean"),
+            pl.col("y").mean().alias("obs_rate"),
+        ])
+        .sort("decile")
+        .with_columns(
+            (pl.col("decile") + 1).alias("x")
+        )
+    )
+
+    fixed_pd = df_brier_fixed.to_pandas()
+    dec_pd = df_brier_dec.to_pandas()
+
+    # Pour avoir 2 plots au même endroit, on utilise twinx
+    fig, ax1 = plt.subplots(figsize=(7, 5))
+
+    ax1.bar(fixed_pd["x"], fixed_pd["n"], width=0.08, alpha=0.3)
+    ax1.set_xlabel("Risque prédit")
+    ax1.set_ylabel("Nombre de patients")
+
+    ax2 = ax1.twinx()
+    ax2.plot(fixed_pd["x"], fixed_pd["brier_mean"], marker="o")
+    ax2.set_ylabel("Brier moyen")
+
+    plt.title("Brier par tranches fixes de risque")
+    plt.tight_layout()
+    if save_figure.value:
+        plt.savefig(output_dir / Path("brierPerTrancheRisk"))
+    plt.show()
+
+
+    fig, ax1 = plt.subplots(figsize=(7, 5))
+
+    ax1.bar(dec_pd["x"], dec_pd["n"], alpha=0.3)
+    ax1.set_xlabel("Décile de patients")
+    ax1.set_ylabel("Nombre de patients")
+
+    ax2 = ax1.twinx()
+    ax2.plot(dec_pd["x"], dec_pd["brier_mean"], marker="o")
+    ax2.set_ylabel("Brier moyen")
+
+    plt.title("Brier par déciles de patients")
+    plt.tight_layout()
+    if save_figure.value:
+        plt.savefig(output_dir / Path("brierPerDec"))
+    plt.show()
+
+
+    fig, ax1 = plt.subplots(figsize=(7, 5))
+
+    # Histogramme des patients
+    ax1.bar(dec_pd["x"], dec_pd["n"], alpha=0.3, color='grey', edgecolor='black')
+    ax1.set_xlabel("Décile de patients")
+    ax1.set_ylabel("Nombre de patients")
+
+    # Courbe de calibration
+    ax2 = ax1.twinx()
+    ax2.plot(dec_pd["x"], dec_pd["obs_rate"], marker="o", label="Mortalité observée", color="black")
+    ax2.plot(dec_pd["x"], dec_pd["pred_mean"], marker="s", label="Risque prédit", color="black", linestyle="--")
+    ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
+
+    plt.title("Courbe de Calibration par déciles de patients")
+    fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
+    plt.tight_layout()
+    if save_figure.value:
+        plt.savefig(output_dir / Path("calibPerDec"))
+    plt.show()
+
+
+    fig, ax1 = plt.subplots(figsize=(7, 5))
+
+    # Histogramme des patients (Tranches fixes)
+    ax1.bar(fixed_pd["x"], fixed_pd["n"], width=0.08, alpha=0.3, color='grey', edgecolor='black')
+    ax1.set_xlabel("Risque prédit (Tranches de 10%)")
+    ax1.set_ylabel("Nombre de patients")
+    ax1.set_xlim(0, 1)
+
+    # Courbe de calibration (axe Y droit)
+    ax2 = ax1.twinx()
+    ax2.plot(fixed_pd["x"], fixed_pd["obs_rate"], marker="o", label="Mortalité observée", color="black", linestyle="-")
+    ax2.plot(fixed_pd["x"], fixed_pd["pred_mean"], marker="s", label="Risque moyen prédit", color="black", linestyle="--")
+    ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
+    ax2.set_ylim(0, 1) 
+
+    plt.title("Courbe de Calibration par tranches fixes de risque")
+    fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
+    plt.tight_layout()
+    if save_figure.value:
+        plt.savefig(output_dir / Path("calibPerTrancheRisk"))
+    plt.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Progression de NEWS moyenne sur 24h
+    """)
+    return
+
+
+@app.cell
+def _(Path, df_clean_3, output_dir, pl, plt, save_figure, ui):
+    # D'abord, on met tous les patients sur le même temps pour pouvoir les merge
+    df_modif = df_clean_3.with_columns(
+        pl.arange(0,pl.count()).over(ui.patient_col).alias("hour_local")
+    )
+    df_modif_agg = (
+    df_modif.group_by("hour_local")
+    .agg([
+        pl.col("news").mean().alias("mean"),
+        pl.col("news").std().alias("std"),
+        pl.count().alias("n")
+    ])
+    .sort("hour_local")
+    )
+    df_modif_agg = df_modif_agg.with_columns([
+            (pl.col("mean") - 1.96 * pl.col("std") / pl.col("n").sqrt()).alias("lower"),
+            (pl.col("mean") + 1.96 * pl.col("std") / pl.col("n").sqrt()).alias("upper")
+        ])
+    plt.plot(df_modif_agg["hour_local"], df_modif_agg["mean"], color="purple")
+    plt.fill_between(
+        df_modif_agg["hour_local"],
+        df_modif_agg["lower"],
+        df_modif_agg["upper"],
+        color="purple",
+        alpha=0.2
+    )
+
+    plt.xlabel("Temps (heures)")
+    plt.ylabel("NEWS score")
+    plt.title("Évolution du score NEWS sur 24 heures")
+    if save_figure.value :
+        plt.savefig(output_dir / Path("NEWS_24H"))
+    plt.show()
+    return (df_modif,)
+
+
+@app.cell
+def _(
+    Path,
+    auc,
+    df_modif,
+    np,
+    output_dir,
+    pl,
+    plt,
+    roc_auc_score,
+    save_figure,
+    target_col,
+):
+    rows = []
+    for h in sorted(df_modif["hour_local"].unique().to_list()):
+        df_h = df_modif.filter(pl.col("hour_local") == h)
+        y_true = df_h[target_col].to_numpy()
+        y_score = df_h["news"].to_numpy()
+
+        auc_news_h = np.nan if len(np.unique(y_true)) < 2 else roc_auc_score(y_true, y_score)
+        rows.append({"hour_local": h, "auc": auc_news_h})
+
+    df_auc = pl.DataFrame(rows).sort("hour_local")
+
+
+    plt.plot(df_auc["hour_local"], df_auc["auc"], color="purple", label = 'AUC par heure de NEWS')
+    plt.axhline(y = auc, label = "AUC globale du modèle")
+    plt.xlabel("Temps (heures)")
+    plt.ylabel("AUC de NEWS")
+    plt.title("Évolution de l'AUC de NEWS sur 24 heures")
+    plt.legend()
+    if save_figure.value :
+        plt.savefig(output_dir / Path("AUC_NEWS_24H"))
+    plt.show()
+    return
+
+
+@app.cell
+def _(
+    cleaning,
+    config_sidebar,
+    custom_features,
+    keep_feats,
+    keep_pop,
+    mo,
+    mode,
+    models,
+    modex,
+    run,
+    save_figure,
+    str_keep_feats,
+    y_dd,
+):
+    mo.sidebar(
+    mo.vstack([
+        mo.md(config_sidebar),
+        mode,
+        models,
+        cleaning,
+        y_dd,
+        keep_pop,
+        modex,
+        custom_features if modex.value == "Mode Custom" else "(features fixe)",
+        mo.md(f"**Features gardées :** `{keep_feats}`"),
+        mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
+        save_figure,
+        mo.md("==============================================="),
+        run,
+        mo.md("==============================================="),
+        mo.md(f" \n \n **Modification Thesaurus** : Afin d'avoir des valeurs cohérentes, avec une bonne imputation notamment, j'ai rajouté la pression artérielle systolique ainsi que la fréquence respiratoire. Il faudra voir aussi si on laisse les valeurs par défaut à 0 ou non. J'ai pris le parti pris pour la pas et fr de mettre en valeur par défaut une valeur qui fait un score de 0 sur news, sinon ça augmenterait le score juste parce qu'on a pas l'info ce qui n'est pas optimal... J'ai donc 130 pour pas en imputation method ffill_bfill et 16 pour fr en ffill_bfill aussi. Je me suis rendu compte que la valeur par défaut de heart_rate et spo2 était aussi de 0. Cela classe donc instantanément le patient en grave, alors qu'on a juste pas l'information... j'ai mis pour heart_rate une valeur par défaut de 60 et un spo2 de 96%. Je pense qu'il faudra qu'on fasse un point sur les valeurs par défaut du thesaurus car la majorité sont à 0, ce qui peut poser problème"),
+        mo.md("</div>")]),
+    width = "550px")
     return
 
 
