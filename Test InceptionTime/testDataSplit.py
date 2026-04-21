@@ -6,7 +6,6 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from dataclasses import dataclass
     import marimo as mo
     import numpy as np
     import pandas as pd
@@ -27,18 +26,17 @@ def _():
     from pathlib import Path
     from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.preprocessing import StandardScaler
-
-    from Extraction import extract
-    from Transformation_Pretraitement import preprocessing_polars
-    from inceptionTimeModified import (
+    from utilitaries.models.inceptionTimeModified import (
         evaluate_on_test,
         load_model_from_checkpoint,
         predict_proba,
         train_inception_time,
     )
-    import utils_inception as ui
+    import utilitaries.inception_utils as ui
+    import utilitaries.marimo_utils as mo_utils
+    import utilitaries.extract_data_utils as extract
 
-    return extract, mo, pl, plt, preprocessing_polars, ui
+    return extract, mo, mo_utils, pl, plt, ui
 
 
 @app.cell(hide_code=True)
@@ -66,6 +64,33 @@ def _(gap_end, gap_start, get_max_hour, mo, set_max_hour):
 def _(gap_end, gap_start, get_max_hour, mo, set_max_hour):
     number_max_hour = mo.ui.number(gap_start, gap_end, value=get_max_hour(), on_change=set_max_hour)
     return (number_max_hour,)
+
+
+@app.cell
+def _(mo):
+    get_marge, set_marge = mo.state(24)
+    gap2_start, gap2_end = 0, 24
+    return gap2_end, gap2_start, get_marge, set_marge
+
+
+@app.cell
+def _(gap2_end, gap2_start, get_marge, mo, set_marge):
+    slider_marge = mo.ui.slider(gap2_start, gap2_end, value=get_marge(), on_change=set_marge)
+    return (slider_marge,)
+
+
+@app.cell
+def _(gap2_end, gap2_start, get_marge, mo, set_marge):
+    number_marge = mo.ui.number(gap2_start, gap2_end, value=get_marge(), on_change=set_marge)
+    return (number_marge,)
+
+
+@app.cell
+def _(mo):
+    run = mo.ui.run_button(
+        label=f"Lancer la visualisation"
+    )
+    return (run,)
 
 
 @app.cell
@@ -116,8 +141,41 @@ def _(df_test_1, pl):
 
 
 @app.cell
-def _(df_test_1, pl):
-    marge = 12
+def _(df_test_2):
+    df_test_2.describe()
+    return
+
+
+@app.cell
+def _(
+    mo,
+    mo_utils,
+    number_marge,
+    number_max_hour,
+    run,
+    slider_marge,
+    slider_max_hour,
+):
+    # slider and number are synchronized to have the same value (try it!)
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        mo.md("Durée sanctuarisée avant la sortie du patient"),
+        slider_max_hour,
+        number_max_hour,
+        mo.md("-------------------------------"),
+        mo.md("Marge d'erreur de l'étiquetage pour permettre un plus grand aléatoire"),
+        slider_marge,
+        number_marge,
+        mo.md("-------------------------------"),
+        run,
+        mo.md(mo_utils.config_end)])
+    return
+
+
+@app.cell
+def _(df_test_1, mo, pl, run):
+    marge = 0
+    mo.stop(not run.value, "Clique pour lancer")
     df_test_2 = df_test_1.with_columns([
         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
           .then(1)
@@ -164,31 +222,28 @@ def _(df_test_1, pl):
 
 
 @app.cell
-def _(df_test_2):
-    df_test_2.describe()
-    return
-
-
-@app.cell
-def _(mo, number_max_hour, slider_max_hour):
-    # slider and number are synchronized to have the same value (try it!)
-    mo.vstack([
-        mo.md("Durée sanctuarisée avant la sortie du patient"),
-        slider_max_hour,
-        number_max_hour])
-    return
-
-
-@app.cell
-def _(df_test_2, get_max_hour, preprocessing_polars):
+def _(df_test_2, extract, get_max_hour):
     max_hour = get_max_hour()
-    df_clean = preprocessing_polars.prepare_data(df_test_2, hour_offset = 0, random = True, max_hour = 0, used_distribution="flexible", target_col = "isDeceased_lt_24h_EXTENDED")
+    df_clean = extract.prepare_data(df_test_2, hour_offset = 0, random = False, max_hour = 12, used_distribution="flexible", target_col = "isDeceased_lt_24h_EXTENDED", other_cols = ["isDeceased_lt_24h"])
     return (df_clean,)
+
+
+@app.cell(hide_code=True)
+def _(df_clean, mo, pl, ui):
+    mo.md(rf"""
+    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item()}**
+
+    pourcentage de 1 réels dans ces patients devant être étiquetés 1 : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item()*100:.2f}%**
+    """)
+    return
 
 
 @app.cell
 def _(df_clean, pl, ui):
     print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item())
+
+
+    print("pourcentage de 0 dans ces patients devant être étiquetés 1 :", df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
     return
 
 
@@ -246,13 +301,116 @@ def _(df_test_2, pl, plt):
 
 
 @app.cell
-def _(config_sidebar, mo):
+def _(df_test_1, extract, pl, ui):
+    import itertools
+    import plotly.express as px
+
+    # 1. Définir les plages de valeurs à tester 
+    durees_sanctuarisees = [0, 6, 12]
+    marges_erreur = [0, 6, 12, 18, 24, 30]
+    resultats = []
+
+    # 2. Boucler sur toutes les combinaisons possibles
+    for duree_i, marge_i in itertools.product(durees_sanctuarisees, marges_erreur):
+
+        df_test_for = df_test_1.with_columns([
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge_i)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h_EXTENDED")
+        ])
+
+        df_clean2 = extract.prepare_data(
+            df_test_for, 
+            hour_offset = 0, 
+            random = True,
+            strict_mode = True,
+            max_hour = duree_i, 
+            used_distribution="flexible", 
+            target_col = "isDeceased_lt_24h_EXTENDED", 
+            other_cols = ["isDeceased_lt_24h"]
+        )
+
+        # --- Calcul 1 : Nombre de patients ---
+        nb_patients = df_clean2.filter(
+            pl.col('isDeceased_lt_24h_EXTENDED') == 1
+        ).select(pl.col(ui.patient_col).n_unique()).item()
+
+        # --- Calcul 2 : Proportion de vrais 1 ---
+        prop_vrais_1 = df_clean2.filter(
+            pl.col('isDeceased_lt_24h_EXTENDED') == 1
+        ).select(pl.col("isDeceased_lt_24h")).mean().item()
+
+        # Stocker le résultat de cette combinaison
+        resultats.append({
+            "Duree_Sanctuarisee": duree_i,
+            "Marge_Erreur": marge_i,
+            "Nb_Patients": nb_patients,
+            "Proportion_Vrais_1": prop_vrais_1
+        })
+
+    # 3. Créer un DataFrame récapitulatif
+    df_results = pl.DataFrame(resultats)
+
+    # === PLOTS AVEC PLOTLY ===
+
+    # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
+    fig1 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Nb_Patients", 
+        histfunc="avg", 
+        title="Impact sur le Nombre de Patients gardés",
+        color_continuous_scale="Viridis",
+        text_auto=True 
+    )
+    fig1.show()
+
+    # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
+    fig2 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Proportion_Vrais_1", 
+        histfunc="avg",
+        title="Impact sur la Proportion de vrais '1'",
+        color_continuous_scale="RdBu", 
+        text_auto=".2f" 
+    )
+    fig2.show()
+    return
+
+
+@app.cell
+def _(
+    mo,
+    mo_utils,
+    number_marge,
+    number_max_hour,
+    run,
+    slider_marge,
+    slider_max_hour,
+):
     mo.sidebar(
     mo.vstack([
-        mo.md(config_sidebar),
-    
-        mo.md("</div>")]),
-    width = "550px")
+        mo.md(mo_utils.config_sidebar),
+        mo.md("Durée sanctuarisée avant la sortie du patient"),
+        slider_max_hour,
+        number_max_hour,
+        mo.md("-------------------------------"),
+        mo.md("Marge d'erreur de l'étiquetage pour permettre un plus grand aléatoire"),
+        slider_marge,
+        number_marge,
+        mo.md("-------------------------------"),
+        run,
+        mo.md(mo_utils.config_end)]),
+    width = "300px")
     return
 
 
