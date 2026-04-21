@@ -8,3 +8,5 @@ __pycache__/
 */.ipynb_checkpoints/
 *.png
 */models/
+**/__marimo__/
+*/maybe useful/

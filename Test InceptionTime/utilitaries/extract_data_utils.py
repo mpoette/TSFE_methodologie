@@ -201,13 +201,14 @@ def _prepare_base_data(df, target_col, other_cols, used_distribution):
     if TIME_COL not in df.columns or ID_COL not in df.columns:
         raise ValueError(f"Colonnes temporelle ou ID absentes.")
 
-    # Cast et nettoyage
+    # Cast et nettoyage (par précaution)
     df = df.with_columns(pl.col(TIME_COL).cast(pl.Float64, strict=False)).drop_nulls(subset=TIME_COL)
     if df.is_empty():
         print(f" │   ├─ {time_str} ── ✕ Blocage : Temps invalides")
         return None, None
 
-    # Recalage temporel
+    # Recalage temporel par rapport à la sortie : 0 = dernière heure, négatif = passé
+    # On arrondit en coupant les composantes à virgules
     df = df.with_columns(pl.col(TIME_COL).floor().alias("heure_entiere"))
     df = df.with_columns(
         (pl.col("heure_entiere") - pl.col("heure_entiere").max().over(ID_COL)).alias("heure_calibree")
@@ -333,7 +334,7 @@ def _generate_fixed_windows(patients, hour_offset, max_hour):
         )
 
 
-def _finalize_data(df_windows, df_agg, strict_mode):
+def _finalize_data(df_windows, df_agg, strict_mode, seuil):
     """Effectue la jointure, le filtrage strict, l'imputation et les features finales."""
     thesaurus = _load_thesaurus(THESAURUS_PATH)
     
@@ -343,7 +344,6 @@ def _finalize_data(df_windows, df_agg, strict_mode):
     
     # Filtrage strict
     if strict_mode:
-        seuil = 1
         valid_ids = (
             df_full.group_by(ID_COL)
             .agg(pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present"))
