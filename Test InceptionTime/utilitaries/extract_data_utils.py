@@ -17,12 +17,14 @@ ID_COL      = 'encounterId'
 TIME_COL    = 'delta_hour'
 WINDOW_SIZE = 24
 THESAURUS_PATH = "utilitaries/thesaurus.json"
-def load_thesaurus(filepath: str = THESAURUS_PATH) -> dict:
+
+
+def _load_thesaurus(filepath: str = THESAURUS_PATH) -> dict:
     """Charge la configuration des variables cliniques."""
     with open(filepath, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def apply_generic_aggregation(
+def _apply_generic_aggregation(
     df: pl.DataFrame,
     thesaurus: dict,
     id_col: str,
@@ -69,7 +71,7 @@ def apply_generic_aggregation(
  
     return df.group_by([id_col, time_col]).agg(agg_exprs)
  
-def apply_generic_imputation(
+def _apply_generic_imputation(
     df: pl.DataFrame,
     thesaurus: dict,
     id_col: str,
@@ -183,264 +185,223 @@ def extract_data_survie(file_path):
     return df
 
 
-def prepare_data(df, hour_offset=0, random = False, max_hour = 0, used_distribution = "uniform", strict_mode = False,
- target_col = "isDeceased_lt_24h"):
-    # Extraction des features importantes
-    thesaurus = load_thesaurus(THESAURUS_PATH)
- 
+# ==========================================
+# 1. FONCTIONS AUXILIAIRES A PREPARE_DATA
+# ==========================================
+
+def _prepare_base_data(df, target_col, other_cols, used_distribution):
+    """Nettoie, recale le temps et agrège les données historiques."""
+    thesaurus = _load_thesaurus(THESAURUS_PATH)
+    time_str = "XX:XX"
+    
     if df.is_empty():
         print(" │   ├─ XX:XX (H-0) ── ✕ Blocage : DataFrame vide")
-        return pl.DataFrame()
- 
-    if TIME_COL not in df.columns:
-        raise ValueError(f"Colonne temporelle absente : {TIME_COL}")
- 
-    if ID_COL not in df.columns:
-        raise ValueError(f"Colonne identifiant absente : {ID_COL}")
+        return None, None
+        
+    if TIME_COL not in df.columns or ID_COL not in df.columns:
+        raise ValueError(f"Colonnes temporelle ou ID absentes.")
 
-    time_str = "XX:XX"
- 
-    # par précaution, on retransforme delta_hour en float si c'est pas déjà le cas
-    
-    df = df.with_columns(pl.col(TIME_COL).cast(pl.Float64, strict = False))
-    df = df.drop_nulls(subset=TIME_COL)
- 
+    # Cast et nettoyage
+    df = df.with_columns(pl.col(TIME_COL).cast(pl.Float64, strict=False)).drop_nulls(subset=TIME_COL)
     if df.is_empty():
-        print(f" │   ├─ {time_str} (H-{hour_offset}) ── ✕ Blocage : Temps invalides")
-        return pl.DataFrame()
- 
-    # 1) Temps entier : on arrondit en coupant les composantes à virgules
+        print(f" │   ├─ {time_str} ── ✕ Blocage : Temps invalides")
+        return None, None
+
+    # Recalage temporel
     df = df.with_columns(pl.col(TIME_COL).floor().alias("heure_entiere"))
- 
-    # 2) Recalage par rapport à la sortie : 0 = dernière heure, négatif = passé
     df = df.with_columns(
-    (
-        pl.col("heure_entiere")
-        - pl.col("heure_entiere").max().over(ID_COL)
-    ).alias("heure_calibree")
+        (pl.col("heure_entiere") - pl.col("heure_entiere").max().over(ID_COL)).alias("heure_calibree")
     )
- 
-    # 3) On garde uniquement l'historique jusqu'à l'heure cible
-    # Pourquoi garder plus sachant que pour l'instant la fenêtre n'est pas glissante ?
-    # ligne peut-être inutile mais dans le doute je la laisse
+    
     df_history = df.filter(pl.col("heure_calibree") <= 0)
- 
     if df_history.is_empty():
-        print(f" │   ├─ {time_str} (H-{hour_offset}) ── ✕ Blocage : Historique vide")
-        return pl.DataFrame()
-    # 4) Agrégation
-    df_agg = apply_generic_aggregation(
-        df_history,
-        thesaurus,
-        ID_COL,
-        "heure_calibree"
-    )
-    if used_distribution == "flexible" :
-        # TODO : petite bidouille pour garder target_col mais faudra que je le fasse plus propre que ça
-        target_by_hour = df_history.select([ID_COL, "heure_calibree", target_col]).unique()
+        print(f" │   ├─ {time_str} ── ✕ Blocage : Historique vide")
+        return None, None
+
+    # Agrégation
+    df_agg = _apply_generic_aggregation(df_history, thesaurus, ID_COL, "heure_calibree")
+    
+    if used_distribution == "flexible":
+        target_by_hour = df_history.select([ID_COL, "heure_calibree", target_col] + other_cols).unique()
         df_agg = df_agg.join(target_by_hour, on=[ID_COL, "heure_calibree"], how="left")
-    # 5) Si c'est aléatoire, on calcule l'offset pour chaque patient
-    patients = (
-        df_agg
-        .group_by(ID_COL)
-        .agg(
-            pl.col("heure_calibree").min().alias("min_h")
-            )
-    )
-    if random :
-        if used_distribution == "uniform" : 
-            offsets = np.array([
-                np.random.randint(0, max(1,(-min_h - max_hour - (WINDOW_SIZE - 1)) + 1))
-                for min_h in patients["min_h"].to_list()
-            ])
-        elif used_distribution == "real" :
-            patients = patients.with_columns(
-                (-pl.col("min_h")).alias("max_h")
-            )
-            real_distribution = patients["max_h"].to_numpy()
-            offsets = []
-            count = 0
-            for max_h in real_distribution:
 
-                max_offset = max(1, (max_h - max_hour - (WINDOW_SIZE - 1)) + 1)
+    # Calcul des patients (min_h)
+    patients = df_agg.group_by(ID_COL).agg(pl.col("heure_calibree").min().alias("min_h"))
+    
+    return df_agg, patients
 
-                possible_offsets = real_distribution[real_distribution <= max_offset]
 
-                if len(possible_offsets) == 0:
-                    print("oups")
-                    offset = 0  # fallback safe
-                    count +=1
-                else:
-                    offset = np.random.choice(possible_offsets)
-
-                offsets.append(offset)
-        elif used_distribution == "flexible" :
-            # 1) On identifie pour chaque patient les heures où target_col == 1
-            # On filtre déjà pour respecter la sanctuarisation (max_hour)
-            # On récupère la liste des heures avec cible = 1 par patient
-            target_info = (
-                df_agg
-                .filter((pl.col("heure_calibree") <= -max_hour) & (pl.col(target_col) == 1))
-                .group_by(ID_COL)
-                .agg(pl.col("heure_calibree").alias("heures_positives"))
-            )
-
-            # 2) On rejoint cette info avec nos patients pour décider du start_h
-            patients_selection = patients.join(target_info, on=ID_COL, how="left")
+def _generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig):
+    """Construit les fenêtres temporelles selon une distribution aléatoire."""
+    if used_distribution == "uniform": 
+        offsets = np.array([
+            np.random.randint(0, max(1, (-min_h - max_hour - (WINDOW_SIZE - 1)) + 1))
+            for min_h in patients["min_h"].to_list()
+        ])
+    elif used_distribution == "real":
+        patients = patients.with_columns((-pl.col("min_h")).alias("max_h"))
+        real_distribution = patients["max_h"].to_numpy()
+        offsets = []
+        for max_h in real_distribution:
+            max_offset = max(1, (max_h - max_hour - (WINDOW_SIZE - 1)) + 1)
+            possible_offsets = real_distribution[real_distribution <= max_offset]
+            if len(possible_offsets) == 0:
+                offset = 0  # fallback safe
+            else:
+                offset = np.random.choice(possible_offsets)
+            offsets.append(offset)
             
-            offsets = []
-            for row in patients_selection.iter_rows(named=True):
-                h_pos = row["heures_positives"]
-                min_h = row["min_h"]
-                
-                # Détermination du début de fenêtre (start_h)
-                chosen_start = None
-                
-                # Règle : Si on a des moments où target_col == 1
-                if h_pos is not None and len(h_pos) > 0:
-                    # On ne garde que les départs qui permettent de tenir la WINDOW_SIZE sans dépasser -max_hour
-                    # Si on veut que la cible soit DANS la fenêtre, le start_h doit être 
-                    # entre (h - WINDOW_SIZE + 1) et h :
-                    possibilites = [h for h in h_pos if h + (WINDOW_SIZE - 1) <= -max_hour]
-                    
-                    if possibilites:
-                        chosen_start = rd.choice(possibilites)
-                    else:
-                        # Si on ne peut pas avoir 24h d'affilé après le '1', on prend le max possible
-                        chosen_start = max(h_pos) - (WINDOW_SIZE - 1)
-                
-                # Si pas de cible == 1 ou si aucune fenêtre valide trouvée au dessus
-                if chosen_start is None:
-                    max_possible_start = -max_hour - (WINDOW_SIZE - 1)
-                    if max_possible_start > min_h:
-                        chosen_start = rd.randint(int(min_h), int(max_possible_start))
-                    else:
-                        chosen_start = min_h
+    elif used_distribution == "flexible":
+        target_info = (
+            df_agg.filter((pl.col("heure_calibree") <= -max_hour) & (pl.col(target_col) == 1))
+            .group_by(ID_COL).agg(pl.col("heure_calibree").alias("heures_positives"))
+        )
+        patients_selection = patients.join(target_info, on=ID_COL, how="left")
+        
+        offsets = []
+        for row in patients_selection.iter_rows(named=True):
+            h_pos = row["heures_positives"]
+            min_h = row["min_h"]
+            chosen_start = None
+            
+            if h_pos is not None and len(h_pos) > 0:
+                possibilites = [h for h in h_pos if h + (WINDOW_SIZE - 1) <= -max_hour]
+                if possibilites:
+                    chosen_start = rd.choice(possibilites)
+                else:
+                    chosen_start = max(h_pos) - (WINDOW_SIZE - 1)
+            
+            if chosen_start is None:
+                max_possible_start = -max_hour - (WINDOW_SIZE - 1)
+                if max_possible_start > min_h:
+                    chosen_start = rd.randint(int(min_h), int(max_possible_start))
+                else:
+                    chosen_start = min_h
+            offsets.append(chosen_start)
+            
+        offsets = [int(x) for x in offsets]
+    else:
+        print(f"Distribution {used_distribution} non prise en charge")
+        return None
 
-                offsets.append(chosen_start)
-            offsets = [int(x) for x in offsets]
-            # 3) On génère la structure finale pour la distribution 'flexible'
-            df_windows = (
-                patients
-                .with_columns(pl.Series("start_h", offsets))
-                .with_columns(
-                    pl.int_ranges(
-                        pl.col("start_h"),
-                        pl.col("start_h") + WINDOW_SIZE
-                    ).alias("heure_calibree")
-                )
-                .explode("heure_calibree")
-                .select([ID_COL, "heure_calibree"])
-            )
-        else:
-            print(f"Distribution {used_distribution} non prise en charge ")
-            return pl.DataFrame()
+    if show_fig:
         x = np.array(offsets)
         q05, q95 = np.quantile(x, [0.05, 0.95])
         x_filtered = x[(x >= q05) & (x <= q95)]
         plt.figure(figsize=(10, 6))
         plt.hist(x_filtered, bins=100, color='skyblue', edgecolor='black')
-        plt.title(f"Distribution des offsets relatifs (Début admission + X heures)\nLoi: {used_distribution}")
-        plt.xlabel("Heures après le début de l'admission")
-        plt.ylabel("Nombre de patients")
-        plt.grid(alpha=0.3)
+        plt.title(f"Distribution des offsets relatifs (sanctuarisation : {max_hour})\nLoi: {used_distribution}")
         plt.show()
-
-        patients = patients.with_columns(
-            pl.Series("hour_offset", offsets)
-        )
-    else:
-        patients = patients.with_columns(
-            pl.lit(hour_offset).alias("hour_offset")
-        )
-    if hour_offset == -1:
-        df_windows = (
-            patients
-            .with_columns(
-                pl.int_ranges(
-                    -(WINDOW_SIZE - 1) - max_hour,
-                    1 - max_hour
-                ).alias("heure_calibree")
-            )
+    
+    if used_distribution == "flexible" :
+        # Retour anticipé spécifique à "flexible" car il utilise des offsets absolus
+        return (
+            patients.with_columns(pl.Series("start_h", offsets))
+            .with_columns(pl.int_ranges(pl.col("start_h"), pl.col("start_h") + WINDOW_SIZE).alias("heure_calibree"))
             .explode("heure_calibree")
             .select([ID_COL, "heure_calibree"])
         )
 
-    else:
-        df_windows = (
-            patients
-            .with_columns(
-                (pl.col("min_h") + pl.col("hour_offset")).alias("start_h")
-            )
-            .with_columns(
-                (pl.col("start_h") + (WINDOW_SIZE - 1)).alias("end_h")
-            )
-            .with_columns(
-                pl.int_ranges(
-                    pl.col("start_h"),
-                    pl.col("end_h") + 1,
-                ).alias("heure_calibree")
-            )
-            .explode("heure_calibree")
-            .select([ID_COL, "heure_calibree"])
-            )
-    # Join avec les données agrégées pour faire apparaître les heures manquantes
-    df_agg = df_agg.with_columns([pl.col("heure_calibree").cast(pl.Int64),
-                                  pl.lit(1).alias("real_hour"),
-                                  ])
-    df_full = (
-        df_windows
-        .join(
-            df_agg,
-            on=[ID_COL, "heure_calibree"],
-            how="left"
-        )
-        .sort([ID_COL, "heure_calibree"])
+    # Application des offsets (pour Uniform et Real)
+    patients = patients.with_columns(pl.Series("hour_offset", offsets))
+    return (
+        patients.with_columns((pl.col("min_h") + pl.col("hour_offset")).alias("start_h"))
+        .with_columns((pl.col("start_h") + (WINDOW_SIZE - 1)).alias("end_h"))
+        .with_columns(pl.int_ranges(pl.col("start_h"), pl.col("end_h") + 1).alias("heure_calibree"))
+        .explode("heure_calibree")
+        .select([ID_COL, "heure_calibree"])
     )
-    # là actuellement, un patient n'est gardé que s'il a au moins une mesure par heure, 
-    # n'importe laquelle, d'où le faible nombre de données gardées
-    # TODO : Il faudrait donc baisser le seuil.
-    # Par exemple, dire qu'on garde que si le patient a 50% 
-    # des heures avec des mesures
-    seuil = 1
+
+
+def _generate_fixed_windows(patients, hour_offset, max_hour):
+    """Construit les fenêtres de manière fixe, sans aléatoire."""
+    patients = patients.with_columns(pl.lit(hour_offset).alias("hour_offset"))
+    
+    if hour_offset == -1:
+        return (
+            patients.with_columns(pl.int_ranges(-(WINDOW_SIZE - 1) - max_hour, 1 - max_hour).alias("heure_calibree"))
+            .explode("heure_calibree")
+            .select([ID_COL, "heure_calibree"])
+        )
+    else:
+        return (
+            patients.with_columns((pl.col("min_h") + pl.col("hour_offset")).alias("start_h"))
+            .with_columns((pl.col("start_h") + (WINDOW_SIZE - 1)).alias("end_h"))
+            .with_columns(pl.int_ranges(pl.col("start_h"), pl.col("end_h") + 1).alias("heure_calibree"))
+            .explode("heure_calibree")
+            .select([ID_COL, "heure_calibree"])
+        )
+
+
+def _finalize_data(df_windows, df_agg, strict_mode):
+    """Effectue la jointure, le filtrage strict, l'imputation et les features finales."""
+    thesaurus = _load_thesaurus(THESAURUS_PATH)
+    
+    # Jointure
+    df_agg = df_agg.with_columns([pl.col("heure_calibree").cast(pl.Int64), pl.lit(1).alias("real_hour")])
+    df_full = df_windows.join(df_agg, on=[ID_COL, "heure_calibree"], how="left").sort([ID_COL, "heure_calibree"])
+    
+    # Filtrage strict
     if strict_mode:
-        valid_ids = (df_full.group_by(ID_COL).agg(
-            pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present")
+        seuil = 1
+        valid_ids = (
+            df_full.group_by(ID_COL)
+            .agg(pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present"))
+            .filter(pl.col("nb_hour_present") >= WINDOW_SIZE * seuil)
+            .select(ID_COL)
         )
-        .filter(pl.col("nb_hour_present") >= WINDOW_SIZE * seuil).select(ID_COL)
-        )
-        df_full = df_full.join(valid_ids, on = ID_COL, how = "inner")
+        df_full = df_full.join(valid_ids, on=ID_COL, how="inner")
+        
     df_full = df_full.drop('real_hour')
-
     if df_full.is_empty():
-        print(f" │   ├─ {time_str} (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
-        return pl.DataFrame()
+        return df_full
 
-    # 6) Imputation
-    df_full = apply_generic_imputation(df_full, thesaurus, ID_COL)
+    # Imputation
+    df_full = _apply_generic_imputation(df_full, thesaurus, ID_COL)
 
-    # 7) Gestion de la dialyse
+    # Variables Dialyse
     missing_dial_cols = []
     for _col, _def in [("dialyse_hdi", 0), ("dialyse_cvvhf", 0), ("abs_dialyse", 1)]:
         if _col not in df_full.columns:
-            missing_dial_cols.append(
-                pl.lit(_def).cast(pl.Float64).alias(_col)
-            )
-    
+            missing_dial_cols.append(pl.lit(_def).cast(pl.Float64).alias(_col))
+            
     if missing_dial_cols:
         df_full = df_full.with_columns(missing_dial_cols)
-    
+        
     df_full = df_full.with_columns(
-        (
-            (
-                (pl.col("dialyse_hdi") == 0) &
-                (pl.col("dialyse_cvvhf") == 0)
-            )
-            .cast(pl.Int64)
-            .alias("abs_dialyse")
-        )
+        ((pl.col("dialyse_hdi") == 0) & (pl.col("dialyse_cvvhf") == 0)).cast(pl.Int64).alias("abs_dialyse")
     )
     
+    return df_full
+
+
+# ==========================================
+# 2. FONCTION PRINCIPALE (L'Orchestrateur)
+# ==========================================
+
+def prepare_data(df, hour_offset=0, random=False, max_hour=0, used_distribution="uniform", 
+                 strict_mode=False, target_col="isDeceased_lt_24h", other_cols=None, show_fig = True):
+    
+    if other_cols is None: other_cols = []
+    
+    # Etape 1 : Nettoyage et Agrégation
+    df_agg, patients = _prepare_base_data(df, target_col, other_cols, used_distribution)
+    if df_agg is None:
+        return pl.DataFrame()
+
+    # Etape 2 : Construction des fenêtres (Routing Random vs Fixed)
+    if random:
+        df_windows = _generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig)
+    else:
+        df_windows = _generate_fixed_windows(patients, hour_offset, max_hour)
+
+    if df_windows is None or df_windows.is_empty():
+        print(f" │   ├─ (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
+        return pl.DataFrame()
+
+    # Etape 3 : Finalisation (Jointure, Imputation, Features)
+    df_full = _finalize_data(df_windows, df_agg, strict_mode)
+
     return df_full
 
 

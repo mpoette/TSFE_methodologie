@@ -1,5 +1,7 @@
 import marimo as mo
 from dataclasses import dataclass
+
+
 # Configurations globales des widgets marimo
 config_dropdown_color = "<div style='background:#F0FFD4;padding:8px;border-radius:6px'>"
 
