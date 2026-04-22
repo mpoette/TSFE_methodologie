@@ -48,9 +48,10 @@ def _():
         train_lstm_model,
     )
 
-    import utilitaries.inception_utils as ui
+    import utilitaries.preprocessing_utils as ui
     import utilitaries.marimo_utils as mo_utils
     import utilitaries.extract_data_utils as extract
+    import utilitaries.preprocessing_utils as preproc
 
     return (
         Path,
@@ -71,12 +72,12 @@ def _():
         plt,
         predict_proba,
         predict_proba_lstm,
+        preproc,
         roc_auc_score,
         roc_curve,
         sns,
         train_inception_time,
         train_lstm_model,
-        ui,
     )
 
 
@@ -286,7 +287,7 @@ def _(mo):
 
 @app.cell
 def _():
-    all_features = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf', 'fr', 'pas']
+    all_features = ['heure_calibree', 'pam', 'pad', 'heart_rate', 'spo2', 'temp', 'fio2_corr', 'glyc_cap', 'nad_dose_poids', 'is_ventilated', 'is_conscious', 'is_sedated', 'is_not_alert', 'age', 'creat', 'num_plq', 'bili_tot', 'tp', 'abs_dialyse', 'dialyse_hdi', 'dialyse_cvvhf', 'fr', 'pas', "hx_respi_chronique"]
     return (all_features,)
 
 
@@ -316,6 +317,7 @@ def _():
         "abs_dialyse" : "Dialyse ou non",
         "dialyse_hdi" : "Dialyse HDI ou non",
         "dialyse_cvvhf" : "Dialyse CVVHF ou non",
+        "hx_respi_chronique" : "Antécédents de problème de respiration chronique ou non"
     }
     return (dico_terme,)
 
@@ -368,10 +370,10 @@ def _(mo):
 
 
 @app.cell
-def _(pl, ui):
+def _(extract, pl):
     _path = '../Datasets/clean_full_static_ano.parquet'
     df_static = pl.read_parquet(_path)
-    df_static = df_static.with_columns(pl.col(ui.patient_col).cast(pl.Int32))
+    df_static = df_static.with_columns(pl.col(extract.ID_COL).cast(pl.Int32))
     # df_static = df_static.filter(pl.col("adm_unit").is_in(["RANGUEIL DECHO. REA.","NEURO-CHIR REA", "PURPAN DECHO. REA.", "RANGUEIL REA. POLY.", "PURPAN REA. POLY."	]))
     return (df_static,)
 
@@ -503,6 +505,12 @@ def _(df_static_2):
     return
 
 
+@app.cell
+def _(df_static_2):
+    df_static_2["hx_respi_chronique"].describe()
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -543,8 +551,8 @@ def _(mo):
 
 
 @app.cell
-def _(df_static_2, df_test, ui):
-    df_test_1 = df_test.join(df_static_2[[ui.patient_col, 'age', 'deces_datediff_days']], on=ui.patient_col, how='left')
+def _(df_static_2, df_test, extract):
+    df_test_1 = df_test.join(df_static_2[[extract.ID_COL, 'age', 'deces_datediff_days', "hx_respi_chronique"]], on=extract.ID_COL, how='left')
     return (df_test_1,)
 
 
@@ -730,6 +738,24 @@ def _(df_clean, pl):
     return
 
 
+@app.cell
+def _(df_clean):
+    df_clean["hx_respi_chronique"].describe()
+    return
+
+
+@app.cell
+def _(df_clean):
+    df_clean["pas"].describe()
+    return
+
+
+@app.cell
+def _(df_clean):
+    df_clean["is_ventilated"].describe()
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -740,7 +766,7 @@ def _(mo):
 
 @app.cell
 def _(df_clean):
-    # df_clean_1 = df_clean.join(df_static_2[[ui.patient_col, 'isDeceased']], on=ui.patient_col, how='inner')
+    # df_clean_1 = df_clean.join(df_static_2[[extract.ID_COL, 'isDeceased']], on=extract.ID_COL, how='inner')
     df_clean_2 = df_clean
     return (df_clean_2,)
 
@@ -772,32 +798,32 @@ def _(mo):
 
 
 @app.cell
-def _(df_clean_2, pl, ui):
-    # print("nombre d'enregistrement de patients vivants (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == False).select(pl.col(ui.patient_col).n_unique()).item())
+def _(df_clean_2, extract, pl):
+    # print("nombre d'enregistrement de patients vivants (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == False).select(pl.col(extract.ID_COL).n_unique()).item())
     print("nombre d'enregistrement de patients vivants (DeceasedTimeType)", df_clean_2.filter((pl.col('isDeceased_lt_24h') == False)
                                                                                                  & (pl.col("isDeceased_lt_28d") == False)
                                                                                                  & (pl.col("isDeceased_lt_3m") == False)
                                                                                                  & (pl.col("isDeceased_lt_7d") == False)
-                                                                                                 & (pl.col("isDeceased_gt_3m") == False)).select(pl.col(ui.patient_col).n_unique()).item())
-    # print("nombre d'enregistrement de patients morts (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == True).select(pl.col(ui.patient_col).n_unique()).item())
+                                                                                                 & (pl.col("isDeceased_gt_3m") == False)).select(pl.col(extract.ID_COL).n_unique()).item())
+    # print("nombre d'enregistrement de patients morts (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == True).select(pl.col(extract.ID_COL).n_unique()).item())
     print("nombre d'enregistrement de patients morts (4 features)", df_clean_2.filter((pl.col('isDeceased_lt_24h') == True)
            | (pl.col("isDeceased_lt_7d") == True)                                                | (pl.col("isDeceased_lt_28d") == True)
                                                                                                  | (pl.col("isDeceased_lt_3m") == True)
-                                                                                                 | (pl.col("isDeceased_gt_3m") == True)).select(pl.col(ui.patient_col).n_unique()).item())
+                                                                                                 | (pl.col("isDeceased_gt_3m") == True)).select(pl.col(extract.ID_COL).n_unique()).item())
 
-    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h') == True).select(pl.col(ui.patient_col).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h') == True).select(pl.col(extract.ID_COL).n_unique()).item())
 
-    print("nombre d'enregistrement de patients morts moins de 24 heures + marge après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == True).select(pl.col(ui.patient_col).n_unique()).item())
-    print("nombre d'enregistrement de patients morts moins de 7 jours après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_7d') == True).select(pl.col(ui.patient_col).n_unique()).item())
-    print("nombre d'enregistrement de patients morts moins de 28 jours après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_28d") == True).select(pl.col(ui.patient_col).n_unique()).item())
-    print("nombre d'enregistrement de patients morts moins de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_3m") == True).select(pl.col(ui.patient_col).n_unique()).item())
-    print("nombre d'enregistrement de patients morts plus de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_gt_3m') == True).select(pl.col(ui.patient_col).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 24 heures + marge après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == True).select(pl.col(extract.ID_COL).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 7 jours après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_7d') == True).select(pl.col(extract.ID_COL).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 28 jours après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_28d") == True).select(pl.col(extract.ID_COL).n_unique()).item())
+    print("nombre d'enregistrement de patients morts moins de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_3m") == True).select(pl.col(extract.ID_COL).n_unique()).item())
+    print("nombre d'enregistrement de patients morts plus de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_gt_3m') == True).select(pl.col(extract.ID_COL).n_unique()).item())
     return
 
 
 @app.cell
-def _(df_clean_2, pl, ui):
-    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item())
+def _(df_clean_2, extract, pl):
+    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(extract.ID_COL).n_unique()).item())
 
 
     print("pourcentage de 0 dans ces patients devant être étiquetés 1 :", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
@@ -834,70 +860,78 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
- 
-    """)
-    return
-
-
 @app.cell
 def _(df_clean_2, pl):
-    # si on a pas la pression artérielle systolique, 
-    df_clean_3 = df_clean_2.with_columns(
-        # Supplémentation en oxygène
-        (pl.when(pl.col("fio2_corr") != 21).then(2).otherwise(0)
-         +
-        # Fréquence respiratoire
-        pl.when((pl.col("fr") <= 8) |
-               (pl.col("fr") >=25)).then(3)
-            .when((pl.col("fr") >= 21)
-                  & (pl.col("fr") <= 24)).then(2)
-            .when((pl.col("fr")) <= 20 
-                  & (pl.col("fr") >= 12)).then(0)
-            .otherwise(1)
-        +
-        # Saturation en oxygène
-        pl.when((pl.col("spo2") <= 91.0)).then(3)
-        .when((pl.col("spo2") >= 92.0)
-            & (pl.col("spo2") <= 93.0)).then(2)
-        .when((pl.col("spo2") >= 94.0)
-             & (pl.col("spo2") <= 95)).then(1)
-        .otherwise(0)
-        +
-        # Température
-        pl.when((pl.col("temp") <= 35.0)).then(3)
-        .when(((pl.col('temp') >= 35.1)
+    # Supplémentation en oxygène
+    sup_oxy = (pl.when(pl.col("fio2_corr") != 21).then(2).otherwise(0))
+
+    # Fréquence respiratoire
+    fr = pl.when((pl.col("fr") <= 8) |
+               (pl.col("fr") >=25)).then(3).when((pl.col("fr") >= 21)
+                  & (pl.col("fr") <= 24)).then(2).when((pl.col("fr")) <= 20 
+                  & (pl.col("fr") >= 12)).then(0).otherwise(1)
+
+    # Saturation en oxygène
+    spo2_classic = pl.when((pl.col("spo2") <= 91.0)).then(3).when((pl.col("spo2") >= 92.0)
+            & (pl.col("spo2") <= 93.0)).then(2).when((pl.col("spo2") >= 94.0)
+             & (pl.col("spo2") <= 95)).then(1).otherwise(0)
+
+    # Température
+    temp = pl.when((pl.col("temp") <= 35.0)).then(3).when(((pl.col('temp') >= 35.1)
              & (pl.col("temp") <= 36.0))
              |
              ((pl.col("temp") <= 39.0)
-             & (pl.col("temp") >= 38.1))).then(1)
-        .when((pl.col("temp") >= 39.1)).then(2)
-         .otherwise(0)
-         +
-         # Consience
-         pl.when((pl.col("is_conscious")) == 0).then(0)
-         .otherwise(3)
-         +
-         # Pression Artérielle Systolique
-         pl.when((pl.col("pas") <= 90.0)
-                | (pl.col('pas') >= 220.0)).then(3)
-         .when((pl.col("pas") <= 110.0)
-              & (pl.col("pas") >= 101.0)).then(1)
-         .when((pl.col("pas") <= 219.0)
-              & (pl.col("pas") >= 111)).then(0)
-         .otherwise(2)
-         +
-         # Fréquence cardiaque
-         pl.when((pl.col("heart_rate") <= 40)
-                |(pl.col("heart_rate") >= 131)).then(3)
-         .when((pl.col("heart_rate") <= 90) 
-              & (pl.col("heart_rate") >= 51)).then(0)
-         .when((pl.col("heart_rate") >= 111)
-              & (pl.col("heart_rate") <= 130)).then(2)
-         .otherwise(1)
-        ).alias("news"))
+             & (pl.col("temp") >= 38.1))).then(1).when((pl.col("temp") >= 39.1)).then(2).otherwise(0)
+
+    # Conscience
+    conscience = pl.when((pl.col("is_conscious")) == 0).then(0).otherwise(3)
+
+    # Pression Artérielle Systolique
+    pas = pl.when((pl.col("pas") <= 90.0)
+                | (pl.col('pas') >= 220.0)).then(3).when((pl.col("pas") <= 110.0)
+              & (pl.col("pas") >= 101.0)).then(1).when((pl.col("pas") <= 219.0)
+              & (pl.col("pas") >= 111)).then(0).otherwise(2)
+
+    # Fréquence cardiaque
+    hr = pl.when((pl.col("heart_rate") <= 40)
+                |(pl.col("heart_rate") >= 131)).then(3).when((pl.col("heart_rate") <= 90) 
+              & (pl.col("heart_rate") >= 51)).then(0).when((pl.col("heart_rate") >= 111)
+              & (pl.col("heart_rate") <= 130)).then(2).otherwise(1)
+
+    df_clean_3 = df_clean_2.with_columns((
+        sup_oxy + fr + spo2_classic + temp
+        + conscience + pas + hr).alias("news"))
+
+    # Saturation en oxygène NEWS2 
+    # TODO ATTENTION LA ON UTILISE hx_respi_chronique et pas hx_hypercapnie (qui n'existe pas)
+    spo2_NEWS2 = (
+        pl.when(pl.col("hx_respi_chronique") == 1)
+        .then(
+            pl.when(pl.col("spo2") <= 83).then(3)
+            .when((pl.col("spo2") >= 84) & (pl.col("spo2") <= 85)).then(2)
+            .when((pl.col("spo2") >= 86) & (pl.col("spo2") <= 87)).then(1)
+            .when((pl.col("spo2") >= 88) & (pl.col("spo2") <= 92)).then(0)
+            .when(
+                (pl.col("spo2") >= 93) & (pl.col("spo2") <= 94) &
+                (pl.col("fio2_corr") != 21)
+            ).then(1)
+            .when(
+                (pl.col("spo2") >= 95) & (pl.col("spo2") <= 96) &
+                (pl.col("fio2_corr") != 21)
+            ).then(2)
+            .when(
+                (pl.col("spo2") >= 97) &
+                (pl.col("fio2_corr") != 21)
+            ).then(3)
+            .otherwise(0)
+        )
+        .otherwise(spo2_classic)
+    )
+
+
+    df_clean_3 = df_clean_3.with_columns((
+        sup_oxy + fr + spo2_NEWS2 + temp
+        + conscience + pas + hr).alias("news2"))
     return (df_clean_3,)
 
 
@@ -920,14 +954,13 @@ def _(all_features, mo, mo_utils):
 
 
 @app.cell
-def _(custom_features, dico_terme, mo, mo_utils, modex):
-
-    if modex.value =="Mode classique":
-        keep_feats = mo_utils.FEAT["Mode classique"].keep_feats
-    elif modex.value == "Mode NEWS":
-        keep_feats = mo_utils.FEAT["Mode NEWS"].keep_feats
-    else:
+def _(all_features, custom_features, dico_terme, mo, mo_utils, modex):
+    if modex.value == "Mode All":
+        keep_feats = all_features
+    elif modex.value == "Mode Custom":
         keep_feats = custom_features.value
+    else:
+        keep_feats = mo_utils.FEAT[modex.value].keep_feats
 
     str_keep_feats = ""
 
@@ -975,14 +1008,15 @@ def _(
     StratifiedGroupKFold,
     config6,
     df_clean_3,
+    extract,
     keep_feats,
     pl,
+    preproc,
     target_col,
-    ui,
 ):
     keep_features = keep_feats
-    patient_col = ui.patient_col
-    time_col = ui.time_col
+    patient_col = extract.ID_COL
+    time_col = extract.TIME_COL2
     expected_length = 24
     valid_ids = df_clean_3.group_by(patient_col).len().filter(pl.col('len') == expected_length).select(patient_col)
     # On garde les encounters de longueur exacte 
@@ -1011,7 +1045,7 @@ def _(
 
     if config6.balance_method == "downsampling_50-50":
         # Downsampling uniquement sur le train
-        train_df = ui.downsample_train_patients(
+        train_df = preproc.downsample_train_patients(
             train_df=train_df,
             patient_col=patient_col,
             col_24h="isDeceased_lt_24h",
@@ -1019,16 +1053,16 @@ def _(
         )
 
     # On prépare le jeu d'entraînement
-    (train_df, test_df) = ui.scaling(train_df, test_df)
+    (train_df, test_df) = preproc.scaling(train_df, test_df)
     # (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
-    (X_train_3d, y_train_seq) = ui.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
+    (X_train_3d, y_train_seq) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
     # On prend un split (comme train/test mais adapté aux individus)
     # Normalement pas besoin de sort mais soyons prudents...
     # Ok maintenant, on applique le scaler sur le dataframe
     # On retransforme en df polars
     # On construit la séquence attendue (N, T, F) à partir des deux dataframes train/test
 
-    (X_test_3d, y_test_seq) = ui.build_sequences(test_df, patient_col, target_col, expected_length, keep_features)
+    (X_test_3d, y_test_seq) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, keep_features)
     return (
         X_test_3d,
         X_train_3d,
@@ -1097,12 +1131,16 @@ def _(config, config2, config3, config4, mo, mo_utils, modex):
 
 
 @app.cell
-def _(mo, mo_utils, run):
+def _(config6, mo, mo_utils, run):
     mo.vstack([
         mo.md(mo_utils.config_run_button),
         run,
         mo.md(mo_utils.config_end)])
-    return
+
+    underscore = "_"
+    if config6.balance_method == "":
+        underscore = ""
+    return (underscore,)
 
 
 @app.cell
@@ -1126,13 +1164,14 @@ def _(
     run,
     train_inception_time,
     train_lstm_model,
+    underscore,
     y_train_seq,
 ):
     # on créé un nom unique de modèle
     str_pop = ""
     if config5.keep_population != "all_diseases":
         str_pop = "_"+config5.keep_population
-    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}_{modex.value}{str_pop}.pt")
+    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt")
 
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
@@ -1166,7 +1205,13 @@ def _(
             )
     else :
         print("oups tu t'es trompé")
-    return (str_pop,)
+    return model_path, str_pop
+
+
+@app.cell
+def _(model_path):
+    print(model_path)
+    return
 
 
 @app.cell(hide_code=True)
@@ -1191,9 +1236,10 @@ def _(
     load_model_from_checkpoint,
     modex,
     str_pop,
+    underscore,
     y_test_seq,
 ):
-    loaded_model = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{modex.value}{str_pop}.pt"
+    loaded_model = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt"
     if config2.models_name == "InceptionTimeModified":
         (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
         (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
@@ -1207,13 +1253,19 @@ def _(
 
 
 @app.cell
-def _(Path, loaded_model):
+def _(Path, config2, loaded_model):
     # construire le dossier output correspondant
-    output_dir = Path("outputs") / Path(loaded_model).stem
+    output_dir = Path("outputs") / Path(config2.models_name) / Path(loaded_model).stem
 
     # créer le dossier s'il n'existe pas
     output_dir.mkdir(parents=True, exist_ok=True)
     return (output_dir,)
+
+
+@app.cell
+def _(Path, loaded_model):
+    print(Path(loaded_model).stem)
+    return
 
 
 @app.cell
@@ -1229,6 +1281,7 @@ def _(T_1, X_test_3d, config2, model_1, predict_proba, predict_proba_lstm):
 @app.cell
 def _(
     Path,
+    config2,
     df_clean_3,
     modex,
     output_dir,
@@ -1244,9 +1297,9 @@ def _(
     auc = roc_auc_score(y_test_seq, probas)
     df_temp =  df_clean_3.group_by("encounterId")
     plt.figure(figsize=(6, 6))
-    plt.plot(fpr, tpr, label=f'ROC trainedModel (AUC = {auc:.3f})')
-    if modex.value == "Mode NEWS" :
-        # Une ligne par patient = dernière heure disponible
+    plt.plot(fpr, tpr, label=f'ROC {config2.models_name} (AUC = {auc:.3f})')
+    print(modex.value, modex.value == "Mode NEWS2", modex.value in ["Mode NEWS", "Mode NEWS2"])
+    if modex.value in ["Mode NEWS", "Mode NEWS2"] :
         df_news_patient = (
             df_clean_3
             .sort(["encounterId", "heure_calibree"])
@@ -1258,13 +1311,18 @@ def _(
         y_news = df_news_patient[target_col].to_numpy()   
 
         news_score = df_news_patient["news"].to_numpy()
+        news2_score = df_news_patient["news2"].to_numpy()
         fpr_news, tpr_news, _ = roc_curve(y_news, news_score)
         auc_news = roc_auc_score(y_news, news_score)
         plt.plot(fpr_news, tpr_news, label=f'ROC NEWS (AUC = {auc_news:.3f})', color = "orange")
+        fpr_news2, tpr_news2, _ = roc_curve(y_news, news2_score)
+        auc_news2 = roc_auc_score(y_news, news2_score)
+        plt.plot(fpr_news2, tpr_news2, label=f'ROC NEWS2 (AUC = {auc_news2:.3f})', color = "#E07604")
+
     plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard', color = "green")
     plt.xlabel('Taux de faux positifs')
     plt.ylabel('Taux de vrais positifs')
-    plt.title('Courbe ROC')
+    plt.title(f'Courbe ROC du modèle {config2.models_name} pour les features du {modex.value}')
     plt.legend(loc='lower right')
     plt.grid(True)
     if save_figure.value :
@@ -1274,7 +1332,17 @@ def _(
 
 
 @app.cell
-def _(Path, output_dir, plt, probas, save_figure, sns, y_test_seq):
+def _(
+    Path,
+    config2,
+    modex,
+    output_dir,
+    plt,
+    probas,
+    save_figure,
+    sns,
+    y_test_seq,
+):
     plt.figure()
 
     sns.kdeplot(probas[y_test_seq == 0], label="Survivants", fill=True)
@@ -1282,7 +1350,7 @@ def _(Path, output_dir, plt, probas, save_figure, sns, y_test_seq):
 
     plt.xlabel("Probabilité prédite")
     plt.ylabel("Densité")
-    plt.title("Distribution des scores (KDE)")
+    plt.title(f"Distribution des scores (KDE) de {config2.models_name} pour les features du {modex.value}")
     plt.legend()
     plt.grid()
     if save_figure.value :
@@ -1295,6 +1363,8 @@ def _(Path, output_dir, plt, probas, save_figure, sns, y_test_seq):
 def _(
     Path,
     calibration_curve,
+    config2,
+    modex,
     output_dir,
     plt,
     probas,
@@ -1305,12 +1375,12 @@ def _(
     prob_true, prob_pred = calibration_curve(y_test, probas, n_bins=10)
 
     plt.figure()
-    plt.plot(prob_pred, prob_true, marker="o", label="Modèle")
+    plt.plot(prob_pred, prob_true, marker="o", label=f"{config2.models_name}")
     plt.plot([0, 1], [0, 1], "--", label="Calibration idéale")
 
     plt.xlabel("Probabilité prédite")
     plt.ylabel("Fréquence observée")
-    plt.title("Calibration curve")
+    plt.title(f"Calibration curve de {config2.models_name} pour le {modex.value}")
     plt.legend()
     plt.grid()
     if save_figure.value :
@@ -1320,7 +1390,18 @@ def _(
 
 
 @app.cell
-def _(Path, f1_score, np, output_dir, plt, probas, save_figure, y_test):
+def _(
+    Path,
+    config2,
+    f1_score,
+    modex,
+    np,
+    output_dir,
+    plt,
+    probas,
+    save_figure,
+    y_test,
+):
     _thresholds = np.linspace(0.1, 0.9, 50)
     f1s = []
     best_f1 = 0
@@ -1334,7 +1415,7 @@ def _(Path, f1_score, np, output_dir, plt, probas, save_figure, y_test):
     plt.plot(_thresholds, f1s)
     plt.xlabel('Threshold')
     plt.ylabel('F1 score')
-    plt.title('F1 vs Threshold')
+    plt.title(f"Evolution du F1 score en fonction du Threshold pour le modèle {config2.models_name} avec le {modex.value}")
     plt.grid()
     if save_figure.value :
         plt.savefig(output_dir / Path("threshold"))
@@ -1347,7 +1428,9 @@ def _(Path, f1_score, np, output_dir, plt, probas, save_figure, y_test):
 def _(
     Path,
     best_t,
+    config2,
     confusion_matrix,
+    modex,
     output_dir,
     plt,
     probas,
@@ -1361,7 +1444,7 @@ def _(
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
     plt.xlabel('Prédit')
     plt.ylabel('Réel')
-    plt.title(f'Confusion matrix (threshold={ best_t: .2f})')
+    plt.title(f'Confusion matrix du modèle {config2.models_name} sur {modex.value} (threshold={ best_t: .2f})')
     if save_figure.value :
         plt.savefig(output_dir / Path("confusion_matrix"))
     plt.show()
@@ -1372,6 +1455,7 @@ def _(
 def _(
     Path,
     brier_score_loss,
+    modex,
     output_dir,
     pl,
     plt,
@@ -1453,7 +1537,7 @@ def _(
     ax2.plot(fixed_pd["x"], fixed_pd["brier_mean"], marker="o")
     ax2.set_ylabel("Brier moyen")
 
-    plt.title("Brier par tranches fixes de risque")
+    plt.title(f"Brier par tranches fixes de risque pour le {modex.value}")
     plt.tight_layout()
     if save_figure.value:
         plt.savefig(output_dir / Path("brierPerTrancheRisk"))
@@ -1470,7 +1554,7 @@ def _(
     ax2.plot(dec_pd["x"], dec_pd["brier_mean"], marker="o")
     ax2.set_ylabel("Brier moyen")
 
-    plt.title("Brier par déciles de patients")
+    plt.title(f"Brier par déciles de patients pour le {modex.value}")
     plt.tight_layout()
     if save_figure.value:
         plt.savefig(output_dir / Path("brierPerDec"))
@@ -1490,7 +1574,7 @@ def _(
     ax2.plot(dec_pd["x"], dec_pd["pred_mean"], marker="s", label="Risque prédit", color="black", linestyle="--")
     ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
 
-    plt.title("Courbe de Calibration par déciles de patients")
+    plt.title(f"Courbe de Calibration par déciles de patients pour le {modex.value}")
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
@@ -1513,7 +1597,7 @@ def _(
     ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
     ax2.set_ylim(0, 1) 
 
-    plt.title("Courbe de Calibration par tranches fixes de risque")
+    plt.title(f"Courbe de Calibration par tranches fixes de risque pour le {modex.value}")
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
@@ -1531,10 +1615,10 @@ def _(mo):
 
 
 @app.cell
-def _(Path, df_clean_3, output_dir, pl, plt, save_figure, ui):
+def _(Path, df_clean_3, extract, modex, output_dir, pl, plt, save_figure):
     # D'abord, on met tous les patients sur le même temps pour pouvoir les merge
     df_modif = df_clean_3.with_columns(
-        pl.arange(0,pl.count()).over(ui.patient_col).alias("hour_local")
+        pl.arange(0,pl.count()).over(extract.ID_COL).alias("hour_local")
     )
     df_modif_agg = (
     df_modif.group_by("hour_local")
@@ -1558,9 +1642,31 @@ def _(Path, df_clean_3, output_dir, pl, plt, save_figure, ui):
         alpha=0.2
     )
 
+    df_modif_agg_news2 = (
+    df_modif.group_by("hour_local")
+    .agg([
+        pl.col("news2").mean().alias("mean"),
+        pl.col("news2").std().alias("std"),
+        pl.count().alias("n")
+    ])
+    .sort("hour_local")
+    )
+    df_modif_agg_news2 = df_modif_agg_news2.with_columns([
+            (pl.col("mean") - 1.96 * pl.col("std") / pl.col("n").sqrt()).alias("lower"),
+            (pl.col("mean") + 1.96 * pl.col("std") / pl.col("n").sqrt()).alias("upper")
+        ])
+    plt.plot(df_modif_agg_news2["hour_local"], df_modif_agg_news2["mean"], color="pink")
+    plt.fill_between(
+        df_modif_agg_news2["hour_local"],
+        df_modif_agg_news2["lower"],
+        df_modif_agg_news2["upper"],
+        color="pink",
+        alpha=0.3
+    )
+
     plt.xlabel("Temps (heures)")
     plt.ylabel("NEWS score")
-    plt.title("Évolution du score NEWS sur 24 heures")
+    plt.title(f"Évolution du score NEWS sur 24 heures pour les features du {modex.value}")
     if save_figure.value :
         plt.savefig(output_dir / Path("NEWS_24H"))
     plt.show()
@@ -1571,7 +1677,9 @@ def _(Path, df_clean_3, output_dir, pl, plt, save_figure, ui):
 def _(
     Path,
     auc,
+    config2,
     df_modif,
+    modex,
     np,
     output_dir,
     pl,
@@ -1581,22 +1689,28 @@ def _(
     target_col,
 ):
     rows = []
+    rows2 = []
     for h in sorted(df_modif["hour_local"].unique().to_list()):
         df_h = df_modif.filter(pl.col("hour_local") == h)
         y_true = df_h[target_col].to_numpy()
         y_score = df_h["news"].to_numpy()
+        y_score_news2 = df_h["news2"].to_numpy()
 
         auc_news_h = np.nan if len(np.unique(y_true)) < 2 else roc_auc_score(y_true, y_score)
+        auc_news2_h = np.nan if len(np.unique(y_true)) < 2 else roc_auc_score(y_true, y_score_news2)
         rows.append({"hour_local": h, "auc": auc_news_h})
+        rows2.append({"hour_local": h, "auc": auc_news2_h})
 
     df_auc = pl.DataFrame(rows).sort("hour_local")
+    df_auc_news2 = pl.DataFrame(rows2).sort("hour_local")
 
 
     plt.plot(df_auc["hour_local"], df_auc["auc"], color="purple", label = 'AUC par heure de NEWS')
-    plt.axhline(y = auc, label = "AUC globale du modèle")
+    plt.plot(df_auc_news2["hour_local"], df_auc_news2["auc"], color="pink", label = 'AUC par heure de NEWS2')
+    plt.axhline(y = auc, label = f"AUC globale de {config2.models_name}")
     plt.xlabel("Temps (heures)")
-    plt.ylabel("AUC de NEWS")
-    plt.title("Évolution de l'AUC de NEWS sur 24 heures")
+    plt.ylabel("AU")
+    plt.title(f"Évolution de l'AUC de NEWS sur 24 heures pour les features du {modex.value}")
     plt.legend()
     if save_figure.value :
         plt.savefig(output_dir / Path("AUC_NEWS_24H"))

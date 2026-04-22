@@ -156,7 +156,13 @@ FEAT = {
     "Mode NEWS" : ConfigFeatures(
         keep_feats = ["fio2_corr", "fr", "spo2", "temp", "is_conscious", "pas", "heart_rate"]
     ),
+    "Mode NEWS2" : ConfigFeatures(
+        keep_feats = ["fio2_corr", "fr", "spo2", "temp", "is_conscious", "pas", "heart_rate", "hx_respi_chronique"]
+    ),
     "Mode Custom" : ConfigFeatures(
+        keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
+    ),
+    "Mode All" : ConfigFeatures(
         keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
     )
 }

@@ -1,42 +1,19 @@
 import marimo
 
-__generated_with = "0.23.1"
+__generated_with = "0.23.2"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
     import marimo as mo
-    import numpy as np
-    import pandas as pd
     import polars as pl
-    import time
     import matplotlib.pyplot as plt
-    import seaborn as sns
-    import optuna
-    import math
-    from sklearn.calibration import calibration_curve
-    from sklearn.metrics import (
-        confusion_matrix,
-        f1_score,
-        roc_auc_score,
-        roc_curve,
-        brier_score_loss
-    )
-    from pathlib import Path
-    from sklearn.model_selection import StratifiedGroupKFold
-    from sklearn.preprocessing import StandardScaler
-    from utilitaries.models.inceptionTimeModified import (
-        evaluate_on_test,
-        load_model_from_checkpoint,
-        predict_proba,
-        train_inception_time,
-    )
     import utilitaries.inception_utils as ui
     import utilitaries.marimo_utils as mo_utils
     import utilitaries.extract_data_utils as extract
 
-    return extract, mo, mo_utils, pl, plt, ui
+    return extract, mo, mo_utils, pl, ui
 
 
 @app.cell(hide_code=True)
@@ -173,8 +150,8 @@ def _(
 
 
 @app.cell
-def _(df_test_1, mo, pl, run):
-    marge = 0
+def _(df_test_1, get_marge, mo, pl, run):
+    marge = get_marge()
     mo.stop(not run.value, "Clique pour lancer")
     df_test_2 = df_test_1.with_columns([
         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
@@ -224,7 +201,7 @@ def _(df_test_1, mo, pl, run):
 @app.cell
 def _(df_test_2, extract, get_max_hour):
     max_hour = get_max_hour()
-    df_clean = extract.prepare_data(df_test_2, hour_offset = 0, random = False, max_hour = 12, used_distribution="flexible", target_col = "isDeceased_lt_24h_EXTENDED", other_cols = ["isDeceased_lt_24h"])
+    df_clean = extract.prepare_data(df_test_2, hour_offset = 0, random = True, max_hour = max_hour, used_distribution="flexible", target_col = "isDeceased_lt_24h_EXTENDED", other_cols = ["isDeceased_lt_24h"], strict_mode = True)
     return (df_clean,)
 
 
@@ -232,6 +209,8 @@ def _(df_test_2, extract, get_max_hour):
 def _(df_clean, mo, pl, ui):
     mo.md(rf"""
     nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item()}**
+
+    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h') == 1).select(pl.col(ui.patient_col).n_unique()).item()}**
 
     pourcentage de 1 réels dans ces patients devant être étiquetés 1 : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item()*100:.2f}%**
     """)
@@ -248,142 +227,150 @@ def _(df_clean, pl, ui):
 
 
 @app.cell
-def _(df_test_2, pl, plt):
-    cols_flags = [
-        "isDeceased_lt_24h",
-        "isDeceased_lt_28d",
-        "isDeceased_lt_3m",
-    ]
+def _():
+    # cols_flags = [
+    #     "isDeceased_lt_24h",
+    #     "isDeceased_lt_28d",
+    #     "isDeceased_lt_3m",
+    # ]
 
-    # Calcul des limites (on vire les 1% les plus extrêmes du passé et du futur)
-    stats = df_test_2.select([
-        pl.col("delta_hour").quantile(0.01).alias("q01"),
-        pl.col("delta_hour").quantile(0.99).alias("q99")
-    ]).row(0)
+    # # Calcul des limites (on vire les 1% les plus extrêmes du passé et du futur)
+    # stats = df_test_2.select([
+    #     pl.col("delta_hour").quantile(0.01).alias("q01"),
+    #     pl.col("delta_hour").quantile(0.99).alias("q99")
+    # ]).row(0)
 
-    q01 = max(stats[0], -2000) 
-    q99 = stats[1]
+    # q01 = max(stats[0], -2000) 
+    # q99 = stats[1]
 
-    print(f"Fenêtre d'analyse : de {q01}h à {q99}h")
+    # print(f"Fenêtre d'analyse : de {q01}h à {q99}h")
 
-    # 2) Filtrage et agrégation directe
-    dist = (
-        df_test_2
-        .with_columns(pl.col("delta_hour").round(0).cast(pl.Int64))
-        .drop_nulls(subset=["delta_hour"])
-        .filter(pl.col("delta_hour").is_between(q01, q99))
-        .group_by("delta_hour")
-        .agg([pl.col(c).sum() for c in cols_flags])
-        .sort("delta_hour")
-    )
+    # # 2) Filtrage et agrégation directe
+    # dist = (
+    #     df_test_2
+    #     .with_columns(pl.col("delta_hour").round(0).cast(pl.Int64))
+    #     .drop_nulls(subset=["delta_hour"])
+    #     .filter(pl.col("delta_hour").is_between(q01, q99))
+    #     .group_by("delta_hour")
+    #     .agg([pl.col(c).sum() for c in cols_flags])
+    #     .sort("delta_hour")
+    # )
 
-    pdf = dist.to_pandas()
+    # pdf = dist.to_pandas()
 
-    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(14, 12))
-    fig.suptitle("Distribution des décès (Outliers exclus)", fontsize=16)
+    # fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(14, 12))
+    # fig.suptitle("Distribution des décès (Outliers exclus)", fontsize=16)
 
-    axes[0].bar(pdf["delta_hour"], pdf["isDeceased_lt_24h"], width=1.0, color='tab:blue')
-    axes[0].set_title("< 24h")
-    axes[0].grid(True, alpha=0.3)
+    # axes[0].bar(pdf["delta_hour"], pdf["isDeceased_lt_24h"], width=1.0, color='tab:blue')
+    # axes[0].set_title("< 24h")
+    # axes[0].grid(True, alpha=0.3)
 
-    axes[1].bar(pdf["delta_hour"], pdf["isDeceased_lt_28d"], width=1.0, color='tab:orange')
-    axes[1].set_title("< 28j")
-    axes[1].grid(True, alpha=0.3)
+    # axes[1].bar(pdf["delta_hour"], pdf["isDeceased_lt_28d"], width=1.0, color='tab:orange')
+    # axes[1].set_title("< 28j")
+    # axes[1].grid(True, alpha=0.3)
 
-    axes[2].bar(pdf["delta_hour"], pdf["isDeceased_lt_3m"], width=1.0, color='tab:green')
-    axes[2].set_title("< 3 mois")
-    axes[2].set_xlabel("delta_hour")
-    axes[2].grid(True, alpha=0.3)
+    # axes[2].bar(pdf["delta_hour"], pdf["isDeceased_lt_3m"], width=1.0, color='tab:green')
+    # axes[2].set_title("< 3 mois")
+    # axes[2].set_xlabel("delta_hour")
+    # axes[2].grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.show()
+    # plt.tight_layout()
+    # plt.show()
     return
 
 
 @app.cell
-def _(df_test_1, extract, pl, ui):
-    import itertools
-    import plotly.express as px
+def _():
+    # import itertools
+    # import plotly.express as px
 
-    # 1. Définir les plages de valeurs à tester 
-    durees_sanctuarisees = [0, 6, 12]
-    marges_erreur = [0, 6, 12, 18, 24, 30]
-    resultats = []
+    # # 1. Définir les plages de valeurs à tester 
+    # durees_sanctuarisees = [0, 6, 12]
+    # marges_erreur = [0, 6, 12, 18, 24, 30]
+    # resultats = []
 
-    # 2. Boucler sur toutes les combinaisons possibles
-    for duree_i, marge_i in itertools.product(durees_sanctuarisees, marges_erreur):
+    # # 2. Boucler sur toutes les combinaisons possibles
+    # for duree_i, marge_i in itertools.product(durees_sanctuarisees, marges_erreur):
 
-        df_test_for = df_test_1.with_columns([
-            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
-              .then(1)
-              .otherwise(0)
-              .alias("isDeceased_lt_24h"),
+    #     df_test_for = df_test_1.with_columns([
+    #         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
+    #           .then(1)
+    #           .otherwise(0)
+    #           .alias("isDeceased_lt_24h"),
 
-            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge_i)
-              .then(1)
-              .otherwise(0)
-              .alias("isDeceased_lt_24h_EXTENDED")
-        ])
+    #         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge_i)
+    #           .then(1)
+    #           .otherwise(0)
+    #           .alias("isDeceased_lt_24h_EXTENDED")
+    #     ])
 
-        df_clean2 = extract.prepare_data(
-            df_test_for, 
-            hour_offset = 0, 
-            random = True,
-            strict_mode = True,
-            max_hour = duree_i, 
-            used_distribution="flexible", 
-            target_col = "isDeceased_lt_24h_EXTENDED", 
-            other_cols = ["isDeceased_lt_24h"]
-        )
+    #     df_clean2 = extract.prepare_data(
+    #         df_test_for, 
+    #         hour_offset = 0, 
+    #         random = True,
+    #         strict_mode = True,
+    #         max_hour = duree_i, 
+    #         used_distribution="flexible", 
+    #         target_col = "isDeceased_lt_24h_EXTENDED", 
+    #         other_cols = ["isDeceased_lt_24h"]
+    #     )
 
-        # --- Calcul 1 : Nombre de patients ---
-        nb_patients = df_clean2.filter(
-            pl.col('isDeceased_lt_24h_EXTENDED') == 1
-        ).select(pl.col(ui.patient_col).n_unique()).item()
+    #     # --- Calcul 1 : Nombre de patients ---
+    #     nb_patients = df_clean2.filter(
+    #         pl.col('isDeceased_lt_24h_EXTENDED') == 1
+    #     ).select(pl.col(ui.patient_col).n_unique()).item()
 
-        # --- Calcul 2 : Proportion de vrais 1 ---
-        prop_vrais_1 = df_clean2.filter(
-            pl.col('isDeceased_lt_24h_EXTENDED') == 1
-        ).select(pl.col("isDeceased_lt_24h")).mean().item()
+    #     # --- Calcul 2 : Proportion de vrais 1 ---
+    #     prop_vrais_1 = df_clean2.filter(
+    #         pl.col('isDeceased_lt_24h_EXTENDED') == 1
+    #     ).select(pl.col("isDeceased_lt_24h")).mean().item()
 
-        # Stocker le résultat de cette combinaison
-        resultats.append({
-            "Duree_Sanctuarisee": duree_i,
-            "Marge_Erreur": marge_i,
-            "Nb_Patients": nb_patients,
-            "Proportion_Vrais_1": prop_vrais_1
-        })
+    #     # Stocker le résultat de cette combinaison
+    #     resultats.append({
+    #         "Duree_Sanctuarisee": duree_i,
+    #         "Marge_Erreur": marge_i,
+    #         "Nb_Patients": nb_patients,
+    #         "Proportion_Vrais_1": prop_vrais_1
+    #     })
 
-    # 3. Créer un DataFrame récapitulatif
-    df_results = pl.DataFrame(resultats)
+    # # 3. Créer un DataFrame récapitulatif
+    # df_results = pl.DataFrame(resultats)
 
-    # === PLOTS AVEC PLOTLY ===
+    # # === PLOTS AVEC PLOTLY ===
 
-    # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
-    fig1 = px.density_heatmap(
-        df_results.to_pandas(), 
-        x="Marge_Erreur", 
-        y="Duree_Sanctuarisee", 
-        z="Nb_Patients", 
-        histfunc="avg", 
-        title="Impact sur le Nombre de Patients gardés",
-        color_continuous_scale="Viridis",
-        text_auto=True 
-    )
-    fig1.show()
+    # # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
+    # fig1 = px.density_heatmap(
+    #     df_results.to_pandas(), 
+    #     x="Marge_Erreur", 
+    #     y="Duree_Sanctuarisee", 
+    #     z="Nb_Patients", 
+    #     histfunc="avg", 
+    #     title="Impact sur le Nombre de Patients gardés",
+    #     color_continuous_scale="Viridis",
+    #     text_auto=True 
+    # )
+    # fig1.show()
 
-    # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
-    fig2 = px.density_heatmap(
-        df_results.to_pandas(), 
-        x="Marge_Erreur", 
-        y="Duree_Sanctuarisee", 
-        z="Proportion_Vrais_1", 
-        histfunc="avg",
-        title="Impact sur la Proportion de vrais '1'",
-        color_continuous_scale="RdBu", 
-        text_auto=".2f" 
-    )
-    fig2.show()
+    # # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
+    # fig2 = px.density_heatmap(
+    #     df_results.to_pandas(), 
+    #     x="Marge_Erreur", 
+    #     y="Duree_Sanctuarisee", 
+    #     z="Proportion_Vrais_1", 
+    #     histfunc="avg",
+    #     title="Impact sur la Proportion de vrais '1'",
+    #     color_continuous_scale="RdBu", 
+    #     text_auto=".2f" 
+    # )
+    # fig2.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    On prend donc 6 heures de marge et 6 heures de temps sanctuarisé
+    """)
     return
 
 

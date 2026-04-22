@@ -312,6 +312,17 @@
       "agg_method": "max",
       "imputation_method": "ffill_zero",
       "default_value": 0
+    },
+    "RESPIRATORY_CHRONIC": {
+      "column": "hx_respi_chronique",
+      "table": "PtAssessment",
+      "type": "regex_match",
+      "label": [
+        "respiratoire"
+      ],
+      "agg_method": "max",
+      "imputation_method": "ffill_zero",
+      "default_value": 0
     }
   }
 }

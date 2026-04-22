@@ -2,8 +2,6 @@ import polars as pl
 import os
 import numpy as np
 import random as rd
-import pandas as pd
-from datetime import timedelta
 import matplotlib.pyplot as plt
 import json
 
@@ -15,6 +13,7 @@ COL_DATE_MESURE    = 'utcChartTime'
 COL_DATE_ADMISSION = 'utcInTime'
 ID_COL      = 'encounterId'
 TIME_COL    = 'delta_hour'
+TIME_COL2   = 'heure_calibree'
 WINDOW_SIZE = 24
 THESAURUS_PATH = "utilitaries/thesaurus.json"
 
