@@ -1,4 +1,3 @@
-import marimo as mo
 from dataclasses import dataclass
 
 
@@ -72,6 +71,22 @@ MODES = {
         strict_mode = True,
         used_distribution = "real",
     ),
+    "24h aléatoire 'flexible' sans remplissage": ConfigFenetrage(
+        name = "24h_alea_flex_no-fill",
+        hour_offset = 0,
+        random = True,
+        max_hour = 12, # osef on l'utilise pas
+        strict_mode = True,
+        used_distribution = "flexible",
+    ),
+    "24h aléatoire 'flexible' avec remplissage": ConfigFenetrage(
+        name = "24h_alea_flex_no-fill",
+        hour_offset = 0,
+        random = True,
+        max_hour = 12, # osef on l'utilise pas
+        strict_mode = False,
+        used_distribution = "flexible",
+    ),
 }
 
 @dataclass(frozen=True)
@@ -92,6 +107,9 @@ class ConfigModels:
 MODELS = {
     "InceptionTimeModified" : ConfigModels(
         models_name = "InceptionTimeModified"
+    ),
+    "LstmTimeModified" : ConfigModels(
+        models_name = "LstmTimeModified"
     )
 }
 
@@ -140,5 +158,21 @@ FEAT = {
     ),
     "Mode Custom" : ConfigFeatures(
         keep_feats= ['heure_calibree', 'pam', 'pad', 'heart_rate']
+    )
+}
+
+
+@dataclass(frozen=True)
+class ConfigEquilibre:
+    balance_method : str
+BALANCE = {
+    "Aucune Méthode" : ConfigEquilibre(
+        balance_method = ""
+    ),
+    "DownSampling 50-50": ConfigEquilibre(
+        balance_method = "downsampling_50-50"
+    ),
+    "UpSampling 50-50": ConfigEquilibre(
+        balance_method = "upsampling_50-50"
     )
 }

@@ -608,7 +608,7 @@ def set_trainable_last_k_layers(
     return model
 
 
-def load_model_from_checkpoint(
+def load_lstm_from_checkpoint(
     ckpt_path: str,
     device: Union[str, torch.device] = None
 ) -> Tuple[LSTMClassifier, dict, Optional[float]]:
@@ -658,7 +658,7 @@ def fine_tune_lstm_model(
     device = torch.device(device)
     
     if isinstance(model_or_ckpt, str):
-        model, init_args, _T = load_model_from_checkpoint(model_or_ckpt, device)
+        model, init_args, _T = load_lstm_from_checkpoint(model_or_ckpt, device)
         print(f"Modèle chargé depuis {model_or_ckpt}")
     else:
         model = model_or_ckpt.to(device)
@@ -886,7 +886,7 @@ def fine_tune_lstm_model(
 # ============================================================================
 
 @torch.no_grad()
-def predict_proba(
+def predict_proba_lstm(
     model: nn.Module,
     X: np.ndarray,
     T: float = 1.0,
@@ -956,7 +956,7 @@ def evaluate_lstm_on_test(
     return_details: bool = False
 ) -> Union[Tuple[float, float, float], Tuple[float, float, float, dict]]:
     """Évalue un checkpoint LSTM sur un jeu de test."""
-    model, init_args, T = load_model_from_checkpoint(checkpoint_path, device)
+    model, init_args, T = load_lstm_from_checkpoint(checkpoint_path, device)
     
     if device is None:
         device = next(model.parameters()).device
@@ -996,7 +996,7 @@ def evaluate_lstm_on_test(
     
     print(f"Prédiction sur {len(X_test)} exemples...")
     try:
-        p_test, logits = predict_proba(
+        p_test, logits = predict_proba_lstm(
             model, X_test, T=T, device=device,
             batch_size=batch_size, return_logits=True
         )
@@ -1106,8 +1106,8 @@ __all__ = [
     "train_lstm_model",
     "fine_tune_lstm_model",
     "evaluate_lstm_on_test",
-    "predict_proba",
-    "load_model_from_checkpoint",
+    "predict_proba_lstm",
+    "load_lstm_from_checkpoint",
     "recompute_temperature",
     "stratified_train_val_indices",
     "compute_pos_weight_from_indices",
@@ -1155,10 +1155,10 @@ auc, brier, T = evaluate_lstm_on_test(
 )
 
 # 4. Prédiction simple
-from lstm_time import predict_proba, load_model_from_checkpoint
+from lstm_time import predict_proba_lstm, load_lstm_from_checkpoint
 
-model, _, T = load_model_from_checkpoint("models/lstm_ecmo_ft.pt")
-probas = predict_proba(model, X_new, T=T)
+model, _, T = load_lstm_from_checkpoint("models/lstm_ecmo_ft.pt")
+probas = predict_proba_lstm(model, X_new, T=T)
     '''
     
     print(example_code)

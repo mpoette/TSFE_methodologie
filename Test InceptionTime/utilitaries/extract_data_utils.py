@@ -334,7 +334,7 @@ def _generate_fixed_windows(patients, hour_offset, max_hour):
         )
 
 
-def _finalize_data(df_windows, df_agg, strict_mode, seuil):
+def _finalize_data(df_windows, df_agg, strict_mode):
     """Effectue la jointure, le filtrage strict, l'imputation et les features finales."""
     thesaurus = _load_thesaurus(THESAURUS_PATH)
     
@@ -344,6 +344,7 @@ def _finalize_data(df_windows, df_agg, strict_mode, seuil):
     
     # Filtrage strict
     if strict_mode:
+        seuil = 1
         valid_ids = (
             df_full.group_by(ID_COL)
             .agg(pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present"))

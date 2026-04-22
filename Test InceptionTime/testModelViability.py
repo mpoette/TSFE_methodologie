@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.1"
+__generated_with = "0.23.2"
 app = marimo.App()
 
 
@@ -40,6 +40,14 @@ def _():
         predict_proba,
         train_inception_time,
     )
+
+    from utilitaries.models.lstmTimeModified import (
+        evaluate_lstm_on_test,
+        load_lstm_from_checkpoint,
+        predict_proba_lstm,
+        train_lstm_model,
+    )
+
     import utilitaries.inception_utils as ui
     import utilitaries.marimo_utils as mo_utils
     import utilitaries.extract_data_utils as extract
@@ -50,9 +58,11 @@ def _():
         brier_score_loss,
         calibration_curve,
         confusion_matrix,
+        evaluate_lstm_on_test,
         evaluate_on_test,
         extract,
         f1_score,
+        load_lstm_from_checkpoint,
         load_model_from_checkpoint,
         mo,
         mo_utils,
@@ -60,10 +70,12 @@ def _():
         pl,
         plt,
         predict_proba,
+        predict_proba_lstm,
         roc_auc_score,
         roc_curve,
         sns,
         train_inception_time,
+        train_lstm_model,
         ui,
     )
 
@@ -90,7 +102,7 @@ def _(mo, mo_utils):
 def _(mo, mo_utils):
     mode = mo.ui.dropdown(
         options=mo_utils.MODES,
-        value="24h début réanimation avec remplissage",
+        value="24h aléatoire 'flexible' sans remplissage",
         label="Mode de fenêtrage",
     )
     return (mode,)
@@ -118,9 +130,19 @@ def _(mo, mo_utils):
 
 @app.cell
 def _(mo, mo_utils):
+    balance = mo.ui.dropdown(
+        options = mo_utils.BALANCE,
+        value = "Aucune Méthode",
+        label = "Méthode pour équilibrer les charges"
+    )
+    return (balance,)
+
+
+@app.cell
+def _(mo, mo_utils):
     y_dd =  mo.ui.dropdown(
         options=mo_utils.Y,
-        value="Survie (isDeceased)",
+        value="Survie à 24 heures",
         label="Cible (y) à prédire",
     )
     return (y_dd,)
@@ -132,6 +154,14 @@ def _(config2, mo):
         label=f"Lancer l'entraînement du modèle {config2.models_name}"
     )
     return (run,)
+
+
+@app.cell
+def _(mo):
+    confirm = mo.ui.run_button(
+        label=f"Confirmer les paramètres actuels"
+    )
+    return (confirm,)
 
 
 @app.cell
@@ -152,12 +182,55 @@ def _(mo, mo_utils):
 
 
 @app.cell
+def _(mo):
+    get_max_hour, set_max_hour = mo.state(6)
+    gap_start, gap_end = 0, 12
+    return gap_end, gap_start, get_max_hour, set_max_hour
+
+
+@app.cell
+def _(gap_end, gap_start, get_max_hour, mo, set_max_hour):
+    slider_max_hour = mo.ui.slider(gap_start, gap_end, value=get_max_hour(), on_change=set_max_hour)
+    return (slider_max_hour,)
+
+
+@app.cell
+def _(gap_end, gap_start, get_max_hour, mo, set_max_hour):
+    number_max_hour = mo.ui.number(gap_start, gap_end, value=get_max_hour(), on_change=set_max_hour)
+    return (number_max_hour,)
+
+
+@app.cell
+def _(mo):
+    get_marge, set_marge = mo.state(0)
+    gap2_start, gap2_end = 0, 24
+    return gap2_end, gap2_start, get_marge, set_marge
+
+
+@app.cell
+def _(gap2_end, gap2_start, get_marge, mo, set_marge):
+    slider_marge = mo.ui.slider(gap2_start, gap2_end, value=get_marge(), on_change=set_marge)
+    return (slider_marge,)
+
+
+@app.cell
+def _(gap2_end, gap2_start, get_marge, mo, set_marge):
+    number_marge = mo.ui.number(gap2_start, gap2_end, value=get_marge(), on_change=set_marge)
+    return (number_marge,)
+
+
+@app.cell
 def _(mo, mo_utils, save_figure):
     mo.vstack([
         mo.md(mo_utils.config_dropdown_color),
         save_figure,
         mo.md(mo_utils.config_end)
     ])
+    return
+
+
+@app.cell
+def _():
     return
 
 
@@ -195,6 +268,12 @@ def _(y_dd):
 def _(keep_pop):
     config5 = keep_pop.value
     return (config5,)
+
+
+@app.cell
+def _(balance):
+    config6 = balance.value
+    return (config6,)
 
 
 @app.cell(hide_code=True)
@@ -458,15 +537,149 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ajout de la colonne age qui est dans le thesaurus
+    ajout de la colonne age qui est dans le thesaurus et de deces_datediff_days qui nous permet de calculer les étiquettes
     """)
     return
 
 
 @app.cell
 def _(df_static_2, df_test, ui):
-    df_test_1 = df_test.join(df_static_2[[ui.patient_col, 'age']], on=ui.patient_col, how='left')
+    df_test_1 = df_test.join(df_static_2[[ui.patient_col, 'age', 'deces_datediff_days']], on=ui.patient_col, how='left')
     return (df_test_1,)
+
+
+@app.cell
+def _(df_test_1):
+    df_test_1["deces_datediff_days"].describe()
+    return
+
+
+@app.cell
+def _(df_test_1):
+    df_test_1["encounterId"].describe()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    On rajoute 4 features qui valent 1 si : (enfin True et False)
+
+    - Pour isDeceased_lt_24h : 1 si décès inférieur à 24h après la fin de la fenêtre et 0 sinon
+
+    - Pour isDeceased_lt_7d : 1 si décès inférieur à 7 jours après la fin de la fenêtre et 0 sinon
+
+    - Pour isDeceased_lt_28d : 1 si décès inférieur à 28 jours après la fin de la fenêtre et 0 sinon
+
+    - Pour isDeaceased_lt_3m : 1 si décès inférieur à 3 mois après la fin de la fenêtre et 0 sinon
+
+    - Si les 4 features précédentes sont falses, alors le patient est vivant ou mort après 3 mois
+
+    On ajoute à cela une version étendue qui prend en compte une marge d'erreur, afin de favoriser l'aléatoire de la fenêtre, au détriment d'un étiquetage dégradé (dégradation qui augmente à mesure que la marge augmente)
+    """)
+    return
+
+
+@app.cell
+def _(
+    confirm,
+    mo,
+    mo_utils,
+    mode,
+    number_marge,
+    number_max_hour,
+    slider_marge,
+    slider_max_hour,
+):
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        mode,
+        mo.md(mo_utils.config_end)])
+
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        mo.md("Durée sanctuarisée avant la sortie du patient"),
+        slider_max_hour,
+        number_max_hour,
+        mo.md("-------------------------------"),
+        mo.md("Marge d'erreur de l'étiquetage pour permettre un plus grand aléatoire"),
+        slider_marge,
+        number_marge,
+        mo.md("-------------------------------"),
+        confirm,
+        mo.md(mo_utils.config_end)])
+    return
+
+
+@app.cell
+def _(confirm, df_test_1, get_marge, mo, pl):
+    marge = get_marge()
+    mo.stop(not confirm.value, "Clique pour lancer")
+    df_test_2 = df_test_1.with_columns([
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h_EXTENDED"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 672)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_28d"),
+
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 672 + marge)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_28d_EXTENDED"),
+
+           pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 168)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_7d"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 168 + marge)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_7d_EXTENDED"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 2190)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_3m"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 2190 + marge)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_3m_EXTENDED"),
+            pl.when(pl.col("deces_datediff_days") * 24 > pl.col("delta_hour") + 2190)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_gt_3m"),
+
+            pl.when(pl.col("deces_datediff_days") * 24 > pl.col("delta_hour") + 2190 + marge)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_gt_3m_EXTENDED"),
+        ])
+    return (df_test_2,)
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ajout d'une métrique pour regarder le décès inférieur à 7 jours afin de pouvoir être comparé à NEWS et NEWS2
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -478,24 +691,23 @@ def _(mo):
 
 
 @app.cell
-def _(mo, mo_utils, mode):
-    mo.vstack([
-        mo.md(mo_utils.config_dropdown_color),
-        mode,
-        mo.md(mo_utils.config_end)])
-    return
+def _(config, config4, df_test_2, extract, get_max_hour):
+    target_col = config4.target_name
+    other_cols = ["isDeceased_lt_24h","isDeceased_lt_7d", "isDeceased_lt_28d", "isDeceased_lt_3m", "isDeceased_lt_24h_EXTENDED","isDeceased_lt_7d_EXTENDED", "isDeceased_lt_28d_EXTENDED", "isDeceased_lt_3m_EXTENDED", "isDeceased_gt_3m", "isDeceased_gt_3m_EXTENDED"]
+    if target_col != "isDeceased" :
+        target_col += "_EXTENDED"
 
+    other_cols.remove(target_col)
 
-@app.cell
-def _(config, df_test_1, extract):
-    df_clean = extract.prepare_data(df_test_1, 
+    df_clean = extract.prepare_data(df_test_2, 
                                                  hour_offset = config.hour_offset, 
                                                  random = config.random, 
-                                                 max_hour = config.max_hour,
+                                                 max_hour = get_max_hour(),
                                                  used_distribution = config.used_distribution, 
-                                                 strict_mode = config.strict_mode)
-    df_clean
-    return (df_clean,)
+                                                 strict_mode = config.strict_mode,
+                                                 target_col = target_col, other_cols = other_cols)
+    df_clean.columns
+    return df_clean, target_col
 
 
 @app.cell
@@ -527,69 +739,10 @@ def _(mo):
 
 
 @app.cell
-def _(df_clean, df_static_2, ui):
-    df_clean_1 = df_clean.join(df_static_2[[ui.patient_col, 'isDeceased', 'deces_datediff_days']], on=ui.patient_col, how='inner')
-    return (df_clean_1,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    On rajoute 3 features qui valent 1 si :
-
-    - Pour isDeceased_lt_24h : 1 si décès inférieur à 24h après la fin de la fenêtre et 0 sinon
-
-    - Pour isDeceased_lt_28d : 1 si décès inférieur à 28 jours après la fin de la fenêtre et 0 sinon
-
-    - Pour isDeaceased_lt_3m : 1 si décès inférieur à 3 mois après la fin de la fenêtre et 0 sinon
-
-    - Si les 3 features précédentes sont falses, alors le patient est vivant ou mort après 3 mois
-    """)
-    return
-
-
-@app.cell
-def _(df_clean_1, pl, ui):
-    df_clean_24h = df_clean_1.with_columns(pl.when((pl.col('deces_datediff_days') * 24 + pl.col('heure_calibree').min().over(ui.patient_col)) < 24).then(pl.lit(True)).otherwise(pl.lit(False)).alias("isDeceased_lt_24h"))
-    return (df_clean_24h,)
-
-
-@app.cell
-def _(df_clean_24h, pl, ui):
-    df_clean_28d = df_clean_24h.with_columns(pl.when((pl.col('deces_datediff_days') * 24 + pl.col('heure_calibree').min().over(ui.patient_col)) < 672).then(pl.lit(True)).otherwise(pl.lit(False)).alias("isDeceased_lt_28d"))
-    return (df_clean_28d,)
-
-
-@app.cell
-def _(df_clean_28d, pl, ui):
-    df_clean_2m = df_clean_28d.with_columns(pl.when((pl.col('deces_datediff_days') * 24 + pl.col('heure_calibree').min().over(ui.patient_col)) < 2190).then(pl.lit(True)).otherwise(pl.lit(False)).alias("isDeceased_lt_3m"))
-    return (df_clean_2m,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ajout d'une métrique pour regarder le décès inférieur à 7 jours afin de pouvoir être comparé à NEWS et NEWS2
-    """)
-    return
-
-
-@app.cell
-def _(df_clean_2m, pl, ui):
-    df_clean_7d = df_clean_2m.with_columns(pl.when((pl.col('deces_datediff_days') * 24 + pl.col('heure_calibree').min().over(ui.patient_col)) < 168).then(pl.lit(True)).otherwise(pl.lit(False)).alias("isDeceased_lt_7d"))
-    return (df_clean_7d,)
-
-
-@app.cell
-def _(df_clean_7d, pl, ui):
-    df_clean_2 = df_clean_7d.with_columns(pl.when((pl.col('deces_datediff_days') * 24 + pl.col('heure_calibree').min().over(ui.patient_col)) >= 2190).then(pl.lit(True)).otherwise(pl.lit(False)).alias("isDeceased_gt_3m"))
+def _(df_clean):
+    # df_clean_1 = df_clean.join(df_static_2[[ui.patient_col, 'isDeceased']], on=ui.patient_col, how='inner')
+    df_clean_2 = df_clean
     return (df_clean_2,)
-
-
-@app.cell
-def _(df_clean_2):
-    df_clean_2['isDeceased_lt_24h'].describe()
-    return
 
 
 @app.cell
@@ -620,22 +773,34 @@ def _(mo):
 
 @app.cell
 def _(df_clean_2, pl, ui):
-    print("nombre d'enregistrement de patients vivants (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == False).select(pl.col(ui.patient_col).n_unique()).item())
+    # print("nombre d'enregistrement de patients vivants (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == False).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients vivants (DeceasedTimeType)", df_clean_2.filter((pl.col('isDeceased_lt_24h') == False)
                                                                                                  & (pl.col("isDeceased_lt_28d") == False)
                                                                                                  & (pl.col("isDeceased_lt_3m") == False)
-                                                                                             & (pl.col("isDeceased_gt_3m") == False)).select(pl.col(ui.patient_col).n_unique()).item())
-    print("nombre d'enregistrement de patients morts (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == True).select(pl.col(ui.patient_col).n_unique()).item())
+                                                                                                 & (pl.col("isDeceased_lt_7d") == False)
+                                                                                                 & (pl.col("isDeceased_gt_3m") == False)).select(pl.col(ui.patient_col).n_unique()).item())
+    # print("nombre d'enregistrement de patients morts (isDeceased)", df_clean_2.filter(pl.col('isDeceased') == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts (4 features)", df_clean_2.filter((pl.col('isDeceased_lt_24h') == True)
-                                                                                                 | (pl.col("isDeceased_lt_28d") == True)
+           | (pl.col("isDeceased_lt_7d") == True)                                                | (pl.col("isDeceased_lt_28d") == True)
                                                                                                  | (pl.col("isDeceased_lt_3m") == True)
                                                                                                  | (pl.col("isDeceased_gt_3m") == True)).select(pl.col(ui.patient_col).n_unique()).item())
 
     print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h') == True).select(pl.col(ui.patient_col).n_unique()).item())
+
+    print("nombre d'enregistrement de patients morts moins de 24 heures + marge après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts moins de 7 jours après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_7d') == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts moins de 28 jours après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_28d") == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts moins de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col("isDeceased_lt_3m") == True).select(pl.col(ui.patient_col).n_unique()).item())
     print("nombre d'enregistrement de patients morts plus de 3 mois après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_gt_3m') == True).select(pl.col(ui.patient_col).n_unique()).item())
+    return
+
+
+@app.cell
+def _(df_clean_2, pl, ui):
+    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item())
+
+
+    print("pourcentage de 0 dans ces patients devant être étiquetés 1 :", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
     return
 
 
@@ -797,22 +962,27 @@ def _(mo, mo_utils, y_dd):
 
 
 @app.cell
-def _():
+def _(balance, mo, mo_utils):
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        balance,
+        mo.md(mo_utils.config_end)])
     return
 
 
 @app.cell
-def _(test_df):
-    test_df
-    return
-
-
-@app.cell
-def _(StratifiedGroupKFold, config4, df_clean_3, keep_feats, pl, ui):
+def _(
+    StratifiedGroupKFold,
+    config6,
+    df_clean_3,
+    keep_feats,
+    pl,
+    target_col,
+    ui,
+):
     keep_features = keep_feats
     patient_col = ui.patient_col
     time_col = ui.time_col
-    target_col = config4.target_name
     expected_length = 24
     valid_ids = df_clean_3.group_by(patient_col).len().filter(pl.col('len') == expected_length).select(patient_col)
     # On garde les encounters de longueur exacte 
@@ -820,17 +990,37 @@ def _(StratifiedGroupKFold, config4, df_clean_3, keep_feats, pl, ui):
     if df_clean_4.is_empty():
         raise ValueError("Aucun patient n'a exactement la longueur attendue.")
     df_clean_4 = df_clean_4.sort(patient_col, time_col)
+
+    # DownSampling
+    # Je veux :
+    # - un groupe isDeceased_lt_24h
+    # - un groupe isDeceased_lt_28d qui ne contient pas les lt_24h
+    # - un groupe sain
+    # que l'addition des 2 derniers groupes fasse le total de lt_24h.
     X = df_clean_4.select(keep_features).to_numpy()
     y = df_clean_4[target_col].to_numpy()
+    print(y)
     groups = df_clean_4[patient_col].to_numpy()
+
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
     (train_idx, test_idx) = next(sgkf.split(X=X, y=y, groups=groups))
+
     # Tri obligatoire (même si en théorie il est déjà fait)
     train_df = df_clean_4[train_idx].sort([patient_col, time_col])
     test_df = df_clean_4[test_idx].sort([patient_col, time_col])
+
+    if config6.balance_method == "downsampling_50-50":
+        # Downsampling uniquement sur le train
+        train_df = ui.downsample_train_patients(
+            train_df=train_df,
+            patient_col=patient_col,
+            col_24h="isDeceased_lt_24h",
+            col_28d="isDeceased_lt_28d",
+        )
+
     # On prépare le jeu d'entraînement
-    (train_pd, test_pd) = ui.scaling(train_df, test_df)
-    (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
+    (train_df, test_df) = ui.scaling(train_df, test_df)
+    # (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
     (X_train_3d, y_train_seq) = ui.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
     # On prend un split (comme train/test mais adapté aux individus)
     # Normalement pas besoin de sort mais soyons prudents...
@@ -844,7 +1034,6 @@ def _(StratifiedGroupKFold, config4, df_clean_3, keep_feats, pl, ui):
         X_train_3d,
         df_clean_4,
         patient_col,
-        target_col,
         test_df,
         train_df,
         y_test_seq,
@@ -853,12 +1042,12 @@ def _(StratifiedGroupKFold, config4, df_clean_3, keep_feats, pl, ui):
 
 
 @app.cell
-def _():
-    # print(train_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+def _(df_clean_4, test_df, train_df):
+    print(train_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
 
-    # print(test_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+    print(test_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
 
-    # print(df_clean_4.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
+    print(df_clean_4.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
     return
 
 
@@ -869,8 +1058,8 @@ def _(df_clean_4, patient_col, pl, target_col):
 
 
 @app.cell
-def _(train_df, ui):
-    train_df.group_by(ui.patient_col).len().describe()
+def _(train_df):
+    train_df.head()
     return
 
 
@@ -917,6 +1106,12 @@ def _(mo, mo_utils, run):
 
 
 @app.cell
+def _(y_train_seq):
+    print(y_train_seq)
+    return
+
+
+@app.cell
 def _(
     X_train_3d,
     config,
@@ -924,18 +1119,20 @@ def _(
     config3,
     config4,
     config5,
+    config6,
     get_unique_path,
     mo,
     modex,
     run,
     train_inception_time,
+    train_lstm_model,
     y_train_seq,
 ):
     # on créé un nom unique de modèle
     str_pop = ""
     if config5.keep_population != "all_diseases":
         str_pop = "_"+config5.keep_population
-    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}{str_pop}.pt")
+    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}_{modex.value}{str_pop}.pt")
 
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
@@ -960,7 +1157,13 @@ def _(
             patience=10,
             save_best_path=model_path
             )
-
+    elif config2.models_name == "LstmTimeModified":
+        model, T, history, splits = train_lstm_model(
+            X_train_3d, y_train_seq,
+            epochs=100,
+            patience=10,
+            save_best_path=model_path
+            )
     else :
         print("oups tu t'es trompé")
     return (str_pop,)
@@ -981,15 +1184,25 @@ def _(
     config2,
     config3,
     config4,
+    config6,
+    evaluate_lstm_on_test,
     evaluate_on_test,
+    load_lstm_from_checkpoint,
     load_model_from_checkpoint,
     modex,
     str_pop,
     y_test_seq,
 ):
-    loaded_model = f"models/{config2.models_name}/{config.name}_{config2.models_name}_{config3.clean}_{config4.target_name}_{modex.value}{str_pop}.pt"
-    (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
-    (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
+    loaded_model = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{modex.value}{str_pop}.pt"
+    if config2.models_name == "InceptionTimeModified":
+        (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
+        (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
+
+    elif config2.models_name == "LstmTimeModified":
+        (_auc, brier, T_1) = evaluate_lstm_on_test(X_test_3d, y_test_seq, loaded_model)
+        (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
+    else :
+        print("erreur de choix de modèle")
     return T_1, loaded_model, model_1
 
 
@@ -1004,8 +1217,12 @@ def _(Path, loaded_model):
 
 
 @app.cell
-def _(T_1, X_test_3d, model_1, predict_proba):
-    probas = predict_proba(model_1, X_test_3d, T=T_1)
+def _(T_1, X_test_3d, config2, model_1, predict_proba, predict_proba_lstm):
+    # c'est la même fonction pour les 2 modèles donc c'est ok
+    if config2.models_name == "InceptionTimeModified":
+        probas = predict_proba(model_1, X_test_3d, T=T_1)
+    elif config2.models_name == "LstmTimeModified":
+        probas = predict_proba_lstm(model_1, X_test_3d, T=T_1)
     return (probas,)
 
 
@@ -1389,7 +1606,9 @@ def _(
 
 @app.cell
 def _(
+    balance,
     cleaning,
+    confirm,
     custom_features,
     keep_feats,
     keep_pop,
@@ -1398,8 +1617,12 @@ def _(
     mode,
     models,
     modex,
+    number_marge,
+    number_max_hour,
     run,
     save_figure,
+    slider_marge,
+    slider_max_hour,
     str_keep_feats,
     y_dd,
 ):
@@ -1407,6 +1630,17 @@ def _(
     mo.vstack([
         mo.md(mo_utils.config_sidebar),
         mode,
+        mo.md("Durée sanctuarisée avant la sortie du patient"),
+        slider_max_hour,
+        number_max_hour,
+        mo.md("-------------------------------"),
+        mo.md("Marge d'erreur de l'étiquetage pour permettre un plus grand aléatoire"),
+        slider_marge,
+        number_marge,
+        mo.md("-------------------------------"),
+        confirm,
+        mo.md("-------------------------------"),
+        balance,
         models,
         cleaning,
         y_dd,
@@ -1416,9 +1650,9 @@ def _(
         mo.md(f"**Features gardées :** `{keep_feats}`"),
         mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
         save_figure,
-        mo.md("==============================================="),
+        mo.md("-------------------------------"),
         run,
-        mo.md("==============================================="),
+        mo.md("-------------------------------"),
         mo.md(f" \n \n **Modification Thesaurus** : Afin d'avoir des valeurs cohérentes, avec une bonne imputation notamment, j'ai rajouté la pression artérielle systolique ainsi que la fréquence respiratoire. Il faudra voir aussi si on laisse les valeurs par défaut à 0 ou non. J'ai pris le parti pris pour la pas et fr de mettre en valeur par défaut une valeur qui fait un score de 0 sur news, sinon ça augmenterait le score juste parce qu'on a pas l'info ce qui n'est pas optimal... J'ai donc 130 pour pas en imputation method ffill_bfill et 16 pour fr en ffill_bfill aussi. Je me suis rendu compte que la valeur par défaut de heart_rate et spo2 était aussi de 0. Cela classe donc instantanément le patient en grave, alors qu'on a juste pas l'information... j'ai mis pour heart_rate une valeur par défaut de 60 et un spo2 de 96%. Je pense qu'il faudra qu'on fasse un point sur les valeurs par défaut du thesaurus car la majorité sont à 0, ce qui peut poser problème"),
         mo.md(mo_utils.config_end)]),
     width = "550px")
