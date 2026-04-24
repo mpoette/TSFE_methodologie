@@ -10,3 +10,5 @@ __pycache__/
 */models/
 **/__marimo__/
 */maybe useful/
+*.parquet
+*.npy
