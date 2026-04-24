@@ -9,11 +9,10 @@ def _():
     import marimo as mo
     import polars as pl
     import matplotlib.pyplot as plt
-    import utilitaries.inception_utils as ui
     import utilitaries.marimo_utils as mo_utils
     import utilitaries.extract_data_utils as extract
 
-    return extract, mo, mo_utils, pl, ui
+    return extract, mo, mo_utils, pl
 
 
 @app.cell(hide_code=True)
@@ -71,10 +70,10 @@ def _(mo):
 
 
 @app.cell
-def _(pl, ui):
+def _(extract, pl):
     _path = '../Datasets/clean_full_static_ano.parquet'
     df_static = pl.read_parquet(_path)
-    df_static = df_static.with_columns(pl.col(ui.patient_col).cast(pl.Int32))
+    df_static = df_static.with_columns(pl.col(extract.ID_COL).cast(pl.Int32))
     # df_static = df_static.filter(pl.col("adm_unit").is_in(["RANGUEIL DECHO. REA.","NEURO-CHIR REA", "PURPAN DECHO. REA.", "RANGUEIL REA. POLY.", "PURPAN REA. POLY."	]))
     df_static
     return (df_static,)
@@ -106,8 +105,8 @@ def _(extract):
 
 
 @app.cell
-def _(df_static_2, df_test, ui):
-    df_test_1 = df_test.join(df_static_2, on=ui.patient_col, how='left')
+def _(df_static_2, df_test, extract):
+    df_test_1 = df_test.join(df_static_2, on=extract.ID_COL, how='left')
     return (df_test_1,)
 
 
@@ -206,11 +205,11 @@ def _(df_test_2, extract, get_max_hour):
 
 
 @app.cell(hide_code=True)
-def _(df_clean, mo, pl, ui):
+def _(df_clean, extract, mo, pl):
     mo.md(rf"""
-    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item()}**
+    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(extract.ID_COL).n_unique()).item()}**
 
-    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h') == 1).select(pl.col(ui.patient_col).n_unique()).item()}**
+    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h') == 1).select(pl.col(extract.ID_COL).n_unique()).item()}**
 
     pourcentage de 1 réels dans ces patients devant être étiquetés 1 : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item()*100:.2f}%**
     """)
@@ -218,8 +217,8 @@ def _(df_clean, mo, pl, ui):
 
 
 @app.cell
-def _(df_clean, pl, ui):
-    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(ui.patient_col).n_unique()).item())
+def _(df_clean, extract, pl):
+    print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(extract.ID_COL).n_unique()).item())
 
 
     print("pourcentage de 0 dans ces patients devant être étiquetés 1 :", df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
@@ -318,7 +317,7 @@ def _():
     #     # --- Calcul 1 : Nombre de patients ---
     #     nb_patients = df_clean2.filter(
     #         pl.col('isDeceased_lt_24h_EXTENDED') == 1
-    #     ).select(pl.col(ui.patient_col).n_unique()).item()
+    #     ).select(pl.col(extract.ID_COL).n_unique()).item()
 
     #     # --- Calcul 2 : Proportion de vrais 1 ---
     #     prop_vrais_1 = df_clean2.filter(

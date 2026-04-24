@@ -188,7 +188,7 @@ def extract_data_survie(file_path):
 # 1. FONCTIONS AUXILIAIRES A PREPARE_DATA
 # ==========================================
 
-def _prepare_base_data(df, target_col, other_cols, used_distribution):
+def prepare_base_data(df, target_col, other_cols, used_distribution):
     """Nettoie, recale le temps et agrège les données historiques."""
     thesaurus = _load_thesaurus(THESAURUS_PATH)
     time_str = "XX:XX"
@@ -231,7 +231,7 @@ def _prepare_base_data(df, target_col, other_cols, used_distribution):
     return df_agg, patients
 
 
-def _generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig):
+def generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig):
     """Construit les fenêtres temporelles selon une distribution aléatoire."""
     if used_distribution == "uniform": 
         offsets = np.array([
@@ -313,7 +313,7 @@ def _generate_random_windows(patients, df_agg, max_hour, used_distribution, targ
     )
 
 
-def _generate_fixed_windows(patients, hour_offset, max_hour):
+def generate_fixed_windows(patients, hour_offset, max_hour):
     """Construit les fenêtres de manière fixe, sans aléatoire."""
     patients = patients.with_columns(pl.lit(hour_offset).alias("hour_offset"))
     
@@ -333,7 +333,7 @@ def _generate_fixed_windows(patients, hour_offset, max_hour):
         )
 
 
-def _finalize_data(df_windows, df_agg, strict_mode):
+def finalize_data(df_windows, df_agg, strict_mode):
     """Effectue la jointure, le filtrage strict, l'imputation et les features finales."""
     thesaurus = _load_thesaurus(THESAURUS_PATH)
     
@@ -384,23 +384,25 @@ def prepare_data(df, hour_offset=0, random=False, max_hour=0, used_distribution=
     
     if other_cols is None: other_cols = []
     
-    # Etape 1 : Nettoyage et Agrégation
-    df_agg, patients = _prepare_base_data(df, target_col, other_cols, used_distribution)
+    # Etape 1 : Nettoyage et Agrégation 
+    # Je mets pas la fonction en privée pour pouvoir utiliser uniquement le prepare_base_data
+    df_agg, patients = prepare_base_data(df, target_col, other_cols, used_distribution)
     if df_agg is None:
         return pl.DataFrame()
 
     # Etape 2 : Construction des fenêtres (Routing Random vs Fixed)
+    # Idem ici je veux pouvoir utiliser la génération de fenêtres à part 
     if random:
-        df_windows = _generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig)
+        df_windows = generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig)
     else:
-        df_windows = _generate_fixed_windows(patients, hour_offset, max_hour)
+        df_windows = generate_fixed_windows(patients, hour_offset, max_hour)
 
     if df_windows is None or df_windows.is_empty():
         print(f" │   ├─ (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
         return pl.DataFrame()
 
     # Etape 3 : Finalisation (Jointure, Imputation, Features)
-    df_full = _finalize_data(df_windows, df_agg, strict_mode)
+    df_full = finalize_data(df_windows, df_agg, strict_mode)
 
     return df_full
 

@@ -19,6 +19,7 @@ def _():
     import pandas as pd
     import polars as pl
     import time
+    import tsfel
     import matplotlib.pyplot as plt
     import seaborn as sns
     import optuna
@@ -52,6 +53,7 @@ def _():
     import utilitaries.marimo_utils as mo_utils
     import utilitaries.extract_data_utils as extract
     import utilitaries.preprocessing_utils as preproc
+    import utilitaries.features_extraction_utils as extract_feat
 
     return (
         Path,
@@ -62,6 +64,7 @@ def _():
         evaluate_lstm_on_test,
         evaluate_on_test,
         extract,
+        extract_feat,
         f1_score,
         load_lstm_from_checkpoint,
         load_model_from_checkpoint,
@@ -203,7 +206,7 @@ def _(gap_end, gap_start, get_max_hour, mo, set_max_hour):
 
 @app.cell
 def _(mo):
-    get_marge, set_marge = mo.state(0)
+    get_marge, set_marge = mo.state(6)
     gap2_start, gap2_end = 0, 24
     return gap2_end, gap2_start, get_marge, set_marge
 
@@ -552,7 +555,7 @@ def _(mo):
 
 @app.cell
 def _(df_static_2, df_test, extract):
-    df_test_1 = df_test.join(df_static_2[[extract.ID_COL, 'age', 'deces_datediff_days', "hx_respi_chronique"]], on=extract.ID_COL, how='left')
+    df_test_1 = df_test.join(df_static_2[[extract.ID_COL, 'age', 'deces_datediff_days', "hx_respi_chronique"]], on=extract.ID_COL, how='inner')
     return (df_test_1,)
 
 
@@ -719,6 +722,12 @@ def _(config, config4, df_test_2, extract, get_max_hour):
 
 
 @app.cell
+def _(df_clean):
+    df_clean.describe()
+    return
+
+
+@app.cell
 def _(df_clean, pl):
     df_with_idx = df_clean.with_row_index("idx")
 
@@ -826,7 +835,7 @@ def _(df_clean_2, extract, pl):
     print("nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(extract.ID_COL).n_unique()).item())
 
 
-    print("pourcentage de 0 dans ces patients devant être étiquetés 1 :", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
+    print("pourcentage de 1 dans ces patients devant être étiquetés 1 :", df_clean_2.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item())
     return
 
 
@@ -1006,18 +1015,20 @@ def _(balance, mo, mo_utils):
 @app.cell
 def _(
     StratifiedGroupKFold,
+    config2,
     config6,
     df_clean_3,
     extract,
+    extract_feat,
     keep_feats,
     pl,
     preproc,
     target_col,
 ):
-    keep_features = keep_feats
+    keep_features = list(keep_feats)
     patient_col = extract.ID_COL
     time_col = extract.TIME_COL2
-    expected_length = 24
+    expected_length = extract.WINDOW_SIZE
     valid_ids = df_clean_3.group_by(patient_col).len().filter(pl.col('len') == expected_length).select(patient_col)
     # On garde les encounters de longueur exacte 
     df_clean_4 = df_clean_3.join(valid_ids, on=patient_col, how='inner')
@@ -1025,12 +1036,6 @@ def _(
         raise ValueError("Aucun patient n'a exactement la longueur attendue.")
     df_clean_4 = df_clean_4.sort(patient_col, time_col)
 
-    # DownSampling
-    # Je veux :
-    # - un groupe isDeceased_lt_24h
-    # - un groupe isDeceased_lt_28d qui ne contient pas les lt_24h
-    # - un groupe sain
-    # que l'addition des 2 derniers groupes fasse le total de lt_24h.
     X = df_clean_4.select(keep_features).to_numpy()
     y = df_clean_4[target_col].to_numpy()
     print(y)
@@ -1043,6 +1048,13 @@ def _(
     train_df = df_clean_4[train_idx].sort([patient_col, time_col])
     test_df = df_clean_4[test_idx].sort([patient_col, time_col])
 
+
+    # DownSampling
+    # Je veux :
+    # - un groupe isDeceased_lt_24h
+    # - un groupe isDeceased_lt_28d qui ne contient pas les lt_24h
+    # - un groupe sain
+    # que l'addition des 2 derniers groupes fasse le total de lt_24h.
     if config6.balance_method == "downsampling_50-50":
         # Downsampling uniquement sur le train
         train_df = preproc.downsample_train_patients(
@@ -1051,50 +1063,59 @@ def _(
             col_24h="isDeceased_lt_24h",
             col_28d="isDeceased_lt_28d",
         )
+    if config2.extraction_type == "time" :
+        # On prépare le jeu d'entraînement
+        (train_df, test_df) = preproc.scaling(train_df, test_df)
+        (X_train, y_train) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
+        # On prend un split (comme train/test mais adapté aux individus)
+        # Normalement pas besoin de sort mais soyons prudents...
+        # Ok maintenant, on applique le scaler sur le dataframe
+        # On retransforme en df polars
+        # On construit la séquence attendue (N, T, F) à partir des deux dataframes train/test
 
-    # On prépare le jeu d'entraînement
-    (train_df, test_df) = preproc.scaling(train_df, test_df)
-    # (train_df, test_df) = (pl.from_pandas(train_pd), pl.from_pandas(test_pd))
-    (X_train_3d, y_train_seq) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, keep_features)  # grouper en fonction d'un individu
-    # On prend un split (comme train/test mais adapté aux individus)
-    # Normalement pas besoin de sort mais soyons prudents...
-    # Ok maintenant, on applique le scaler sur le dataframe
-    # On retransforme en df polars
-    # On construit la séquence attendue (N, T, F) à partir des deux dataframes train/test
+        (X_test_3d, y_test) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, keep_features)
 
-    (X_test_3d, y_test_seq) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, keep_features)
+    elif config2.extraction_type == "TSFEL" :
+        y_test = []
+        y_train = []
+        for subdf in test_df.partition_by(patient_col, maintain_order=True):
+            y_test.append(subdf[target_col][0])  # un seul label par séquence
+
+        for subdf in train_df.partition_by(patient_col, maintain_order=True):
+            y_train.append(subdf[target_col][0])  # un seul label par séquence
+         # On enlève les features non temporelles (y'en a qu'une je pense vu que les autres (même is_conscious) peuvent varier avec le temps)
+        print(keep_features)
+        train_df.describe()
+        tsfel_features = [c for c in keep_features if c != "age"]
+        # TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
+        # TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
+        # TSFEL_train_df.write_parquet("tsfel_train_df.parquet")
+        # TSFEL_test_df.write_parquet("tsfel_test_df.parquet")
+        TSFEL_train_df = pl.read_parquet("tsfel_train_df.parquet")
+        TSFEL_test_df = pl.read_parquet("tsfel_test_df.parquet")
+        TSFEL_train_clean, TSFEL_test_clean, keepVariableList = extract_feat.filtrage_corr_var(TSFEL_train_df, TSFEL_test_df, patient_col, target_col)
+        age_train = train_df.select([extract.ID_COL, "age"]).unique()
+        age_test = test_df.select([extract.ID_COL, "age"]).unique()
+        new_train_df = TSFEL_train_clean.join(age_train, on=extract.ID_COL, how="inner")
+        new_test_df = TSFEL_test_clean.join(age_test, on=extract.ID_COL, how="inner")
+        y_train = new_train_df[target_col].to_numpy()
+        y_test = new_test_df[target_col].to_numpy()
+        new_train_df = new_train_df.select(pl.exclude(patient_col, target_col))
+        new_test_df = new_test_df.select(pl.exclude(patient_col, target_col))
+        # On prépare le jeu d'entraînement
+        (new_train_df_scale, new_test_df_scale) = preproc.scaling(new_train_df, new_test_df)
+
+    else:
+        raise ValueError("Modèle inexistant/Pas implémenté")
     return (
         X_test_3d,
-        X_train_3d,
-        df_clean_4,
-        patient_col,
-        test_df,
+        X_train,
+        new_test_df_scale,
+        new_train_df_scale,
         train_df,
-        y_test_seq,
-        y_train_seq,
+        y_test,
+        y_train,
     )
-
-
-@app.cell
-def _(df_clean_4, test_df, train_df):
-    print(train_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
-
-    print(test_df.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
-
-    print(df_clean_4.group_by('encounterId').max().select('isDeceased_lt_24h').mean())
-    return
-
-
-@app.cell
-def _(df_clean_4, patient_col, pl, target_col):
-    df_clean_4.select(pl.exclude(target_col, patient_col, "DeceasedTimeType", "isDeceased_lt_24h", "isDeceased_lt_28d", "isDeceased_lt_7d", "isDeceased_lt_3m", "isDeceased_gt_3m", "deces_datediff_days")).columns
-    return
-
-
-@app.cell
-def _(train_df):
-    train_df.head()
-    return
 
 
 @app.cell(hide_code=True)
@@ -1113,9 +1134,9 @@ def _(train_df):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Training sur InceptionTime
+def _(config2, mo):
+    mo.md(rf"""
+    ### Training sur {config2.models_name}
     """)
     return
 
@@ -1144,14 +1165,8 @@ def _(config6, mo, mo_utils, run):
 
 
 @app.cell
-def _(y_train_seq):
-    print(y_train_seq)
-    return
-
-
-@app.cell
 def _(
-    X_train_3d,
+    X_train,
     config,
     config2,
     config3,
@@ -1161,11 +1176,14 @@ def _(
     get_unique_path,
     mo,
     modex,
+    new_test_df_scale,
+    new_train_df_scale,
     run,
     train_inception_time,
     train_lstm_model,
     underscore,
-    y_train_seq,
+    y_test,
+    y_train,
 ):
     # on créé un nom unique de modèle
     str_pop = ""
@@ -1177,7 +1195,7 @@ def _(
     print("Entraînement lancé")
     if config2.models_name == "InceptionTimeModified":
         # model, T, history, splits = train_inception_time(
-        #     X_train_3d, y_train_seq,
+        #     X_train, y_train,
         #     num_blocks = 6,
         #     out_channels = 32,
         #     bottleneck_channels = 8,
@@ -1191,21 +1209,42 @@ def _(
         #     patience=10,
         #     save_best_path=path)
         model, T, history, splits = train_inception_time(
-            X_train_3d, y_train_seq,
+            X_train, y_train,
             epochs=100,
             patience=10,
             save_best_path=model_path
             )
     elif config2.models_name == "LstmTimeModified":
         model, T, history, splits = train_lstm_model(
-            X_train_3d, y_train_seq,
+            X_train, y_train,
             epochs=100,
             patience=10,
             save_best_path=model_path
             )
+
+    elif config2.models_name == "RandomForest TSFEL":
+        from sklearn.metrics import classification_report
+        from sklearn.ensemble import RandomForestClassifier
+        seed = 42
+        rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
+        print(new_test_df_scale.shape)
+        print(len(y_train))
+    
+        rf.fit(new_train_df_scale, y_train)
+        y_pred_nb_train = rf.predict(new_train_df_scale)
+        y_pred_nb_test = rf.predict(new_test_df_scale)
+        train_score=rf.score(new_train_df_scale,y_train)
+        test_score=rf.score(new_test_df_scale,y_test)
     else :
         print("oups tu t'es trompé")
-    return model_path, str_pop
+    return (
+        classification_report,
+        model_path,
+        rf,
+        str_pop,
+        test_score,
+        y_pred_nb_test,
+    )
 
 
 @app.cell
@@ -1225,6 +1264,7 @@ def _(mo):
 @app.cell
 def _(
     X_test_3d,
+    classification_report,
     config,
     config2,
     config3,
@@ -1236,17 +1276,22 @@ def _(
     load_model_from_checkpoint,
     modex,
     str_pop,
+    test_score,
     underscore,
-    y_test_seq,
+    y_pred_nb_test,
+    y_test,
 ):
     loaded_model = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt"
     if config2.models_name == "InceptionTimeModified":
-        (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test_seq, loaded_model)
+        (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test, loaded_model)
         (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
 
     elif config2.models_name == "LstmTimeModified":
-        (_auc, brier, T_1) = evaluate_lstm_on_test(X_test_3d, y_test_seq, loaded_model)
+        (_auc, brier, T_1) = evaluate_lstm_on_test(X_test_3d, y_test, loaded_model)
         (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
+    elif config2.extraction_type == "TSFEL":
+        print(f"Le score sur les données de test est {test_score}")
+        print(classification_report(y_test, y_pred_nb_test, target_names=["Alive", "Deceased"], zero_division=0))
     else :
         print("erreur de choix de modèle")
     return T_1, loaded_model, model_1
@@ -1269,13 +1314,34 @@ def _(Path, loaded_model):
 
 
 @app.cell
-def _(T_1, X_test_3d, config2, model_1, predict_proba, predict_proba_lstm):
+def _(
+    T_1,
+    X_test_3d,
+    config2,
+    model_1,
+    new_test_df_scale,
+    predict_proba,
+    predict_proba_lstm,
+    rf,
+):
     # c'est la même fonction pour les 2 modèles donc c'est ok
     if config2.models_name == "InceptionTimeModified":
         probas = predict_proba(model_1, X_test_3d, T=T_1)
     elif config2.models_name == "LstmTimeModified":
         probas = predict_proba_lstm(model_1, X_test_3d, T=T_1)
+    elif config2.models_name == "RandomForest TSFEL":
+        all_probas = rf.predict_proba(new_test_df_scale.to_numpy())
+        classes = list(rf.classes_)
+        positive_idx = classes.index(1)
+        probas = all_probas[:, positive_idx]
+        print(probas)
+    
     return (probas,)
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -1291,10 +1357,10 @@ def _(
     roc_curve,
     save_figure,
     target_col,
-    y_test_seq,
+    y_test,
 ):
-    (fpr, tpr, _thresholds) = roc_curve(y_test_seq, probas)
-    auc = roc_auc_score(y_test_seq, probas)
+    (fpr, tpr, _thresholds) = roc_curve(y_test, probas)
+    auc = roc_auc_score(y_test, probas)
     df_temp =  df_clean_3.group_by("encounterId")
     plt.figure(figsize=(6, 6))
     plt.plot(fpr, tpr, label=f'ROC {config2.models_name} (AUC = {auc:.3f})')
@@ -1332,21 +1398,11 @@ def _(
 
 
 @app.cell
-def _(
-    Path,
-    config2,
-    modex,
-    output_dir,
-    plt,
-    probas,
-    save_figure,
-    sns,
-    y_test_seq,
-):
+def _(Path, config2, modex, output_dir, plt, probas, save_figure, sns, y_test):
     plt.figure()
 
-    sns.kdeplot(probas[y_test_seq == 0], label="Survivants", fill=True)
-    sns.kdeplot(probas[y_test_seq == 1], label="Décès", fill=True)
+    sns.kdeplot(probas[y_test == 0], label="Survivants", fill=True)
+    sns.kdeplot(probas[y_test == 1], label="Décès", fill=True)
 
     plt.xlabel("Probabilité prédite")
     plt.ylabel("Densité")
@@ -1369,9 +1425,8 @@ def _(
     plt,
     probas,
     save_figure,
-    y_test_seq,
+    y_test,
 ):
-    y_test = y_test_seq
     prob_true, prob_pred = calibration_curve(y_test, probas, n_bins=10)
 
     plt.figure()
@@ -1386,7 +1441,7 @@ def _(
     if save_figure.value :
         plt.savefig(output_dir / Path("Calibration_curve"))
     plt.show()
-    return (y_test,)
+    return
 
 
 @app.cell

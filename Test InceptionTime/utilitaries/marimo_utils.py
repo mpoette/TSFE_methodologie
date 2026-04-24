@@ -104,13 +104,32 @@ POPULATION = {
 @dataclass(frozen=True)
 class ConfigModels:
     models_name : str
+    extraction_type : str
 MODELS = {
     "InceptionTimeModified" : ConfigModels(
-        models_name = "InceptionTimeModified"
+        models_name = "InceptionTimeModified",
+        extraction_type = "time"
     ),
     "LstmTimeModified" : ConfigModels(
-        models_name = "LstmTimeModified"
-    )
+        models_name = "LstmTimeModified",
+        extraction_type = "time"
+    ),
+    "RandomForest TSFEL" : ConfigModels(
+        models_name = "RandomForest TSFEL",
+        extraction_type = "TSFEL"
+    ),
+    "XGBoost TSFEL" : ConfigModels(
+        models_name = "XGBoost TSFEL",
+        extraction_type = "TSFEL"
+    ),
+    # "RandomForest tsFresh" : ConfigModels(
+    #     models_name = "RandomForest tsFresh",
+    #     extraction_type = "tsFresh"
+    # ),
+    # "XGBoost tsFresh" : ConfigModels(
+    #     models_name = "XGBoost tsFresh",
+    #     extraction_type = "tsFresh"
+    # )
 }
 
 @dataclass(frozen=True)
