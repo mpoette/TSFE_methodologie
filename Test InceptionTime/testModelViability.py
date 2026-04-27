@@ -54,6 +54,8 @@ def _():
     import utilitaries.extract_data_utils as extract
     import utilitaries.preprocessing_utils as preproc
     import utilitaries.features_extraction_utils as extract_feat
+    import utilitaries.optuna.optuna_utils as optuna_utils
+    import utilitaries.utils as utils
 
     return (
         Path,
@@ -71,6 +73,8 @@ def _():
         mo,
         mo_utils,
         np,
+        optuna,
+        optuna_utils,
         pl,
         plt,
         predict_proba,
@@ -79,8 +83,7 @@ def _():
         roc_auc_score,
         roc_curve,
         sns,
-        train_inception_time,
-        train_lstm_model,
+        utils,
     )
 
 
@@ -158,6 +161,14 @@ def _(config2, mo):
         label=f"Lancer l'entraînement du modèle {config2.models_name}"
     )
     return (run,)
+
+
+@app.cell
+def _(config2, mo):
+    run_search = mo.ui.run_button(
+        label=f"Recherche d'hyperparamètres du modèle {config2.models_name}"
+    )
+    return (run_search,)
 
 
 @app.cell
@@ -326,28 +337,8 @@ def _():
 
 
 @app.cell
-def _(Path):
-    def get_unique_path(path):
-        path = Path(path)
-
-        if not path.exists():
-            return path
-
-        stem = path.stem
-        suffix = path.suffix
-        parent = path.parent
-
-        i = 1
-        new_path = parent / f"{stem}_{i}{suffix}"
-
-        while new_path.exists():
-            i += 1
-            new_path = parent / f"{stem}_{i}{suffix}"
-
-        return new_path
-
-
-    return (get_unique_path,)
+def _():
+    return
 
 
 @app.cell(hide_code=True)
@@ -1107,15 +1098,7 @@ def _(
 
     else:
         raise ValueError("Modèle inexistant/Pas implémenté")
-    return (
-        X_test_3d,
-        X_train,
-        new_test_df_scale,
-        new_train_df_scale,
-        train_df,
-        y_test,
-        y_train,
-    )
+    return X_test_3d, X_train, new_test_df_scale, train_df, y_test, y_train
 
 
 @app.cell(hide_code=True)
@@ -1166,85 +1149,77 @@ def _(config6, mo, mo_utils, run):
 
 @app.cell
 def _(
-    X_train,
     config,
     config2,
     config3,
     config4,
     config5,
     config6,
-    get_unique_path,
     mo,
     modex,
-    new_test_df_scale,
-    new_train_df_scale,
+    optuna_utils,
     run,
-    train_inception_time,
-    train_lstm_model,
     underscore,
-    y_test,
-    y_train,
+    utils,
 ):
     # on créé un nom unique de modèle
     str_pop = ""
     if config5.keep_population != "all_diseases":
         str_pop = "_"+config5.keep_population
-    model_path = get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt")
+    model_path = utils.get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt")
 
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
-    if config2.models_name == "InceptionTimeModified":
-        # model, T, history, splits = train_inception_time(
-        #     X_train, y_train,
-        #     num_blocks = 6,
-        #     out_channels = 32,
-        #     bottleneck_channels = 8,
-        #     kernel_sizes = 21,
-        #     batch_size = 16,
-        #     lr = 0.0009572131781501278,
-        #     weight_decay = 1.216426840149487e-06,
-        #     clip_grad = 0.5,
-        #     use_scheduler = False,
-        #     epochs=100,
-        #     patience=10,
-        #     save_best_path=path)
-        model, T, history, splits = train_inception_time(
-            X_train, y_train,
-            epochs=100,
-            patience=10,
-            save_best_path=model_path
-            )
-    elif config2.models_name == "LstmTimeModified":
-        model, T, history, splits = train_lstm_model(
-            X_train, y_train,
-            epochs=100,
-            patience=10,
-            save_best_path=model_path
-            )
+    optuna_study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}"
+    optuna_storage = f"sqlite:///optuna_{config2.models_name}.db"
+    optuna_stage = ["stage2", "stage1"]
 
-    elif config2.models_name == "RandomForest TSFEL":
-        from sklearn.metrics import classification_report
-        from sklearn.ensemble import RandomForestClassifier
-        seed = 42
-        rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
-        print(new_test_df_scale.shape)
-        print(len(y_train))
-    
-        rf.fit(new_train_df_scale, y_train)
-        y_pred_nb_train = rf.predict(new_train_df_scale)
-        y_pred_nb_test = rf.predict(new_test_df_scale)
-        train_score=rf.score(new_train_df_scale,y_train)
-        test_score=rf.score(new_test_df_scale,y_test)
-    else :
-        print("oups tu t'es trompé")
-    return (
-        classification_report,
-        model_path,
-        rf,
-        str_pop,
-        test_score,
-        y_pred_nb_test,
-    )
+    if config2.models_name == "InceptionTimeModified":
+
+        default_params = {
+            "epochs" : 100,
+            "patience" : 10,
+        }
+        continu = True
+        for optu_s in optuna_stage:
+            if continu :
+                parameters, continu = optuna_utils.get_params(f"{optuna_study_name}_{optu_s}", default_params, optuna_storage)
+                print(f"{optuna_study_name}_{optu_s}")
+        if parameters != default_params:
+            print("le modèle utilisé a été optimisé avec optuna !")
+        else:
+            print("le modèle utilisé n'a pas été optimisé par optuna... \n Application des paramètres par défaut")
+        print(parameters)
+    #     model, T, history, splits = train_inception_time(
+    #         X_train, y_train,
+    #         save_best_path=model_path,
+    #         **parameters
+    #         )
+
+    # elif config2.models_name == "LstmTimeModified":
+    #     model, T, history, splits = train_lstm_model(
+    #         X_train, y_train,
+    #         epochs=100,
+    #         patience=10,
+    #         save_best_path=model_path
+    #         )
+
+    # elif config2.models_name == "RandomForest TSFEL":
+    #     from sklearn.metrics import classification_report
+    #     from sklearn.ensemble import RandomForestClassifier
+    #     seed = 42
+    #     rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
+    #     print(new_test_df_scale.shape)
+    #     print(len(y_train))
+
+    #     rf.fit(new_train_df_scale, y_train)
+    #     y_pred_nb_train = rf.predict(new_train_df_scale)
+    #     y_pred_nb_test = rf.predict(new_test_df_scale)
+    #     train_score=rf.score(new_train_df_scale,y_train)
+    #     test_score=rf.score(new_test_df_scale,y_test)
+    # else :
+    #     print("oups tu t'es trompé")
+    return model_path, str_pop
 
 
 @app.cell
@@ -1278,10 +1253,13 @@ def _(
     str_pop,
     test_score,
     underscore,
+    utils,
     y_pred_nb_test,
     y_test,
 ):
-    loaded_model = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt"
+    base_pattern = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}_*.pt"
+    loaded_model = utils.get_latest_model_path(base_pattern)
+    print("Modèle chargé :", loaded_model)
     if config2.models_name == "InceptionTimeModified":
         (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test, loaded_model)
         (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
@@ -1335,7 +1313,6 @@ def _(
         positive_idx = classes.index(1)
         probas = all_probas[:, positive_idx]
         print(probas)
-    
     return (probas,)
 
 
@@ -1789,6 +1766,7 @@ def _(
     number_marge,
     number_max_hour,
     run,
+    run_search,
     save_figure,
     slider_marge,
     slider_max_hour,
@@ -1823,8 +1801,183 @@ def _(
         run,
         mo.md("-------------------------------"),
         mo.md(f" \n \n **Modification Thesaurus** : Afin d'avoir des valeurs cohérentes, avec une bonne imputation notamment, j'ai rajouté la pression artérielle systolique ainsi que la fréquence respiratoire. Il faudra voir aussi si on laisse les valeurs par défaut à 0 ou non. J'ai pris le parti pris pour la pas et fr de mettre en valeur par défaut une valeur qui fait un score de 0 sur news, sinon ça augmenterait le score juste parce qu'on a pas l'info ce qui n'est pas optimal... J'ai donc 130 pour pas en imputation method ffill_bfill et 16 pour fr en ffill_bfill aussi. Je me suis rendu compte que la valeur par défaut de heart_rate et spo2 était aussi de 0. Cela classe donc instantanément le patient en grave, alors qu'on a juste pas l'information... j'ai mis pour heart_rate une valeur par défaut de 60 et un spo2 de 96%. Je pense qu'il faudra qu'on fasse un point sur les valeurs par défaut du thesaurus car la majorité sont à 0, ce qui peut poser problème"),
+        mo.md("-------------------------------"),
+        run_search,
         mo.md(mo_utils.config_end)]),
     width = "550px")
+    return
+
+
+@app.cell(hide_code=True)
+def _(config2, mo):
+    mo.md(rf"""
+    ### Recherche des meilleurs hyperparamètres de {config2.models_name} avec Optuna
+    """)
+    return
+
+
+@app.cell
+def _(mo, mo_utils, run_search):
+    mo.vstack([
+        mo.md(mo_utils.config_run_button),
+        run_search,
+        mo.md(mo_utils.config_end)])
+    return
+
+
+@app.cell
+def _(mo, run_search):
+    mo.stop(not run_search.value, "Clique pour lancer")
+    res = 3
+    return (res,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Création de l'étude Optuna
+    """)
+    return
+
+
+@app.cell
+def _(
+    config,
+    config2,
+    config3,
+    config4,
+    config6,
+    modex,
+    optuna,
+    res,
+    str_pop,
+    underscore,
+):
+    res2 = res + 1
+    study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}"
+    storage = f"sqlite:///optuna_{config2.models_name}.db"
+    stage = ["stage2", "stage1"]
+    study = optuna.create_study(
+        study_name="test_optuna",
+        direction="minimize",
+        storage=storage,
+        load_if_exists=True,
+    )
+    return stage, storage, study_name
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Stage 1 : recherche large des meilleurs hyperparamètres, en en fixant tout de même certains
+    """)
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(X_train, config2, stage, storage, study_name, y_train):
+    if config2.models_name == "InceptionTimeModified" :
+        import utilitaries.optuna.optuna_inception_utils as optuna_inception
+        fixed_params = {
+        "val_ratio": 0.2,
+        "epochs": 100,
+        "patience": 10,
+        "min_delta": 0.0,
+        "calibrate": False,
+        "device": "cuda",
+        }
+
+
+        study_stage1 = optuna_inception.run_stage1_search(
+            X_train,
+            y_train,
+            n_trials=40,
+            study_name=study_name + "_" + stage[1], 
+            storage=storage,
+            metric_name="val_loss",
+            fixed_params=fixed_params,
+        )
+
+    elif config2.models_name == "LstmTimeModified" :
+        import utilitaries.optuna.optuna_lstm_utils as optuna_lstm
+        fixed_params = {
+        "val_ratio": 0.2,
+        "epochs": 100,
+        "patience": 10,
+        "min_delta": 0.0,
+        "calibrate": False,
+        "device": "cuda",
+        }
+
+        study_stage1 = optuna_lstm.run_lstm_stage1_search(
+            X_train,
+            y_train,
+            n_trials = 40,
+            study_name = study_name + "_" + stage[1],
+            storage = storage,
+            metric_name = "val_loss",
+            fixed_params = fixed_params,
+        )
+
+    else :
+        pass
+    return fixed_params, optuna_inception, optuna_lstm
+
+
+@app.cell
+def _():
+    #### Stage 2 : recherche plus fine autour des valeurs déjà trouvées
+    return
+
+
+@app.cell
+def _(
+    X_train,
+    config2,
+    fixed_params,
+    optuna,
+    optuna_inception,
+    optuna_lstm,
+    stage,
+    storage,
+    study_name,
+    y_train,
+):
+    if config2.models_name == "InceptionTimeModified" :
+        study_stage1_load = optuna.load_study(
+            study_name= study_name + "_" + stage[1],
+            storage=storage
+        )
+        study_stage2 = optuna_inception.run_stage2_search(
+            X_train,
+            y_train,
+            study_stage1_load,
+            n_trials = 25,
+            study_name = study_name + "_" + stage[0],
+            storage=storage,
+            metric_name = "val_loss",
+            fixed_params = fixed_params
+            )
+
+    elif config2.models_name == "LstmTimeModified" :
+        study_stage2 = optuna_lstm.run_lstm_stage2_search(
+            X_train,
+            y_train,
+            study_stage1_load,
+            n_trials = 25,
+            study_name = study_name + "_" + stage[0],
+            storage=storage,
+            metric_name = "val_loss",
+            fixed_params = fixed_params
+            )
+
+    else :
+        pass
     return
 
 

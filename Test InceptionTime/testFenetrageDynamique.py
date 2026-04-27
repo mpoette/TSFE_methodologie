@@ -16,6 +16,16 @@ def _():
 
 
 @app.cell
+def _():
+    import matplotlib as mpl
+
+    mpl.rcParams['pdf.fonttype'] = 42
+    mpl.rcParams['ps.fonttype'] = 42
+
+    return
+
+
+@app.cell
 def _(extract, pl):
     _path = '../Datasets/clean_full_static_ano.parquet'
     df_static = pl.read_parquet(_path)
@@ -191,8 +201,12 @@ def _(df_modif_agg, plt, target_col):
     plt.plot(df_modif_agg["hour_local"], df_modif_agg["alive"], label = "Alive or dead after")
     plt.xlim(0, 128)
     # plt.ylim(0, 10000)
+    plt.ylabel("Nombre de patient")
+    plt.xlabel("heures écoulées depuis l'entrée en réanimation")
     plt.yscale("log")
+    plt.title("Distribution du nombre de patient en fonction du temps écoulé \n depuis l'entrée en réanimation (temps relatif en heure)")
     plt.legend()
+    plt.savefig("distrib_fen_dynamique.png", dpi = 300, bbox_inches="tight", transparent=True)
     plt.show()
     return
 
