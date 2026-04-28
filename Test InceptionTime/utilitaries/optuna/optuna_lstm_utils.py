@@ -78,7 +78,7 @@ def make_objective_lstm_stage1(
                 **params,
             )
 
-            score = optuna_utils.extract_best_val_loss(history)
+            score = optuna_utils.extract_best_val_loss(history, metric_name)
 
             if not np.isfinite(score):
                 raise FloatingPointError("Score non fini.")
@@ -102,11 +102,15 @@ def run_lstm_stage1_search(
     metric_name="val_loss",
     fixed_params=None,
 ):
+    if metric_name == "val_auc":
+        direction = "maximize"
+    else:
+        direction = "minimize"
     sampler = optuna.samplers.TPESampler(seed=42)
 
     study = optuna.create_study(
         study_name=study_name,
-        direction="minimize",
+        direction=direction,
         sampler=sampler,
         storage=storage,
         load_if_exists=True,
@@ -242,7 +246,7 @@ def make_objective_lstm_stage2(
                 **params,
             )
 
-            score = optuna_utils.extract_best_val_loss(history)
+            score = optuna_utils.extract_best_val_loss(history, metric_name)
 
             if not np.isfinite(score):
                 raise FloatingPointError("Score non fini.")
@@ -267,13 +271,17 @@ def run_lstm_stage2_search(
     metric_name="val_loss",
     fixed_params=None,
 ):
+    if metric_name == "val_auc":
+        direction = "maximize"
+    else:
+        direction = "minimize"
     best_stage1_params = study_stage1.best_params
 
     sampler = optuna.samplers.TPESampler(seed=43)
 
     study = optuna.create_study(
         study_name=study_name,
-        direction="minimize",
+        direction=direction,
         sampler=sampler,
         storage=storage,
         load_if_exists=True,

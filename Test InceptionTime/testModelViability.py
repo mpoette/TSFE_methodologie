@@ -83,6 +83,8 @@ def _():
         roc_auc_score,
         roc_curve,
         sns,
+        train_inception_time,
+        train_lstm_model,
         utils,
     )
 
@@ -92,6 +94,21 @@ def _(mo):
     mo.md(r"""
     #### Widgets Marimo utilisés dans ce notebook
     """)
+    return
+
+
+@app.cell
+def _():
+    transparent = False
+    return (transparent,)
+
+
+@app.cell
+def _(plt, transparent):
+    if not transparent:
+        plt.rcParams["figure.facecolor"] = "white"
+        plt.rcParams['axes.facecolor'] = "white"
+        plt.rcParams['savefig.facecolor'] = "white"
     return
 
 
@@ -194,6 +211,22 @@ def _(mo, mo_utils):
         value = "Tout",
         label = "Type de patients que l'on veut garder (ICU_DP filter)")
     return (keep_pop,)
+
+
+@app.cell
+def _(config2, mo):
+    if config2.models_name == "LstmTimeModified":
+        metric_options = ["val_loss", "val_auc"]
+    else:
+        metric_options = ["val_loss"]
+
+    # Dropdown
+    metric_name = mo.ui.dropdown(
+        options=metric_options,
+        value=metric_options[0],
+        label="Métrique choisie pour l'optimisation optuna"
+    )
+    return (metric_name,)
 
 
 @app.cell
@@ -671,9 +704,19 @@ def _(confirm, df_test_1, get_marge, mo, pl):
     return (df_test_2,)
 
 
-@app.cell
-def _():
-    return
+@app.cell(hide_code=True)
+def _(df_clean, extract, mo, mo_utils, pl):
+    result = mo.md(rf"""
+    nombre d'enregistrement de patients morts moins de 24 heures après la fin de la fenêtre : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col(extract.ID_COL).n_unique()).item()}**
+
+    pourcentage de 1 réels dans ces patients devant être étiquetés 1 : **{df_clean.filter(pl.col('isDeceased_lt_24h_EXTENDED') == 1).select(pl.col("isDeceased_lt_24h")).mean().item()*100:.2f}%**
+    """)
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        result,
+        mo.md(mo_utils.config_end)
+    ])
+    return (result,)
 
 
 @app.cell(hide_code=True)
@@ -840,7 +883,12 @@ def _(mo, mo_utils, models):
 
 
 @app.cell
-def _():
+def _(metric_name, mo, mo_utils):
+    mo.vstack([
+        mo.md(mo_utils.config_dropdown_color),
+        metric_name,
+        mo.md(mo_utils.config_end)
+    ])
     return
 
 
@@ -1047,6 +1095,7 @@ def _(
     # - un groupe sain
     # que l'addition des 2 derniers groupes fasse le total de lt_24h.
     if config6.balance_method == "downsampling_50-50":
+    
         # Downsampling uniquement sur le train
         train_df = preproc.downsample_train_patients(
             train_df=train_df,
@@ -1078,12 +1127,17 @@ def _(
         print(keep_features)
         train_df.describe()
         tsfel_features = [c for c in keep_features if c != "age"]
-        # TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
-        # TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
-        # TSFEL_train_df.write_parquet("tsfel_train_df.parquet")
-        # TSFEL_test_df.write_parquet("tsfel_test_df.parquet")
-        TSFEL_train_df = pl.read_parquet("tsfel_train_df.parquet")
-        TSFEL_test_df = pl.read_parquet("tsfel_test_df.parquet")
+        TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
+        TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL2, tsfel_features, target_col)
+        TSFEL_train_df.write_parquet("tsfel_train_df.parquet")
+        TSFEL_test_df.write_parquet("tsfel_test_df.parquet")
+        print("balance method",config6.balance_method)
+        if config6.balance_method == "downsampling_50-50":
+            TSFEL_train_df = pl.read_parquet("tsfel_train_df_50-50.parquet")
+            TSFEL_test_df = pl.read_parquet("tsfel_test_df_50-50.parquet")
+        else:
+            TSFEL_train_df = pl.read_parquet("tsfel_train_df.parquet")
+            TSFEL_test_df = pl.read_parquet("tsfel_test_df.parquet")
         TSFEL_train_clean, TSFEL_test_clean, keepVariableList = extract_feat.filtrage_corr_var(TSFEL_train_df, TSFEL_test_df, patient_col, target_col)
         age_train = train_df.select([extract.ID_COL, "age"]).unique()
         age_test = test_df.select([extract.ID_COL, "age"]).unique()
@@ -1098,7 +1152,15 @@ def _(
 
     else:
         raise ValueError("Modèle inexistant/Pas implémenté")
-    return X_test_3d, X_train, new_test_df_scale, train_df, y_test, y_train
+    return (
+        X_test_3d,
+        X_train,
+        new_test_df_scale,
+        new_train_df_scale,
+        train_df,
+        y_test,
+        y_train,
+    )
 
 
 @app.cell(hide_code=True)
@@ -1149,77 +1211,114 @@ def _(config6, mo, mo_utils, run):
 
 @app.cell
 def _(
+    X_train,
     config,
     config2,
     config3,
     config4,
     config5,
     config6,
+    metric_name,
     mo,
     modex,
+    new_train_df_scale,
+    np,
     optuna_utils,
     run,
+    train_inception_time,
+    train_lstm_model,
     underscore,
     utils,
+    y_train,
 ):
     # on créé un nom unique de modèle
     str_pop = ""
     if config5.keep_population != "all_diseases":
         str_pop = "_"+config5.keep_population
-    model_path = utils.get_unique_path(f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}.pt")
+    
+    extension = ".joblib" if config2.extraction_type == "TSFEL" else ".pt"
+
+    model_path = utils.get_unique_path(
+        f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_"
+        f"{config6.balance_method}{underscore}{modex.value}{str_pop}{extension}"
+    )
 
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
-    optuna_study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}"
+    optuna_study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}_{metric_name.value}"
     optuna_storage = f"sqlite:///optuna_{config2.models_name}.db"
     optuna_stage = ["stage2", "stage1"]
 
-    if config2.models_name == "InceptionTimeModified":
-
-        default_params = {
+    default_params = {
             "epochs" : 100,
             "patience" : 10,
         }
-        continu = True
-        for optu_s in optuna_stage:
-            if continu :
-                parameters, continu = optuna_utils.get_params(f"{optuna_study_name}_{optu_s}", default_params, optuna_storage)
-                print(f"{optuna_study_name}_{optu_s}")
-        if parameters != default_params:
-            print("le modèle utilisé a été optimisé avec optuna !")
-        else:
-            print("le modèle utilisé n'a pas été optimisé par optuna... \n Application des paramètres par défaut")
+    continu = True
+    for optu_s in optuna_stage:
+        if continu :
+            parameters, continu = optuna_utils.get_params(f"{optuna_study_name}_{optu_s}", default_params, optuna_storage)
+    print(f"{optuna_study_name}_{optu_s}")
+    if parameters != default_params:
+        print("le modèle utilisé a été optimisé avec optuna !")
+    else:
+        print("le modèle utilisé n'a pas été optimisé par optuna... \n Application des paramètres par défaut")
+
+    if config2.models_name == "InceptionTimeModified":
         print(parameters)
-    #     model, T, history, splits = train_inception_time(
-    #         X_train, y_train,
-    #         save_best_path=model_path,
-    #         **parameters
-    #         )
+        model, T, history, splits = train_inception_time(
+            X_train, y_train,
+            save_best_path=model_path,
+            **parameters
+            )
 
-    # elif config2.models_name == "LstmTimeModified":
-    #     model, T, history, splits = train_lstm_model(
-    #         X_train, y_train,
-    #         epochs=100,
-    #         patience=10,
-    #         save_best_path=model_path
-    #         )
+    elif config2.models_name == "LstmTimeModified":
+        model, T, history, splits = train_lstm_model(
+            X_train, y_train,
+            epochs=100,
+            patience=10,
+            save_best_path=model_path
+            )
 
-    # elif config2.models_name == "RandomForest TSFEL":
-    #     from sklearn.metrics import classification_report
-    #     from sklearn.ensemble import RandomForestClassifier
-    #     seed = 42
-    #     rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
-    #     print(new_test_df_scale.shape)
-    #     print(len(y_train))
+    elif config2.models_name == "RandomForest TSFEL":
+        from sklearn.metrics import classification_report
+        from sklearn.ensemble import RandomForestClassifier
+        import joblib
+        seed = 42
+        rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
+        rf.fit(new_train_df_scale, y_train)
+        joblib.dump(rf, model_path)
+    elif config2.models_name == "XGBoost TSFEL":
+        from sklearn.metrics import classification_report
+        from xgboost import XGBClassifier
+        import joblib
 
-    #     rf.fit(new_train_df_scale, y_train)
-    #     y_pred_nb_train = rf.predict(new_train_df_scale)
-    #     y_pred_nb_test = rf.predict(new_test_df_scale)
-    #     train_score=rf.score(new_train_df_scale,y_train)
-    #     test_score=rf.score(new_test_df_scale,y_test)
-    # else :
-    #     print("oups tu t'es trompé")
-    return model_path, str_pop
+        X_train_tsfel = new_train_df_scale.to_numpy()
+        y_train_tsfel = np.asarray(y_train).astype(int)
+
+        n_pos = np.sum(y_train_tsfel == 1)
+        n_neg = np.sum(y_train_tsfel == 0)
+
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError(
+                f"XGBoost nécessite les deux classes. "
+                f"Classes trouvées: {np.unique(y_train_tsfel, return_counts=True)}"
+            )
+
+        ratio = n_neg / n_pos
+
+        xgb = XGBClassifier(
+            scale_pos_weight=ratio,
+            random_state=42,
+            eval_metric="logloss",
+            missing=np.nan,
+        )
+
+        xgb.fit(X_train_tsfel, y_train_tsfel)
+        joblib.dump(xgb, model_path)
+    
+    else :
+        print("oups tu t'es trompé")
+    return classification_report, extension, joblib, model_path, str_pop
 
 
 @app.cell
@@ -1247,18 +1346,22 @@ def _(
     config6,
     evaluate_lstm_on_test,
     evaluate_on_test,
+    extension,
+    joblib,
     load_lstm_from_checkpoint,
     load_model_from_checkpoint,
     modex,
+    new_test_df_scale,
+    new_train_df_scale,
     str_pop,
-    test_score,
     underscore,
     utils,
-    y_pred_nb_test,
     y_test,
+    y_train,
 ):
-    base_pattern = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}_*.pt"
-    loaded_model = utils.get_latest_model_path(base_pattern)
+    base_pattern = f"models/{config2.models_name}/{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}_*{extension}"
+    print(base_pattern, extension)
+    loaded_model = utils.get_latest_model_path(base_pattern, extension)
     print("Modèle chargé :", loaded_model)
     if config2.models_name == "InceptionTimeModified":
         (_auc, brier, T_1) = evaluate_on_test(X_test_3d, y_test, loaded_model)
@@ -1268,11 +1371,16 @@ def _(
         (_auc, brier, T_1) = evaluate_lstm_on_test(X_test_3d, y_test, loaded_model)
         (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
     elif config2.extraction_type == "TSFEL":
+        clf = joblib.load(loaded_model)
+        y_pred_nb_train = clf.predict(new_train_df_scale)
+        y_pred_nb_test = clf.predict(new_test_df_scale)
+        train_score=clf.score(new_train_df_scale,y_train)
+        test_score=clf.score(new_test_df_scale,y_test)
         print(f"Le score sur les données de test est {test_score}")
         print(classification_report(y_test, y_pred_nb_test, target_names=["Alive", "Deceased"], zero_division=0))
     else :
         print("erreur de choix de modèle")
-    return T_1, loaded_model, model_1
+    return T_1, clf, loaded_model, model_1
 
 
 @app.cell
@@ -1295,24 +1403,24 @@ def _(Path, loaded_model):
 def _(
     T_1,
     X_test_3d,
+    clf,
     config2,
     model_1,
     new_test_df_scale,
     predict_proba,
     predict_proba_lstm,
-    rf,
 ):
     # c'est la même fonction pour les 2 modèles donc c'est ok
     if config2.models_name == "InceptionTimeModified":
         probas = predict_proba(model_1, X_test_3d, T=T_1)
     elif config2.models_name == "LstmTimeModified":
         probas = predict_proba_lstm(model_1, X_test_3d, T=T_1)
-    elif config2.models_name == "RandomForest TSFEL":
-        all_probas = rf.predict_proba(new_test_df_scale.to_numpy())
-        classes = list(rf.classes_)
+    elif config2.extraction_type == "TSFEL":
+        all_probas = clf.predict_proba(new_test_df_scale.to_numpy())
+        classes = list(clf.classes_)
         positive_idx = classes.index(1)
         probas = all_probas[:, positive_idx]
-        print(probas)
+    
     return (probas,)
 
 
@@ -1334,6 +1442,7 @@ def _(
     roc_curve,
     save_figure,
     target_col,
+    transparent,
     y_test,
 ):
     (fpr, tpr, _thresholds) = roc_curve(y_test, probas)
@@ -1369,13 +1478,24 @@ def _(
     plt.legend(loc='lower right')
     plt.grid(True)
     if save_figure.value :
-        plt.savefig(output_dir / Path("Courbe_ROC"))
+        plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return (auc,)
 
 
 @app.cell
-def _(Path, config2, modex, output_dir, plt, probas, save_figure, sns, y_test):
+def _(
+    Path,
+    config2,
+    modex,
+    output_dir,
+    plt,
+    probas,
+    save_figure,
+    sns,
+    transparent,
+    y_test,
+):
     plt.figure()
 
     sns.kdeplot(probas[y_test == 0], label="Survivants", fill=True)
@@ -1387,7 +1507,7 @@ def _(Path, config2, modex, output_dir, plt, probas, save_figure, sns, y_test):
     plt.legend()
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("KDE"))
+        plt.savefig(output_dir / Path("KDE"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return
 
@@ -1402,6 +1522,7 @@ def _(
     plt,
     probas,
     save_figure,
+    transparent,
     y_test,
 ):
     prob_true, prob_pred = calibration_curve(y_test, probas, n_bins=10)
@@ -1416,7 +1537,7 @@ def _(
     plt.legend()
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("Calibration_curve"))
+        plt.savefig(output_dir / Path("Calibration_curve"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return
 
@@ -1432,6 +1553,7 @@ def _(
     plt,
     probas,
     save_figure,
+    transparent,
     y_test,
 ):
     _thresholds = np.linspace(0.1, 0.9, 50)
@@ -1450,7 +1572,7 @@ def _(
     plt.title(f"Evolution du F1 score en fonction du Threshold pour le modèle {config2.models_name} avec le {modex.value}")
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("threshold"))
+        plt.savefig(output_dir / Path("threshold"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     print(f'Le meilleur f1 score de{best_f1: .2f} est atteint lorsque le threshold est égal à{best_t: .2f}')
     return (best_t,)
@@ -1468,6 +1590,7 @@ def _(
     probas,
     save_figure,
     sns,
+    transparent,
     y_test,
 ):
     y_pred = (probas >= best_t).astype(int)
@@ -1478,7 +1601,7 @@ def _(
     plt.ylabel('Réel')
     plt.title(f'Confusion matrix du modèle {config2.models_name} sur {modex.value} (threshold={ best_t: .2f})')
     if save_figure.value :
-        plt.savefig(output_dir / Path("confusion_matrix"))
+        plt.savefig(output_dir / Path("confusion_matrix"), dpi = 300, bbox_inches="tight", transparent=transparent, facecolor = "white")
     plt.show()
     return
 
@@ -1493,6 +1616,7 @@ def _(
     plt,
     probas,
     save_figure,
+    transparent,
     y_test,
 ):
     df_brier = pl.DataFrame({"y" : y_test, "pred" : probas})
@@ -1572,7 +1696,7 @@ def _(
     plt.title(f"Brier par tranches fixes de risque pour le {modex.value}")
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerTrancheRisk"))
+        plt.savefig(output_dir / Path("brierPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
 
 
@@ -1589,7 +1713,7 @@ def _(
     plt.title(f"Brier par déciles de patients pour le {modex.value}")
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerDec"))
+        plt.savefig(output_dir / Path("brierPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
 
 
@@ -1610,7 +1734,7 @@ def _(
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerDec"))
+        plt.savefig(output_dir / Path("calibPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
 
 
@@ -1633,7 +1757,7 @@ def _(
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerTrancheRisk"))
+        plt.savefig(output_dir / Path("calibPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return
 
@@ -1647,7 +1771,17 @@ def _(mo):
 
 
 @app.cell
-def _(Path, df_clean_3, extract, modex, output_dir, pl, plt, save_figure):
+def _(
+    Path,
+    df_clean_3,
+    extract,
+    modex,
+    output_dir,
+    pl,
+    plt,
+    save_figure,
+    transparent,
+):
     # D'abord, on met tous les patients sur le même temps pour pouvoir les merge
     df_modif = df_clean_3.with_columns(
         pl.arange(0,pl.count()).over(extract.ID_COL).alias("hour_local")
@@ -1700,7 +1834,7 @@ def _(Path, df_clean_3, extract, modex, output_dir, pl, plt, save_figure):
     plt.ylabel("NEWS score")
     plt.title(f"Évolution du score NEWS sur 24 heures pour les features du {modex.value}")
     if save_figure.value :
-        plt.savefig(output_dir / Path("NEWS_24H"))
+        plt.savefig(output_dir / Path("NEWS_24H"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return (df_modif,)
 
@@ -1719,6 +1853,7 @@ def _(
     roc_auc_score,
     save_figure,
     target_col,
+    transparent,
 ):
     rows = []
     rows2 = []
@@ -1745,7 +1880,7 @@ def _(
     plt.title(f"Évolution de l'AUC de NEWS sur 24 heures pour les features du {modex.value}")
     plt.legend()
     if save_figure.value :
-        plt.savefig(output_dir / Path("AUC_NEWS_24H"))
+        plt.savefig(output_dir / Path("AUC_NEWS_24H"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return
 
@@ -1758,6 +1893,7 @@ def _(
     custom_features,
     keep_feats,
     keep_pop,
+    metric_name,
     mo,
     mo_utils,
     mode,
@@ -1765,6 +1901,7 @@ def _(
     modex,
     number_marge,
     number_max_hour,
+    result,
     run,
     run_search,
     save_figure,
@@ -1787,6 +1924,7 @@ def _(
         mo.md("-------------------------------"),
         confirm,
         mo.md("-------------------------------"),
+        result,
         balance,
         models,
         cleaning,
@@ -1797,6 +1935,8 @@ def _(
         mo.md(f"**Features gardées :** `{keep_feats}`"),
         mo.md(f"**Soit en Français :** \n{str_keep_feats}"),
         save_figure,
+        mo.md("-------------------------------"),
+        metric_name,
         mo.md("-------------------------------"),
         run,
         mo.md("-------------------------------"),
@@ -1847,6 +1987,7 @@ def _(
     config3,
     config4,
     config6,
+    metric_name,
     modex,
     optuna,
     res,
@@ -1854,7 +1995,7 @@ def _(
     underscore,
 ):
     res2 = res + 1
-    study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}"
+    study_name = f"{config2.models_name}_{config.name}_{config3.clean}_{config4.target_name}_{config6.balance_method}{underscore}{modex.value}{str_pop}_{metric_name.value}"
     storage = f"sqlite:///optuna_{config2.models_name}.db"
     stage = ["stage2", "stage1"]
     study = optuna.create_study(
@@ -1880,7 +2021,7 @@ def _():
 
 
 @app.cell
-def _(X_train, config2, stage, storage, study_name, y_train):
+def _(X_train, config2, metric_name, stage, storage, study_name, y_train):
     if config2.models_name == "InceptionTimeModified" :
         import utilitaries.optuna.optuna_inception_utils as optuna_inception
         fixed_params = {
@@ -1913,14 +2054,13 @@ def _(X_train, config2, stage, storage, study_name, y_train):
         "calibrate": False,
         "device": "cuda",
         }
-
         study_stage1 = optuna_lstm.run_lstm_stage1_search(
             X_train,
             y_train,
             n_trials = 40,
             study_name = study_name + "_" + stage[1],
             storage = storage,
-            metric_name = "val_loss",
+            metric_name = metric_name.value,
             fixed_params = fixed_params,
         )
 
@@ -1940,6 +2080,7 @@ def _(
     X_train,
     config2,
     fixed_params,
+    metric_name,
     optuna,
     optuna_inception,
     optuna_lstm,
@@ -1948,11 +2089,11 @@ def _(
     study_name,
     y_train,
 ):
-    if config2.models_name == "InceptionTimeModified" :
-        study_stage1_load = optuna.load_study(
+    study_stage1_load = optuna.load_study(
             study_name= study_name + "_" + stage[1],
             storage=storage
         )
+    if config2.models_name == "InceptionTimeModified" :
         study_stage2 = optuna_inception.run_stage2_search(
             X_train,
             y_train,
@@ -1960,7 +2101,7 @@ def _(
             n_trials = 25,
             study_name = study_name + "_" + stage[0],
             storage=storage,
-            metric_name = "val_loss",
+            metric_name = metric_name.value,
             fixed_params = fixed_params
             )
 
@@ -1972,7 +2113,7 @@ def _(
             n_trials = 25,
             study_name = study_name + "_" + stage[0],
             storage=storage,
-            metric_name = "val_loss",
+            metric_name =  metric_name.value,
             fixed_params = fixed_params
             )
 

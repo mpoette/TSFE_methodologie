@@ -106,7 +106,7 @@ def _(extract):
 
 @app.cell
 def _(df_static_2, df_test, extract):
-    df_test_1 = df_test.join(df_static_2, on=extract.ID_COL, how='left')
+    df_test_1 = df_test.join(df_static_2, on=extract.ID_COL, how='inner')
     return (df_test_1,)
 
 
@@ -279,89 +279,140 @@ def _():
 
 
 @app.cell
-def _():
-    # import itertools
-    # import plotly.express as px
+def _(df_test_1, extract, pl):
+    import itertools
+    import plotly.express as px
 
-    # # 1. Définir les plages de valeurs à tester 
-    # durees_sanctuarisees = [0, 6, 12]
-    # marges_erreur = [0, 6, 12, 18, 24, 30]
-    # resultats = []
+    # 1. Définir les plages de valeurs à tester 
+    durees_sanctuarisees = [0, 6, 12]
+    marges_erreur = [0, 6, 12, 18, 24, 30]
+    resultats = []
 
-    # # 2. Boucler sur toutes les combinaisons possibles
-    # for duree_i, marge_i in itertools.product(durees_sanctuarisees, marges_erreur):
+    # 2. Boucler sur toutes les combinaisons possibles
+    for duree_i, marge_i in itertools.product(durees_sanctuarisees, marges_erreur):
 
-    #     df_test_for = df_test_1.with_columns([
-    #         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
-    #           .then(1)
-    #           .otherwise(0)
-    #           .alias("isDeceased_lt_24h"),
+        df_test_for = df_test_1.with_columns([
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h"),
 
-    #         pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge_i)
-    #           .then(1)
-    #           .otherwise(0)
-    #           .alias("isDeceased_lt_24h_EXTENDED")
-    #     ])
+            pl.when(pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24 + marge_i)
+              .then(1)
+              .otherwise(0)
+              .alias("isDeceased_lt_24h_EXTENDED")
+        ])
 
-    #     df_clean2 = extract.prepare_data(
-    #         df_test_for, 
-    #         hour_offset = 0, 
-    #         random = True,
-    #         strict_mode = True,
-    #         max_hour = duree_i, 
-    #         used_distribution="flexible", 
-    #         target_col = "isDeceased_lt_24h_EXTENDED", 
-    #         other_cols = ["isDeceased_lt_24h"]
-    #     )
+        df_clean2 = extract.prepare_data(
+            df_test_for, 
+            hour_offset = 0, 
+            random = True,
+            strict_mode = True,
+            max_hour = duree_i, 
+            used_distribution="flexible", 
+            target_col = "isDeceased_lt_24h_EXTENDED", 
+            other_cols = ["isDeceased_lt_24h"]
+        )
 
-    #     # --- Calcul 1 : Nombre de patients ---
-    #     nb_patients = df_clean2.filter(
-    #         pl.col('isDeceased_lt_24h_EXTENDED') == 1
-    #     ).select(pl.col(extract.ID_COL).n_unique()).item()
+        # --- Calcul 1 : Nombre de patients ---
+        nb_patients = df_clean2.filter(
+            pl.col('isDeceased_lt_24h_EXTENDED') == 1
+        ).select(pl.col(extract.ID_COL).n_unique()).item()
 
-    #     # --- Calcul 2 : Proportion de vrais 1 ---
-    #     prop_vrais_1 = df_clean2.filter(
-    #         pl.col('isDeceased_lt_24h_EXTENDED') == 1
-    #     ).select(pl.col("isDeceased_lt_24h")).mean().item()
+        # --- Calcul 2 : Proportion de vrais 1 ---
+        prop_vrais_1 = df_clean2.filter(
+            pl.col('isDeceased_lt_24h_EXTENDED') == 1
+        ).select(pl.col("isDeceased_lt_24h")).mean().item()
 
-    #     # Stocker le résultat de cette combinaison
-    #     resultats.append({
-    #         "Duree_Sanctuarisee": duree_i,
-    #         "Marge_Erreur": marge_i,
-    #         "Nb_Patients": nb_patients,
-    #         "Proportion_Vrais_1": prop_vrais_1
-    #     })
+        # Stocker le résultat de cette combinaison
+        resultats.append({
+            "Duree_Sanctuarisee": duree_i,
+            "Marge_Erreur": marge_i,
+            "Nb_Patients": nb_patients,
+            "Proportion_Vrais_1": prop_vrais_1
+        })
 
-    # # 3. Créer un DataFrame récapitulatif
-    # df_results = pl.DataFrame(resultats)
+    # 3. Créer un DataFrame récapitulatif
+    df_results = pl.DataFrame(resultats)
 
-    # # === PLOTS AVEC PLOTLY ===
+    # === PLOTS AVEC PLOTLY ===
 
-    # # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
-    # fig1 = px.density_heatmap(
-    #     df_results.to_pandas(), 
-    #     x="Marge_Erreur", 
-    #     y="Duree_Sanctuarisee", 
-    #     z="Nb_Patients", 
-    #     histfunc="avg", 
-    #     title="Impact sur le Nombre de Patients gardés",
-    #     color_continuous_scale="Viridis",
-    #     text_auto=True 
-    # )
-    # fig1.show()
+    # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
+    fig1 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Nb_Patients", 
+        histfunc="avg", 
+        title="Impact sur le Nombre de Patients gardés",
+        color_continuous_scale="Viridis",
+        text_auto=True 
+    )
+    fig1.update_layout(font = dict(size=18),
+                      title_x = 0.5)
+    fig1.write_image("heatmap_nb_patients.png", scale = 3)
+    fig1.show()
 
-    # # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
-    # fig2 = px.density_heatmap(
-    #     df_results.to_pandas(), 
-    #     x="Marge_Erreur", 
-    #     y="Duree_Sanctuarisee", 
-    #     z="Proportion_Vrais_1", 
-    #     histfunc="avg",
-    #     title="Impact sur la Proportion de vrais '1'",
-    #     color_continuous_scale="RdBu", 
-    #     text_auto=".2f" 
-    # )
-    # fig2.show()
+    # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
+    fig2 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Proportion_Vrais_1", 
+        histfunc="avg",
+        title="Impact sur la Proportion de vrais '1'",
+        color_continuous_scale="RdBu", 
+        text_auto=".2f" 
+    )
+    fig2.update_layout(font = dict(size=18),
+                      title_x = 0.5)
+    fig2.write_image("heatmap_proportion_un.png", scale = 3)
+    fig2.show()
+    return df_results, px
+
+
+@app.cell
+def _(df_results, px):
+    # Graphique 1 : Heatmap de l'impact sur le NOMBRE DE PATIENTS
+    fig11 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Nb_Patients", 
+        histfunc="avg", 
+        title="Impact sur le Nombre de Patients isDeceased_lt_24h gardés",
+        color_continuous_scale="Viridis",
+        text_auto=True 
+    )
+    fig11.update_layout(font = dict(size=18),
+                      title_x = 0.5,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)")
+
+    fig11.update_xaxes(type="category")
+    fig11.update_yaxes(type="category")
+    fig11.write_image("heatmap_nb_patients.png", scale = 3)
+    fig11.show()
+
+    # Graphique 2 : Heatmap de l'impact sur la PROPORTION DE VRAIS "1"
+    fig22 = px.density_heatmap(
+        df_results.to_pandas(), 
+        x="Marge_Erreur", 
+        y="Duree_Sanctuarisee", 
+        z="Proportion_Vrais_1", 
+        histfunc="avg",
+        title="Impact sur la Proportion de 'vrais' 1",
+        color_continuous_scale="RdBu", 
+        text_auto=".2f" 
+    )
+    fig22.update_layout(font = dict(size=18),
+                      title_x = 0.5,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)")
+    fig22.update_xaxes(type="category")
+    fig22.update_yaxes(type="category")
+    fig22.write_image("heatmap_proportion_un.png", scale = 3)
+    fig22.show()
     return
 
 

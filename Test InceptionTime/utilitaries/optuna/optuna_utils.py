@@ -22,17 +22,31 @@ def get_params(study_name, default_params, storage):
     return params, use_defaults
 
 
-def extract_best_val_loss(history):
+def extract_best_val_loss(history, metric_name):
     """
-    Fonction qui extrait la meilleure valeur de loss sur validation (val_loss)
+    Fonction qui extrait la meilleure valeur de loss/auc sur validation (val_loss/val_auc)
     """
-    if history is None:
-        raise ValueError("history est None.")
-    if "val_loss" not in history:
-        raise ValueError("La clé 'val_loss' est absente de history.")
- 
-    values = [v for v in history["val_loss"] if v is not None and np.isfinite(v)]
+    values = [
+        v for v in history.get(metric_name, [])
+        if v is not None and np.isfinite(v)
+    ]
     if not values:
-        raise ValueError("Aucune val_loss valide trouvée.")
+        raise ValueError("Aucune val_loss/val_auc valide trouvée.")
  
-    return float(min(values))
+    if metric_name == "val_loss":
+        return float(min(values))
+    elif metric_name == "val_auc":
+        return float(max(values))
+
+
+
+def neighbors_from_choices(best_value, choices):
+    """
+    Pour un hyperparam catégoriel ordinal, on prend le voisin du dessous,
+    lui-même, et le voisin du dessus.
+    """
+    choices = list(choices)
+    idx = choices.index(best_value)
+    low_idx = max(0, idx - 1)
+    high_idx = min(len(choices) - 1, idx + 1)
+    return choices[low_idx:high_idx + 1]

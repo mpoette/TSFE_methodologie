@@ -4,10 +4,6 @@ import os
 from pathlib import Path
 def get_unique_path(path):
     path = Path(path)
-
-    if not path.exists():
-        return path
-
     stem = path.stem
     suffix = path.suffix
     parent = path.parent
@@ -22,14 +18,14 @@ def get_unique_path(path):
     return new_path
 
 
-def get_latest_model_path(base_pattern):
+def get_latest_model_path(base_pattern, extension):
     files = glob.glob(base_pattern)
 
     if not files:
         return None
 
-    def extract_number(f):
-        match = re.search(r"_(\d+)\.pt$", f)
+    def extract_number(f, extension = extension):
+        match = re.search(rf"_(\d+)\{extension}$", f)
         return int(match.group(1)) if match else -1
 
     return max(files, key=extract_number)
