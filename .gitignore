@@ -6,9 +6,9 @@ __pycache__/
 *.db
 */outputs/
 */.ipynb_checkpoints/
-*.png
 */models/
 **/__marimo__/
 */maybe useful/
 *.parquet
 *.npy
+!/static/
