@@ -1,0 +1,12 @@
+{
+    "pam" : ["pam_invasive", "pam_non_invasive"],
+    "pad" : ["pad_invasive", "pad_non_invasive"],
+    "pas" : ["pas_invasive", "pas_non_invasive"],
+    "cvvf" : ["db_sang_cvvf"],
+    "hdi" : ["db_sang_hdi"],
+    "eer" : ["db_sang_cvvf", "db_sang_hdi"],
+    "is_prone" : ["installation"],
+    "is_ventilated" : ["mode_ventilation", "endotracheal_tube"],
+    "fio2_corr" : ["fio2", "admin_o2", "o2_flow"],
+    "urine_rate" : ["urine_output"]
+}
