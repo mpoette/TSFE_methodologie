@@ -125,7 +125,6 @@ def _():
         pl,
         plt,
         predict_proba,
-        predict_proba_lstm,
         preproc,
         roc_auc_score,
         roc_curve,
@@ -133,7 +132,6 @@ def _():
         sns,
         train_inception_time,
         train_lstm_model,
-        utils,
     )
 
 
@@ -698,6 +696,130 @@ def _(config_balance):
 
 
 @app.cell
+def _():
+    # groups = df_clean_3[patient_col].to_numpy()
+
+    # sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    # (train_idx, test_idx) = next(sgkf.split(X=X, y=y, groups=groups))
+
+    # # Tri obligatoire (même si en théorie il est déjà fait)
+    # train_df = df_clean_3[train_idx].sort([patient_col, time_col])
+    # test_df = df_clean_3[test_idx].sort([patient_col, time_col])
+
+    # if config_models.extraction_type == "TSFEL" : 
+
+    #      # On enlève les features statiques
+    #     static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
+
+    #     # Gestion des noms de fichier Boruta
+    #     str_boruta = "_Boruta" if boruta_filter.value else ""
+    #     filename_train = f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
+    #     filename_test = f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
+
+    #     if extract_tsfel.value :
+    #         # Extraction TSFEL brute
+    #         tsfel_features = [c for c in final_features if c not in static_feats]
+    #         TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
+    #         TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
+
+    #         # Filtrage corrélation/variance
+    #         TSFEL_train_clean, TSFEL_test_clean, keepVariableList = extract_feat.filtrage_corr_var(TSFEL_train_df, TSFEL_test_df, patient_col, target_col)
+
+    #         # Jointure avec données statiques
+    #         static_train = train_df.select([extract.ID_COL, *static_feats]).unique()
+    #         static_test = test_df.select([extract.ID_COL, *static_feats]).unique()
+    #         new_train_df = TSFEL_train_clean.join(static_train, on=extract.ID_COL, how="inner")
+    #         new_test_df = TSFEL_test_clean.join(static_test, on=extract.ID_COL, how="inner")
+
+    #         # Save 1 : Dataset complet sans Boruta
+    #         new_train_df.write_parquet(f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
+    #         new_test_df.write_parquet(f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
+
+    #         if boruta_filter.value:
+    #             # Calcul de Boruta
+    #             new_train_df, new_test_df, keepVariableList = extract_feat.filtrage_boruta( new_train_df, new_test_df, patient_col, target_col, max_iter = 100, seed = seed)
+
+    #             # Save 2 : Dataset complet avec Boruta
+    #             new_train_df.write_parquet(filename_train)
+    #             new_test_df.write_parquet(filename_test)
+    #     else:
+    #         # Lecture des Dataset soit avec Boruta soit sans
+    #         new_train_df = pl.read_parquet(filename_train)
+    #         new_test_df = pl.read_parquet(filename_test)
+    #         keepVariableList = [c for c in new_train_df.columns if c not in [extract.ID_COL, target_col]]
+
+    #     # Equilibrage
+    #     new_train_df = preproc.equilibrer_dataset_tabulaire(new_train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
+
+    #     # Tri (obligatoire pour comparabilité)
+    #     new_train_df = new_train_df.sort(patient_col)
+    #     new_test_df = new_test_df.sort(patient_col)
+
+    #     # Sécurité reproductibilité/intégrité : On s'assure qu'il n'y a qu'UNE seule ligne par patient
+    #     assert new_train_df.height == new_train_df[extract.ID_COL].n_unique(), "Erreur d'alignement Train TSFEL"
+    #     assert new_test_df.height == new_test_df[extract.ID_COL].n_unique(), "Erreur d'alignement Test TSFEL"
+    #     y_train = new_train_df[target_col].to_numpy()
+    #     y_test = new_test_df[target_col].to_numpy()
+    #     new_train_df = new_train_df.select(pl.exclude(patient_col, target_col))
+    #     new_test_df = new_test_df.select(pl.exclude(patient_col, target_col))
+
+    #     # Scaling
+    #     (X_train, X_test) = preproc.scaling(new_train_df, new_test_df)
+
+    # elif config_models.extraction_type == "time" :
+
+    #     # Gestion exclusive de l'équilibrage homemade (avec polars)
+    #     if config_balance.balance_method in ["downsampling_homemade", ""]:
+    #         train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
+
+    #     # On prépare le jeu d'entraînement
+
+    #     # Scaling
+    #     (train_df, test_df) = preproc.scaling(train_df, test_df)
+
+    #     # Transformation en 3D Array
+    #     (X_train, y_train) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
+    #     (X_test, y_test) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
+
+    #     # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
+    #     if config_balance.balance_method not in ["downsampling_homemade", ""]:
+    #         # On applatit le 3D Array en 2D Array
+    #         n_samples, n_timesteps, n_feats = X_train.shape
+    #         X_train_2d = X_train.reshape(n_samples, n_timesteps * n_feats)
+
+    #         # On applique la méthode d'équilibrage imblearn
+    #         if config_balance.balance_method == "downsampling_50-50":
+    #             from imblearn.under_sampling import RandomUnderSampler
+    #             rs = RandomUnderSampler(random_state=seed)
+    #         elif config_balance.balance_method == "upsampling_50-50":
+    #             from imblearn.over_sampling import RandomOverSampler
+    #             rs = RandomOverSampler(random_state=seed)
+    #         else:
+    #             raise ValueError("Cet équilibrage n'a pas encore été implémenté")
+
+    #         X_res_2d, y_train = rs.fit_resample(X_train_2d, y_train)
+
+    #         # On redonne sa forme 3D d'origine au tenseur équilibré
+    #         X_train = X_res_2d.reshape(-1, n_timesteps, n_feats)
+
+    #     # TODO : externaliser la gestion des NaN
+    #     # On enlève les NaN après extraction de features
+    #     total_nan = np.isnan(X_train).sum()
+    #     # Compte les NaN pour chaque feature
+    #     nan_par_feature = np.isnan(X_train).sum(axis=(0, 1))
+    #     # for i, feat_name in enumerate(final_features):
+    #         # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
+    #     print(f"Nombre total de valeurs NaN : {total_nan}")
+
+    #     X_train = np.nan_to_num(X_train, nan=0.0)
+    #     X_test = np.nan_to_num(X_test, nan = 0.0)
+
+    # else:
+    #     raise ValueError("Modèle inexistant/Pas implémenté")
+    return
+
+
+@app.cell
 def _(
     StratifiedGroupKFold,
     X,
@@ -715,6 +837,7 @@ def _(
     final_features,
     modex,
     np,
+    os,
     patient_col,
     pl,
     preproc,
@@ -723,126 +846,142 @@ def _(
     time_col,
     y,
 ):
+    if config_models.extraction_type == "TSFEL":
+        filename_global_brut = f"tsfel_global_brut_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet"
+        if extract_tsfel.value or not os.path.exists(filename_global_brut):
+            print("Lancement de l'extraction TSFEL globale sur tous les patients")
+            # On enlève les features statiques
+            static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
+            tsfel_features = [c for c in final_features if c not in static_feats]
+
+            TSFEL_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
+            static_global = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
+
+            df_tsfel_complet = TSFEL_global_df.join(static_global, on = extract.ID_COL, how = "inner")
+            df_tsfel_complet.write_parquet(filename_global_brut)
+            print("Extraction globale sauvegardée")
+        else:
+            df_tsfel_complet = pl.read_parquet(filename_global_brut)
+        keepVariableList_0 = df_tsfel_complet.columns
     groups = df_clean_3[patient_col].to_numpy()
 
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
-    (train_idx, test_idx) = next(sgkf.split(X=X, y=y, groups=groups))
 
-    # Tri obligatoire (même si en théorie il est déjà fait)
-    train_df = df_clean_3[train_idx].sort([patient_col, time_col])
-    test_df = df_clean_3[test_idx].sort([patient_col, time_col])
+    # On stocke les données de tous les folds
+    folds_X_train = []
+    folds_X_test = []
+    folds_y_train = []
+    folds_y_test = []
 
-    if config_models.extraction_type == "TSFEL" : 
+    for fold_idx, (train_idx, test_idx) in enumerate (sgkf.split(X=X, y=y, groups = groups)):
+        print(f"\n─────────────────── Traitement du Fold {fold_idx + 1}/5 ───────────────────")
 
-         # On enlève les features statiques
-        static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
+        # Récupération des IDs patients correspondants au split de ce fold
+        train_patients = df_clean_3[train_idx].select(patient_col).unique()
+        test_patients = df_clean_3[test_idx].select(patient_col).unique()
 
-        # Gestion des noms de fichier Boruta
-        str_boruta = "_Boruta" if boruta_filter.value else ""
-        filename_train = f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
-        filename_test = f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
-
-        if extract_tsfel.value :
-            # Extraction TSFEL brute
-            tsfel_features = [c for c in final_features if c not in static_feats]
-            TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
-            TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
-
+        if config_models.extraction_type == "TSFEL" : 
+            # On filtre notre gros DataFrame TSFEL pré-calculé pour ce fold
+            train_fold_tsfel = df_tsfel_complet.join(train_patients, on=patient_col, how="inner").sort(patient_col)
+            test_fold_tsfel = df_tsfel_complet.join(test_patients, on=patient_col, how="inner").sort(patient_col)
             # Filtrage corrélation/variance
-            TSFEL_train_clean, TSFEL_test_clean, keepVariableList = extract_feat.filtrage_corr_var(TSFEL_train_df, TSFEL_test_df, patient_col, target_col)
-
-            # Jointure avec données statiques
-            static_train = train_df.select([extract.ID_COL, *static_feats]).unique()
-            static_test = test_df.select([extract.ID_COL, *static_feats]).unique()
-            new_train_df = TSFEL_train_clean.join(static_train, on=extract.ID_COL, how="inner")
-            new_test_df = TSFEL_test_clean.join(static_test, on=extract.ID_COL, how="inner")
-
-            # Save 1 : Dataset complet sans Boruta
-            new_train_df.write_parquet(f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
-            new_test_df.write_parquet(f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
+            train_clean, test_clean, keepVariableList_1 = extract_feat.filtrage_corr_var(train_fold_tsfel, test_fold_tsfel, patient_col, target_col)
 
             if boruta_filter.value:
-                # Calcul de Boruta
-                new_train_df, new_test_df, keepVariableList = extract_feat.filtrage_boruta( new_train_df, new_test_df, patient_col, target_col, max_iter = 100, seed = seed)
+                # Construction du nom de fichier unique intégrant le Fold et la Graine (seed)
+                filename_train_boruta = f"tsfel_train_fold_{fold_idx}_seed_{seed}_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}_Boruta.parquet"
+                filename_test_boruta = f"tsfel_test_fold_{fold_idx}_seed_{seed}_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}_Boruta.parquet"
 
-                # Save 2 : Dataset complet avec Boruta
-                new_train_df.write_parquet(filename_train)
-                new_test_df.write_parquet(filename_test)
+                if os.path.exists(filename_train_boruta) and os.path.exists(filename_test_boruta):
+                    print(f"Lecture des fichiers Boruta existants pour le fold {fold_idx} (Graine {seed}).")
+                    train_clean = pl.read_parquet(filename_train_boruta)
+                    test_clean = pl.read_parquet(filename_test_boruta)
+                else:
+                    train_clean, test_clean, keepVariableList_2 = extract_feat.filtrage_boruta(train_clean, test_clean, patient_col, target_col, max_iter = 100, seed = seed)
+                    train_clean.write_parquet(filename_train_boruta)
+                    test_clean.write_parquet(filename_test_boruta)
+                    print(f"Save de Boruta pour le fold {fold_idx} (Graine {seed}).")
+        
+            # Tri au cas-où
+            train_clean = train_clean.sort(patient_col)
+            test_clean = test_clean.sort(patient_col)
+
+            # Equilibrage
+            train_clean = preproc.equilibrer_dataset_tabulaire(train_clean, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
+
+            # Test d'intégrité
+            assert train_clean.height == train_clean[extract.ID_COL].n_unique(), f"Erreur d'alignement Train TSFEL Fold {fold_idx}"
+            assert test_clean.height == test_clean[extract.ID_COL].n_unique(), f"Erreur d'alignement Test TSFEL Fold {fold_idx}"
+
+            y_train_fold = train_clean[target_col].to_numpy()
+            y_test_fold = test_clean[target_col].to_numpy()
+        
+            train_clean = train_clean.select(pl.exclude(patient_col, target_col))
+            test_clean = test_clean.select(pl.exclude(patient_col, target_col))
+
+            # Scaling final
+            X_train_fold, X_test_fold = preproc.scaling(train_clean, test_clean)
+    
+        elif config_models.extraction_type == "time" :
+            train_df = df_clean_3[train_idx].sort([patient_col, time_col])
+            test_df = df_clean_3[test_idx].sort([patient_col, time_col])
+
+            # Gestion exclusive de l'équilibrage homemade (avec polars)
+            if config_balance.balance_method in ["downsampling_homemade", ""]:
+                train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
+    
+            # On prépare le jeu d'entraînement
+    
+            # Scaling
+            (train_df, test_df) = preproc.scaling(train_df, test_df)
+    
+            # Transformation en 3D Array
+            (X_train_fold, y_train_fold) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
+            (X_test_fold, y_test_fold) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
+    
+            # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
+            if config_balance.balance_method not in ["downsampling_homemade", ""]:
+                # On applatit le 3D Array en 2D Array
+                n_samples, n_timesteps, n_feats = X_train_fold.shape
+                X_train_fold_2d = X_train_fold.reshape(n_samples, n_timesteps * n_feats)
+    
+                # On applique la méthode d'équilibrage imblearn
+                if config_balance.balance_method == "downsampling_50-50":
+                    from imblearn.under_sampling import RandomUnderSampler
+                    rs = RandomUnderSampler(random_state=seed)
+                elif config_balance.balance_method == "upsampling_50-50":
+                    from imblearn.over_sampling import RandomOverSampler
+                    rs = RandomOverSampler(random_state=seed)
+                else:
+                    raise ValueError("Cet équilibrage n'a pas encore été implémenté")
+    
+                X_res_2d, y_train_fold = rs.fit_resample(X_train_fold_2d, y_train_fold)
+    
+                # On redonne sa forme 3D d'origine au tenseur équilibré
+                X_train_fold = X_res_2d.reshape(-1, n_timesteps, n_feats)
+        
+            # TODO : rajouter une gestion des NaN (appel à fonction de utils.py)
+            
+            # TODO : externaliser la gestion des NaN
+            # On enlève les NaN après extraction de features
+            total_nan = np.isnan(X_train_fold).sum()
+            # Compte les NaN pour chaque feature
+            nan_par_feature = np.isnan(X_train_fold).sum(axis=(0, 1))
+            # for i, feat_name in enumerate(final_features):
+                # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
+            print(f"Nombre total de valeurs NaN : {total_nan}")
+    
+            X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
+            X_test_fold = np.nan_to_num(X_test_fold, nan = 0.0)
         else:
-            # Lecture des Dataset soit avec Boruta soit sans
-            new_train_df = pl.read_parquet(filename_train)
-            new_test_df = pl.read_parquet(filename_test)
-            keepVariableList = [c for c in new_train_df.columns if c not in [extract.ID_COL, target_col]]
-
-        # Equilibrage
-        new_train_df = preproc.equilibrer_dataset_tabulaire(new_train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-        # Tri (obligatoire pour comparabilité)
-        new_train_df = new_train_df.sort(patient_col)
-        new_test_df = new_test_df.sort(patient_col)
-
-        # Sécurité reproductibilité/intégrité : On s'assure qu'il n'y a qu'UNE seule ligne par patient
-        assert new_train_df.height == new_train_df[extract.ID_COL].n_unique(), "Erreur d'alignement Train TSFEL"
-        assert new_test_df.height == new_test_df[extract.ID_COL].n_unique(), "Erreur d'alignement Test TSFEL"
-        y_train = new_train_df[target_col].to_numpy()
-        y_test = new_test_df[target_col].to_numpy()
-        new_train_df = new_train_df.select(pl.exclude(patient_col, target_col))
-        new_test_df = new_test_df.select(pl.exclude(patient_col, target_col))
-
-        # Scaling
-        (X_train, X_test) = preproc.scaling(new_train_df, new_test_df)
-
-    elif config_models.extraction_type == "time" :
-
-        # Gestion exclusive de l'équilibrage homemade (avec polars)
-        if config_balance.balance_method in ["downsampling_homemade", ""]:
-            train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-        # On prépare le jeu d'entraînement
-
-        # Scaling
-        (train_df, test_df) = preproc.scaling(train_df, test_df)
-
-        # Transformation en 3D Array
-        (X_train, y_train) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
-        (X_test, y_test) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
-
-        # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
-        if config_balance.balance_method not in ["downsampling_homemade", ""]:
-            # On applatit le 3D Array en 2D Array
-            n_samples, n_timesteps, n_feats = X_train.shape
-            X_train_2d = X_train.reshape(n_samples, n_timesteps * n_feats)
-
-            # On applique la méthode d'équilibrage imblearn
-            if config_balance.balance_method == "downsampling_50-50":
-                from imblearn.under_sampling import RandomUnderSampler
-                rs = RandomUnderSampler(random_state=seed)
-            elif config_balance.balance_method == "upsampling_50-50":
-                from imblearn.over_sampling import RandomOverSampler
-                rs = RandomOverSampler(random_state=seed)
-            else:
-                raise ValueError("Cet équilibrage n'a pas encore été implémenté")
-
-            X_res_2d, y_train = rs.fit_resample(X_train_2d, y_train)
-
-            # On redonne sa forme 3D d'origine au tenseur équilibré
-            X_train = X_res_2d.reshape(-1, n_timesteps, n_feats)
-
-        # TODO : externaliser la gestion des NaN
-        # On enlève les NaN après extraction de features
-        total_nan = np.isnan(X_train).sum()
-        # Compte les NaN pour chaque feature
-        nan_par_feature = np.isnan(X_train).sum(axis=(0, 1))
-        # for i, feat_name in enumerate(final_features):
-            # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
-        print(f"Nombre total de valeurs NaN : {total_nan}")
-
-        X_train = np.nan_to_num(X_train, nan=0.0)
-        X_test = np.nan_to_num(X_test, nan = 0.0)
-
-    else:
-        raise ValueError("Modèle inexistant/Pas implémenté")
-    return X_test, X_train, keepVariableList, test_df, y_test, y_train
+            raise ValueError("Modèle inexistant/Pas implémenté")
+        # On accumule les données nettoyées du fold en cours
+        folds_X_train.append(X_train_fold)
+        folds_X_test.append(X_test_fold)
+        folds_y_train.append(y_train_fold)
+        folds_y_test.append(y_test_fold)
+    print("Les 5 folds ont été calculé avec succès !")
+    return folds_X_test, folds_X_train, folds_y_test, folds_y_train, test_df
 
 
 @app.cell(hide_code=True)
@@ -881,16 +1020,7 @@ def _(mo, mo_utils, run):
 
 
 @app.cell
-def _(
-    config_balance,
-    config_cleaning,
-    config_keep_pop,
-    config_models,
-    config_y,
-    modex,
-    underscore,
-    utils,
-):
+def _(config_keep_pop, config_models):
     # on créé un nom unique de modèle
     str_pop = ""
     if config_keep_pop.keep_population != "all_diseases":
@@ -898,103 +1028,123 @@ def _(
 
     extension = ".joblib" if config_models.extraction_type == "TSFEL" else ".pt"
 
-    model_path = utils.get_unique_path(
-    f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
-        f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}{extension}"
-    )
-
     default_params = {
             "epochs" : 100,
             "patience" : 10,
         }
 
     parameters = default_params
-    return extension, model_path, parameters, str_pop
+    return extension, parameters, str_pop
 
 
 @app.cell
 def _(
-    X_train,
+    config_balance,
+    config_cleaning,
     config_models,
+    config_y,
+    extension,
+    folds_X_train,
+    folds_y_train,
     joblib,
     mo,
-    model_path,
+    modex,
     np,
+    os,
     parameters,
     run,
     seed,
+    str_pop,
     train_inception_time,
     train_lstm_model,
-    y_train,
+    underscore,
 ):
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
 
+    if len(folds_X_train) == 0:
+        raise ValueError("Les listes de folds sont vides")
+
     # --- BARRIÈRE DE SÉCURITÉ GÉOMÉTRIQUE ---
     is_dl_model = config_models.models_name in ["InceptionTimeModified", "LstmTimeModified"]
-    n_dims = len(X_train.shape) if hasattr(X_train, "shape") else 0
+    n_dims = len(folds_X_train[0].shape) if hasattr(folds_X_train[0], "shape") else 0
     if is_dl_model and n_dims != 3:
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice 3D [patients, temps, features], mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'time' ?")
     elif not is_dl_model and n_dims != 2:
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice tabulaire 2D, mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'TSFEL' ?")
 
-
-    if config_models.models_name == "InceptionTimeModified":
-        print(parameters)
-        model, T, history, splits = train_inception_time(
-            X_train, y_train,
-            save_best_path=model_path,
-            seed = seed,
-            **parameters
-            )
-
-    elif config_models.models_name == "LstmTimeModified":
-        model, T, history, splits = train_lstm_model(
-            X_train, y_train,
-            epochs=100,
-            patience=10,
-            save_best_path=model_path
-            )
-
-    elif config_models.models_name == "RandomForest TSFEL":
-        from sklearn.ensemble import RandomForestClassifier
-        rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
-        rf.fit(X_train, y_train)
-        joblib.dump(rf, model_path)
-    elif config_models.models_name == "XGBoost TSFEL":
-        from xgboost import XGBClassifier
-        # TODO : rajouter n_jobs = 1 ou n_threads = 1 pour éviter le random dans le multiprocessing si jamais on a des petites variations
-        X_train_tsfel = X_train.to_numpy()
-        y_train_tsfel = np.asarray(y_train).astype(int)
-
-        n_pos = np.sum(y_train_tsfel == 1)
-        n_neg = np.sum(y_train_tsfel == 0)
-
-        if n_pos == 0 or n_neg == 0:
-            raise ValueError(
-                f"XGBoost nécessite les deux classes. "
-                f"Classes trouvées: {np.unique(y_train_tsfel, return_counts=True)}"
-            )
-
-        ratio = n_neg / n_pos
-
-        xgb = XGBClassifier(
-            scale_pos_weight=ratio,
-            random_state=seed,
-            eval_metric="logloss",
-            missing=np.nan,
+    for fold_idx_2 in range(5):
+        print(f"\n─────────────────── Entraînement du Fold {fold_idx_2 + 1}/5 ───────────────────")
+        # Extraction des données spécifiques à ce fold
+        X_train_fold_2 = folds_X_train[fold_idx_2]
+        y_train_fold_2 = folds_y_train[fold_idx_2]
+    
+        # Génération d'un chemin STRICT et DÉTERMINISTE unique par fold et par graine
+        model_path_fold = (
+            f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
+            f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}/fold_{fold_idx_2}{extension}"
         )
-
-        xgb.fit(X_train_tsfel, y_train_tsfel)
-        joblib.dump(xgb, model_path)
-
-    elif config_models.models_name == "SVC TSFEL" : 
-        from sklearn.svm import SVC
-        svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = "balanced", probability = True)
-        svc.fit(X_train, y_train)
-        joblib.dump(svc, model_path)
-    else :
-        print("oups tu t'es trompé")
+        os.makedirs(os.path.dirname(model_path_fold), exist_ok=True)
+    
+        if config_models.models_name == "InceptionTimeModified":
+            print(parameters)
+            model, T, history, splits = train_inception_time(
+                X_train_fold_2, y_train_fold_2,
+                save_best_path=model_path_fold,
+                seed = seed,
+                **parameters
+                )
+    
+        elif config_models.models_name == "LstmTimeModified":
+            model, T, history, splits = train_lstm_model(
+                X_train_fold_2, y_train_fold_2,
+                epochs=100,
+                patience=10,
+                save_best_path=model_path_fold,
+                seed = seed,
+                )
+    
+        elif config_models.models_name == "RandomForest TSFEL":
+            from sklearn.ensemble import RandomForestClassifier
+            rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
+            rf.fit(X_train_fold_2, y_train_fold_2)
+            joblib.dump(rf, model_path_fold)
+        elif config_models.models_name == "XGBoost TSFEL":
+            from xgboost import XGBClassifier
+            # TODO : rajouter n_jobs = 1 ou n_threads = 1 pour éviter le random dans le multiprocessing si jamais on a des petites variations
+            X_train_fold_2_tsfel = X_train_fold_2.to_numpy()
+            y_train_fold_2_tsfel = np.asarray(y_train_fold_2).astype(int)
+    
+            n_pos = np.sum(y_train_fold_2_tsfel == 1)
+            n_neg = np.sum(y_train_fold_2_tsfel == 0)
+    
+            if n_pos == 0 or n_neg == 0:
+                raise ValueError(
+                    f"XGBoost nécessite les deux classes. "
+                    f"Classes trouvées: {np.unique(y_train_fold_2_tsfel, return_counts=True)}"
+                )
+    
+            ratio = n_neg / n_pos
+    
+            xgb = XGBClassifier(
+                scale_pos_weight=ratio,
+                random_state=seed,
+                eval_metric="logloss",
+                missing=np.nan,
+                # n_jobs = 1 => Si on veut une reproductibilité complète mais plus long donc non pour l'instant
+            )
+    
+            xgb.fit(X_train_fold_2_tsfel, y_train_fold_2_tsfel)
+            joblib.dump(xgb, model_path_fold)
+    
+        elif config_models.models_name == "SVC TSFEL" : 
+            from sklearn.svm import SVC
+            svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = "balanced", probability = True)
+            svc.fit(X_train_fold_2, y_train_fold_2)
+            joblib.dump(svc, model_path_fold)
+        else :
+            print("oups tu t'es trompé")
+    print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès")
     return
 
 
@@ -1024,8 +1174,9 @@ def _(mo):
 
 @app.cell
 def _(
-    X_test,
-    X_train,
+    Path,
+    calibration,
+    calibration_curve,
     classification_report,
     config_balance,
     config_cleaning,
@@ -1034,170 +1185,209 @@ def _(
     evaluate_lstm_on_test,
     evaluate_on_test,
     extension,
+    folds_X_test,
+    folds_X_train,
+    folds_y_test,
+    folds_y_train,
     joblib,
     load_lstm_from_checkpoint,
     load_model_from_checkpoint,
     modex,
+    np,
     pl,
-    str_pop,
-    underscore,
-    utils,
-    y_test,
-    y_train,
-):
-    base_pattern = f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_{config_balance.balance_method}{underscore}{modex.value}{str_pop}_*{extension}"  
-
-    loaded_model = utils.get_latest_model_path(base_pattern, extension)
-
-    print("Modèle chargé :", loaded_model)
-
-    if config_models.models_name == "InceptionTimeModified":
-        X_train_final = X_train
-        X_test_final = X_test
-        (_auc, brier, T_1) = evaluate_on_test(X_test_final, y_test, loaded_model)
-        (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
-
-    elif config_models.models_name == "LstmTimeModified":
-        X_train_final = X_train
-        X_test_final = X_test
-        (_auc, brier, T_1) = evaluate_lstm_on_test(X_test_final, y_test, loaded_model)
-        (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
-
-    elif config_models.extraction_type == "TSFEL":
-        clf = joblib.load(loaded_model)
-
-        # 1. Extraction universelle des features
-        expected_features = None
-        if hasattr(clf, "feature_names_in_"):
-            expected_features = list(clf.feature_names_in_)
-        elif hasattr(clf, "get_booster"):
-            expected_features = clf.get_booster().feature_names
-
-        # 2. Alignement conditionnel
-        if expected_features is not None:
-            if expected_features and expected_features[0].startswith('f') and expected_features[0][1:].isdigit():
-                print("XGBoost utilise des indices génériques. Utilisation des matrices brutes.")
-                X_train_final = X_train.to_numpy()
-                X_test_final = X_test.to_numpy()
-            else:
-                missing_cols = [c for c in expected_features if c not in X_train.columns]
-                if missing_cols:
-                    print(f"Ajout de {len(missing_cols)} colonnes manquantes (0.0)")
-                    padding_expr = [pl.lit(0.0).alias(c) for c in missing_cols]
-                    X_train_final = X_train.with_columns(padding_expr).select(expected_features)
-                    X_test_final = X_test.with_columns(padding_expr).select(expected_features)
-                else:
-                    X_train_final = X_train.select(expected_features)
-                    X_test_final = X_test.select(expected_features)
-
-                if "XGB" in type(clf).__name__:
-                    X_train_final = X_train_final.to_pandas()
-                    X_test_final = X_test_final.to_pandas()
-        else:
-            print("Aucun nom de feature trouvé dans le modèle. Passage en matrices NumPy brutes.")
-            X_train_final = X_train.to_numpy()
-            X_test_final = X_test.to_numpy()
-
-        # 3. Prédictions et Scores
-        y_pred_nb_train = clf.predict(X_train_final)
-        y_pred_nb_test = clf.predict(X_test_final)
-
-        train_score = clf.score(X_train_final, y_train)
-        test_score = clf.score(X_test_final, y_test)
-
-        print(f"Le score sur les données de test est {test_score:.4f}")
-        print(classification_report(y_test, y_pred_nb_test, target_names=["Alive", "Deceased"], zero_division=0))
-    return T_1, X_test_final, X_train_final, clf, loaded_model, model_1
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Création du dossier Output
-    """)
-    return
-
-
-@app.cell
-def _(Path, config_models, loaded_model):
-    # construire le dossier output correspondant
-    output_dir = Path("outputs") / Path(config_models.models_name) / Path(loaded_model).stem
-
-    # créer le dossier s'il n'existe pas
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return (output_dir,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Calcul des prédictions probabilistes des modèles
-    """)
-    return
-
-
-@app.cell
-def _(
-    Path,
-    T_1,
-    X_test_final,
-    X_train_final,
-    calibration,
-    calibration_curve,
-    clf,
-    config_models,
-    model_1,
-    output_dir,
     plt,
     predict_proba,
-    predict_proba_lstm,
     save_figure,
+    seed,
+    str_pop,
     transparent,
-    y_test,
-    y_train,
+    underscore,
 ):
-    # c'est la même fonction pour les 2 modèles donc c'est ok
-    if config_models.models_name == "InceptionTimeModified":
-        probas = predict_proba(model_1, X_test_final, T=T_1)
+    # --- LISTES D'ACCUMULATION POUR LES MÉTRIQUES TEXTES ---
+    all_test_scores = []
+    all_train_scores = []
+    all_auc_scores = []
+    all_brier_scores = []
 
-    elif config_models.models_name == "LstmTimeModified":
-        probas = predict_proba_lstm(model_1, X_test_final, T=T_1)
+    # --- LISTES D'ACCUMULATION POUR LES GRAPHIQUES ---
+    all_y_true_report = []  # Pour le classification report cumulé (TSFEL)
+    all_y_pred_report = []  # Pour le classification report cumulé (TSFEL)
 
-    elif config_models.extraction_type == "TSFEL":
-        all_probas = clf.predict_proba(X_test_final.to_numpy())
-        classes = list(clf.classes_)
-        positive_idx = classes.index(1)
-        probas = all_probas[:, positive_idx]
+    all_y_test_global = []      # Cibles réelles pour la courbe de calibration
+    all_probas_uncalib = []     # Probas brutes pour la courbe de calibration
+    all_probas_calib = []       # Probas calibrées pour la courbe de calibration
 
 
-    if calibration.value:
-        from sklearn.calibration import CalibratedClassifierCV
-        iso_calibrator = CalibratedClassifierCV(estimator=clf, method='isotonic', cv=5)
+    for fold_idx_bis in range(5):
+        print(f"\n─────────────────── Évaluation du Fold {fold_idx_bis + 1}/5 ───────────────────")
+        # Extraction des matrices propres à ce fold
+        X_train = folds_X_train[fold_idx_bis]
+        X_test = folds_X_test[fold_idx_bis]
+        y_train = folds_y_train[fold_idx_bis]
+        y_test = folds_y_test[fold_idx_bis]
 
-        iso_calibrator.fit(X_train_final, y_train)
+        # Reconstruction du fichier à charger
+        loaded_model = (
+            f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
+            f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}/fold_{fold_idx_bis}{extension}"
+        )
+        print("Modèle chargé :", loaded_model)
+    
+        # Construction du dossier de sortie
+        output_dir = Path("outputs") / Path(config_models.models_name) / Path(loaded_model).stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+        if config_models.models_name == "InceptionTimeModified":
+            X_train_final = X_train
+            X_test_final = X_test
+        
+            (auc, brier, T_1) = evaluate_on_test(X_test_final, y_test, loaded_model)
+            (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
 
-        prob_calibrated = iso_calibrator.predict_proba(X_test_final)[:, 1]
+            probas_fold = predict_proba(model_1, X_test_final, T = T_1)
+        
+            all_auc_scores.append(auc)
+            all_brier_scores.append(brier)
+            all_y_test_global.extend(y_test)
+            all_probas_uncalib.extend(probas_fold)
+            all_probas_calib.extend(probas_fold)
+    
+        elif config_models.models_name == "LstmTimeModified":
+            X_train_final = X_train
+            X_test_final = X_test
+        
+            (auc, brier, T_1) = evaluate_lstm_on_test(X_test_final, y_test, loaded_model)
+            (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
 
-        # Évaluation et Visualisation via une courbe de calibration
-        fraction_of_positives_uncalib, mean_predicted_value_uncalib = calibration_curve(y_test, probas, n_bins=10)
-        fraction_of_positives_calib, mean_predicted_value_calib = calibration_curve(y_test, prob_calibrated, n_bins=10)
+            probas_fold = predict_proba(model_1, X_test_final, T = T_1)
+        
+            all_auc_scores.append(auc)
+            all_brier_scores.append(brier)
+            all_y_test_global.extend(y_test)
+            all_probas_uncalib.extend(probas_fold)
+            all_probas_calib.extend(probas_fold)
 
-        plt.figure(figsize=(8, 6))
-        plt.plot([0, 1], [0, 1], "k:", label="Calibration parfaite")
-        plt.plot(mean_predicted_value_uncalib, fraction_of_positives_uncalib, "s-", label="Avant calibration (Random Forest)")
-        plt.plot(mean_predicted_value_calib, fraction_of_positives_calib, "s-", label="Après calibration (Isotonique)")
+        elif config_models.extraction_type == "TSFEL":
+            clf = joblib.load(loaded_model)
+    
+            # 1. Extraction universelle des features
+            expected_features = None
+            if hasattr(clf, "feature_names_in_"):
+                expected_features = list(clf.feature_names_in_)
+            elif hasattr(clf, "get_booster"):
+                expected_features = clf.get_booster().feature_names
+    
+            # 2. Alignement conditionnel
+            if expected_features is not None:
+                if expected_features and expected_features[0].startswith('f') and expected_features[0][1:].isdigit():
+                    print("XGBoost utilise des indices génériques. Utilisation des matrices brutes.")
+                    X_train_final = X_train.to_numpy()
+                    X_test_final = X_test.to_numpy()
+                else:
+                    missing_cols = [c for c in expected_features if c not in X_train.columns]
+                    if missing_cols:
+                        print(f"Ajout de {len(missing_cols)} colonnes manquantes (0.0)")
+                        padding_expr = [pl.lit(0.0).alias(c) for c in missing_cols]
+                        X_train_final = X_train.with_columns(padding_expr).select(expected_features)
+                        X_test_final = X_test.with_columns(padding_expr).select(expected_features)
+                    else:
+                        X_train_final = X_train.select(expected_features)
+                        X_test_final = X_test.select(expected_features)
+    
+                    if "XGB" in type(clf).__name__:
+                        X_train_final = X_train_final.to_pandas()
+                        X_test_final = X_test_final.to_pandas()
+            else:
+                print("Aucun nom de feature trouvé dans le modèle. Passage en matrices NumPy brutes.")
+                X_train_final = X_train.to_numpy()
+                X_test_final = X_test.to_numpy()
+    
+            # 3. Prédictions et Scores
+            y_pred_nb_train = clf.predict(X_train_final)
+            y_pred_nb_test = clf.predict(X_test_final)
+    
+            train_score = clf.score(X_train_final, y_train)
+            test_score = clf.score(X_test_final, y_test)
 
-        plt.ylabel("Fraction réelle de positifs")
-        plt.xlabel("Probabilité moyenne prédite")
-        plt.title("Effet de la Calibration Isotonique")
-        plt.legend(loc="lower right")
-        plt.grid(True)
-        if save_figure.value:
-            plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent)
-        plt.show()
-        prob_uncalibrated = probas
-        probas = prob_calibrated
-    return prob_uncalibrated, probas
+            all_test_scores.append(test_score)
+            all_train_scores.append(train_score)
+            all_y_true_report.extend(y_test)
+            all_y_pred_report.extend(y_pred_nb_test)
+
+            # 4. Calcul des probabilités brutes pour la calibration
+            all_probas_fold = clf.predict_proba(X_test_final)
+            classes = list(clf.classes_)
+            positive_idx = classes.index(1)
+            prob_uncalib_fold = all_probas_fold[:, positive_idx]
+        
+            all_probas_uncalib.extend(prob_uncalib_fold)
+            all_y_test_global.extend(y_test)
+
+            # 5. Calcul de la calibration Isotonique (Conditionnelle)
+            if calibration.value:
+                from sklearn.calibration import CalibratedClassifierCV
+                iso_calibrator = CalibratedClassifierCV(estimator=clf, method='isotonic', cv=5)
+                iso_calibrator.fit(X_train_final, y_train)
+                prob_calib_fold = iso_calibrator.predict_proba(X_test_final)[:, 1]
+                all_probas_calib.extend(prob_calib_fold)
+            else:
+                all_probas_calib.extend(prob_uncalib_fold)
+        
+            print(f"Le score (Accuracy) sur le fold {fold_idx_bis + 1} est : {test_score:.4f}")
+
+    print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
+
+    all_y_test_global = np.array(all_y_test_global)
+    all_probas_uncalib = np.array(all_probas_uncalib)
+    all_probas_calib = np.array(all_probas_calib)
+
+    print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
+
+    if config_models.extraction_type == "TSFEL":
+        mean_acc = np.mean(all_test_scores)
+        std_acc = np.std(all_test_scores)
+        print(f"Score moyen (Accuracy) : {mean_acc:.4f} (± {std_acc:.4f})")
+        print("\nRapport de classification cumulé (sur l'ensemble des 5 folds mis en commun) :")
+        print(classification_report(all_y_true_report, all_y_pred_report, target_names=["Alive", "Deceased"], zero_division=0))
+    else:
+        mean_auc = np.mean(all_auc_scores)
+        std_auc = np.std(all_auc_scores)
+        mean_brier = np.mean(all_brier_scores)
+        std_brier = np.std(all_brier_scores)
+        print(f"AUC moyenne  : {mean_auc:.4f} (± {std_auc:.4f})")
+        print(f"Brier moyenne : {mean_brier:.4f} (± {std_brier:.4f})")
+    print("="*79)
+
+    print("\nGénération de la courbe de calibration poolée...")
+
+    plt.figure(figsize=(8, 6))
+    plt.plot([0, 1], [0, 1], "k:", label="Calibration parfaite")
+
+    # Courbe de base (Modèle brut ou modèle DL déjà calibré en température)
+    fraction_pos_uncalib, mean_pred_uncalib = calibration_curve(all_y_test_global, all_probas_uncalib, n_bins=10)
+    plt.plot(mean_pred_uncalib, fraction_pos_uncalib, "s-", color="red", label=f"Courbe ({config_models.models_name})")
+
+    # Courbe calibrée (Uniquement affichée pour TSFEL si demandée)
+    if config_models.extraction_type == "TSFEL" and calibration.value:
+        fraction_pos_calib, mean_pred_calib = calibration_curve(all_y_test_global, all_probas_calib, n_bins=10)
+        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label="Après calibration (Isotonique)")
+
+    plt.ylabel("Fraction réelle de positifs")
+    plt.xlabel("Probabilité moyenne prédite")
+    plt.title(f"Courbe de Calibration Globale (Cross-Validation 5 Folds)\nModèle : {config_models.models_name}")
+    plt.legend(loc="lower right")
+    plt.grid(True)
+
+    # Sauvegarde propre de l'image
+    if save_figure.value:
+        plt.savefig(output_dir / Path("Courbe_Calibration"), dpi=300, bbox_inches="tight", transparent=transparent)
+
+    plt.show()
+
+    # --- RE-MAPPING DES ÉTATS GLOBAUX POUR LES CELLULES SUIVANTES (COURBE ROC / MATRICE) ---
+    probas = all_probas_calib
+    y_test = all_y_test_global
+    return X_train_final, clf, output_dir, probas, y_test
 
 
 @app.cell(hide_code=True)
@@ -1211,11 +1401,9 @@ def _(config_models, mo):
 @app.cell
 def _(
     Path,
-    calibration,
     config_models,
     output_dir,
     plt,
-    prob_uncalibrated,
     probas,
     roc_auc_score,
     roc_curve,
@@ -1224,17 +1412,13 @@ def _(
     y_test,
 ):
     (fpr, tpr, _thresholds) = roc_curve(y_test, probas)
-    # TODO : là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle elle est calculée par rapport à 20% des données de train (validation) alors que là c'est par rapport à test.
-    auc = roc_auc_score(y_test, probas)
+        # TODO : là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle elle est calculée par rapport à 20% des données de train (validation) alors que là c'est par rapport à test.
+    auc_final = roc_auc_score(y_test, probas)
     plt.figure(figsize=(6, 6))
-    plt.plot(fpr, tpr, label=f'ROC {config_models.models_name} (AUC = {auc:.3f})')
+    plt.plot(fpr, tpr, label=f'ROC {config_models.models_name} (AUC = {auc_final:.3f})')
 
     plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard', color = "green")
 
-    if calibration.value:
-        (fpr_unc, tpr_unc, _thresholds) = roc_curve(y_test, prob_uncalibrated)
-        auc_unc = roc_auc_score(y_test, prob_uncalibrated)
-        plt.plot(fpr_unc, tpr_unc, label=f'ROC {config_models.models_name} (uncalibrated) (AUC = {auc_unc:.3f})')
     plt.xlabel('Taux de faux positifs')
     plt.ylabel('Taux de vrais positifs')
     plt.title(f'Courbe ROC du modèle {config_models.models_name}')
@@ -1244,9 +1428,17 @@ def _(
         plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
 
+    return (auc_final,)
 
-    
-    return (auc,)
+
+@app.cell
+def _(df_clean_3, folds_y_test, patient_col):
+    total_predictions = sum(len(f) for f in folds_y_test)
+    total_patients_uniques = df_clean_3[patient_col].n_unique()
+
+    print(f"Nombre total de patients uniques dans la cohorte : {total_patients_uniques}")
+    print(f"Somme des tailles de tes 5 jeux de test cumulés : {total_predictions}")
+    return
 
 
 @app.cell
@@ -1526,19 +1718,41 @@ def _(
 
 
 @app.cell
-def _(auc, best_f1, global_brier, joblib, mcc, output_dir, probas, y_pred):
+def _(
+    Path,
+    auc_final,
+    best_f1,
+    config_balance,
+    config_cleaning,
+    config_models,
+    config_y,
+    global_brier,
+    joblib,
+    mcc,
+    modex,
+    probas,
+    seed,
+    str_pop,
+    underscore,
+    y_pred,
+):
+    output_agg_dir = Path(
+        f"outputs/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
+        f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}"
+    )
     # Résumé des scores obtenus
     all_res = {
             'probas': probas,
             'preds': y_pred,       
             'f1_score': best_f1, 
             'mcc': mcc,
-            'auc': auc,
+            'auc': auc_final,
             'brier': global_brier,
     }
-    joblib.dump(all_res, output_dir / "all_res.joblib")
+    output_agg_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(all_res, output_agg_dir / "all_res.joblib")
 
-    resu = joblib.load(output_dir / "all_res.joblib")
+    resu = joblib.load(output_agg_dir / "all_res.joblib")
     return
 
 
@@ -1564,24 +1778,6 @@ def _(mo, mo_utils, run_test):
         run_test,
         mo.md(mo_utils.config_end)])
     return
-
-
-@app.cell
-def _(pd):
-    # 1. Vos données (Modèles en lignes, Métriques en colonnes)
-    data = {
-        'Accuracy': [0.92, 0.95, 0.65],
-        'F1-Score': [0.88, 0.91, 0.45],
-        'MCC': [0.79, 0.86, 0.00]  # Votre nouveau favori !
-    }
-    model_names = ['Random Forest', 'XGBoost', 'Baseline (Dummy)']
-    df = pd.DataFrame(data, index=model_names)
-
-    from tabulate import tabulate
-
-    # Export au format LaTeX (booktabs est le standard des publications scientifiques)
-    print(tabulate(df, headers='keys', tablefmt='fancy_grid', floatfmt=".3f"))
-    return (tabulate,)
 
 
 @app.cell
@@ -1696,21 +1892,24 @@ def _(
     générer_rapport_comparatif,
     joblib,
     modex,
-    os,
     saps2_pred,
     saps2_true,
+    seed,
     str_pop,
     underscore,
-    utils,
     y_test,
 ):
     def load_model(model_name):
-        extension_hm = ".joblib" if "TSFEL" in model_name else ".pt" 
-        base_res_pattern = f"models/{model_name}/{config_cleaning.clean}_{config_y.target_name}_{config_balance.balance_method}{underscore}{modex.value}{str_pop}_*{extension_hm}"
-        loaded_output = utils.get_latest_model_path(base_res_pattern, extension_hm)
-        output_directory = Path("outputs") / Path(model_name) / Path(loaded_output).stem
-
-        return model_name, joblib.load(os.path.join(output_directory, "all_res.joblib"))
+        output_directory = (
+            Path("outputs") / 
+            model_name / 
+            f"{config_cleaning.clean}_{config_y.target_name}_{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}"
+        )
+        file_path = output_directory / "all_res.joblib"
+        if not file_path.exists():
+            raise FileNotFoundError(f"Fichier introuvable : {file_path}")
+        
+        return model_name, joblib.load(file_path)
 
     comparaisons = [load_model("InceptionTimeModified"), load_model("LstmTimeModified"), load_model("RandomForest TSFEL"), load_model("XGBoost TSFEL"), load_model("SVC TSFEL")]
 
