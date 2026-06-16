@@ -103,10 +103,11 @@ def filtrage_boruta(Dataset_train, Dataset_test, patient_col, target_col, max_it
     # 1. Séparation propre des features (X) et nettoyage des Inf/NaN en Polars
     # (On remplace les valeurs infinies par du Null, puis on remplit par la médiane du Train)
     # On fait ça parce que TSFEL pour générer des valeurs infinies ou des null
-    X_train_pl = Dataset_train.drop([patient_col, target_col]).with_columns(pl.all().replace([np.inf, -np.inf], None))
+    features_to_keep = sorted([c for c in Dataset_train.columns if c not in [patient_col, target_col]])
+    X_train_pl = Dataset_train.select(features_to_keep).with_columns(pl.all().replace([np.inf, -np.inf], None))
     X_train_clean = X_train_pl.with_columns(pl.all().fill_null(pl.all().median()))
-    X_test_pl = Dataset_test.drop([patient_col, target_col]).with_columns(pl.all().replace([np.inf, -np.inf], None))
-    medians_dict = {col: val for col, val in zip(X_train_clean.columns, X_train_pl.median().row(0))}
+    X_test_pl = Dataset_test.select(features_to_keep).with_columns(pl.all().replace([np.inf, -np.inf], None))
+    medians_dict = X_train_pl.median().to_dicts()[0]
     X_test_clean = X_test_pl.with_columns([pl.col(col).fill_null(medians_dict[col]) for col in X_test_pl.columns])
 
     # 2. Entraînement de Boruta sur les tableaux NumPy sous-jacents

@@ -105,26 +105,37 @@ POPULATION = {
 class ConfigModels:
     models_name : str
     extraction_type : str
+    models_type : str
 MODELS = {
     "InceptionTimeModified" : ConfigModels(
         models_name = "InceptionTimeModified",
-        extraction_type = "time"
+        extraction_type = "time",
+        models_type = "Normal"
     ),
     "LstmTimeModified" : ConfigModels(
         models_name = "LstmTimeModified",
-        extraction_type = "time"
+        extraction_type = "time",
+        models_type = "Normal"
     ),
     "RandomForest TSFEL" : ConfigModels(
         models_name = "RandomForest TSFEL",
-        extraction_type = "TSFEL"
+        extraction_type = "TSFEL",
+        models_type = "Normal"
     ),
     "XGBoost TSFEL" : ConfigModels(
         models_name = "XGBoost TSFEL",
-        extraction_type = "TSFEL"
+        extraction_type = "TSFEL",
+        models_type = "calibrated"
     ),
     "SVC TSFEL" : ConfigModels(
         models_name = "SVC TSFEL",
-        extraction_type = "TSFEL"
+        extraction_type = "TSFEL",
+        models_type = "Normal"
+    ),
+    "RandomForest Imbalanced TSFEL":ConfigModels(
+        models_name = "RandomForest TSFEL",
+        extraction_type = "TSFEL",
+        models_type = "imbalanced"
     ),
     # "RandomForest tsFresh" : ConfigModels(
     #     models_name = "RandomForest tsFresh",
