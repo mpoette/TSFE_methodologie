@@ -11,6 +11,7 @@ import warnings
 import shap
 import matplotlib.pyplot as plt
 import re
+from xgboost import XGBClassifier
 def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols,
     target_col):
     # --- LE MONKEY PATCH DE LA DERNIÈRE CHANCE ---
@@ -176,7 +177,8 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     plt.ylabel("Importance (forêt)")
     plt.tight_layout()
     if savefig:
-        plt.savefig(f"{folder}feature_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/feature_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/feature_importance.png", bbox_inches="tight", dpi=150)
     plt.show()
 
     # Pareil mais cumulé : 
@@ -197,11 +199,23 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     plt.title("Top Importance Globale des Features (MDI)")
     plt.tight_layout()
     if savefig:
-        plt.savefig(f"{folder}global_feature_importance_mdi.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_feature_importance_mdi.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_feature_importance_mdi.png", bbox_inches="tight", dpi=150)
     plt.show()
     # ----- 2) SHAP -----
     X_pure_numpy = np.array(X_arr, dtype = np.float32)
-    explainer = shap.TreeExplainer(model)
+
+    # On autorise le multicoeur
+    if hasattr(model, 'n_jobs'):
+        model.n_jobs = -1
+    
+    if isinstance(model, XGBClassifier):
+        explainer = shap.TreeExplainer(model)
+    else:
+        try:
+            explainer = shap.Explainer(model)
+        except Exception:
+            explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_pure_numpy)
 
     # Gestion de la structure des shap_values selon la version de SHAP / type de modèle
@@ -253,7 +267,8 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     ax.legend(title="Classes", bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.tight_layout()
     if savefig:
-        plt.savefig(f"{folder}shap_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/shap_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/shap_importance.png", bbox_inches="tight", dpi=150)
     plt.show()
 
     # ----- 5) Summary plot par classe -----
@@ -268,7 +283,8 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
         plt.title(f"SHAP Value Impact for {class_name}")
         plt.tight_layout()
         if savefig:
-            plt.savefig(f"{folder}shapValues_{class_name}.pdf", bbox_inches="tight", transparent=transparent)
+            plt.savefig(f"{folder}/shapValues_{class_name}.pdf", bbox_inches="tight", transparent=transparent)
+            plt.savefig(f"{folder}/shapValues_{class_name}.png", bbox_inches="tight", dpi=150)
         plt.show()
 
     # ----- 6) Découpage par classe prédite -----
@@ -312,7 +328,8 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     ax.legend(title="Classes", bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.tight_layout()
     if savefig:
-        plt.savefig(f"{folder}global_shap_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_shap_importance.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_shap_importance.png", bbox_inches="tight", dpi=150)
     plt.show()
 
     # =====================================================================
@@ -356,7 +373,8 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     plt.tight_layout()
 
     if savefig:
-        plt.savefig(f"{folder}global_fused_shap_summary_{class_names[class_id]}.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_fused_shap_summary_{class_names[class_id]}.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_fused_shap_summary_{class_names[class_id]}.png", bbox_inches="tight", dpi=150)
     plt.show()
     return {
         "X_by_class": X_by_class,

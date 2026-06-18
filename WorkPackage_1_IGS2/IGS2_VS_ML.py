@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.2"
+__generated_with = "0.23.9"
 app = marimo.App()
 
 
@@ -121,17 +121,19 @@ def _():
         mo_utils,
         np,
         os,
-        pd,
         pl,
         plt,
         predict_proba,
+        predict_proba_lstm,
         preproc,
         roc_auc_score,
         roc_curve,
         seed,
         sns,
+        sys,
         train_inception_time,
         train_lstm_model,
+        utils,
     )
 
 
@@ -281,29 +283,19 @@ def _(boruta_filter, calibration, config_models, mo):
             value = "Non",
             label = "Extraire les données TSFEL"
         )
-        ui_tsfel = mo.vstack([extract_tsfel, boruta_filter, calibration])
+        class_weight_choice = mo.ui.dropdown(options = {"balanced" : "_balanced", "balanced_subsample" : "_balanced_subsample"},
+                                value = "balanced",
+                                label = "class_weight")
+
+        ui_tsfel = mo.vstack([extract_tsfel, boruta_filter, calibration, class_weight_choice])
         if config_models.models_type == "calibrated":
-            ui_tsfel = mo.vstack([extract_tsfel, boruta_filter])
+            ui_tsfel = mo.vstack([extract_tsfel, boruta_filter, class_weight_choice])
     else :
+        class_weight_choice = mo.ui.dropdown(options = {"" : ""},
+                                value = "")
         extract_tsfel = None
         ui_tsfel = mo.md("")
-    return extract_tsfel, ui_tsfel
-
-
-@app.cell
-def _(config_models, mo):
-    if config_models.models_name == "LstmTimeModified":
-        metric_options = ["val_loss", "val_auc"]
-    else:
-        metric_options = ["val_loss"]
-
-    # Dropdown
-    metric_name = mo.ui.dropdown(
-        options=metric_options,
-        value=metric_options[0],
-        label="Métrique choisie pour l'optimisation optuna"
-    )
-    return (metric_name,)
+    return class_weight_choice, extract_tsfel, ui_tsfel
 
 
 @app.cell
@@ -340,6 +332,30 @@ def _(keep_pop):
 def _(balance):
     config_balance = balance.value
     return (config_balance,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Configuration dynamique des chemins utilisés
+    """)
+    return
+
+
+@app.cell
+def _(
+    class_weight_choice,
+    config_cleaning,
+    config_mode,
+    config_y,
+    modex,
+    seed,
+    str_balance_method,
+    str_pop,
+    utils,
+):
+    exp = utils.Experiment(config_mode, config_cleaning, config_y, str_balance_method, modex, class_weight_choice, str_pop, seed)
+    return (exp,)
 
 
 @app.cell(hide_code=True)
@@ -445,6 +461,14 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Filtrage du dataset/Prétraitement
+    """)
+    return
+
+
 @app.cell
 def _(df_clean, pl):
     feat = "score_glasgow"
@@ -465,30 +489,12 @@ def _(df_clean, pl):
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Filtrage du dataset/Prétraitement
-    """)
-    return
-
-
 @app.cell
 def _(mo, mo_utils, models):
     mo.vstack([
         mo.md(mo_utils.config_dropdown_color),
         models,
         mo.md(mo_utils.config_end)])
-    return
-
-
-@app.cell
-def _(metric_name, mo, mo_utils):
-    mo.vstack([
-        mo.md(mo_utils.config_dropdown_color),
-        metric_name,
-        mo.md(mo_utils.config_end)
-    ])
     return
 
 
@@ -524,14 +530,6 @@ def _(df_clean_keep, mo):
     return (custom_features,)
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    #### On sélectionne les features inutiles/donnant trop d'informations
-    """)
-    return
-
-
 @app.cell
 def _(custom_features, df_clean_keep, json, mo, mo_utils, modex):
     with open ("../../Preprocessing_pipeline/preprocessing-pipelines/json/dynamic_features.json", "r") as file:
@@ -548,6 +546,10 @@ def _(custom_features, df_clean_keep, json, mo, mo_utils, modex):
             ~cs.starts_with("hx_") & ~cs.starts_with("icu_")
         ).columns
 
+    elif modex.value == "Mode Commonly Used Without pmsi":
+        keep_feats = df_clean_keep.select(
+            ["score_glasgow", "heart_rate", "creat", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "diurese" ]
+        )
     elif modex.value == "Mode Custom":
         keep_feats = custom_features.value
     else:
@@ -681,141 +683,22 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    #### Split Train/Test
-    cette cellule ne fonctionne que parce qu'on a des fenêtres qui sont toutes de 24h => Le poids entre les étiquettes est le même peu importe le patient qu'on prend ce qui permet un bon équilibrage train/test
+    On garde d'abord 20% pour tester le modèle :
     """)
     return
 
 
 @app.cell
-def _(config_balance):
-    underscore = "_"
-    if config_balance.balance_method == "":
-        underscore = ""
-    return (underscore,)
-
-
-@app.cell
 def _():
-    # groups = df_clean_3[patient_col].to_numpy()
+    return
 
-    # sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
-    # (train_idx, test_idx) = next(sgkf.split(X=X, y=y, groups=groups))
 
-    # # Tri obligatoire (même si en théorie il est déjà fait)
-    # train_df = df_clean_3[train_idx].sort([patient_col, time_col])
-    # test_df = df_clean_3[test_idx].sort([patient_col, time_col])
-
-    # if config_models.extraction_type == "TSFEL" : 
-
-    #      # On enlève les features statiques
-    #     static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
-
-    #     # Gestion des noms de fichier Boruta
-    #     str_boruta = "_Boruta" if boruta_filter.value else ""
-    #     filename_train = f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
-    #     filename_test = f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}{str_boruta}.parquet"
-
-    #     if extract_tsfel.value :
-    #         # Extraction TSFEL brute
-    #         tsfel_features = [c for c in final_features if c not in static_feats]
-    #         TSFEL_train_df = extract_feat.extract_tsfel_per_patient(train_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
-    #         TSFEL_test_df = extract_feat.extract_tsfel_per_patient(test_df, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
-
-    #         # Filtrage corrélation/variance
-    #         TSFEL_train_clean, TSFEL_test_clean, keepVariableList = extract_feat.filtrage_corr_var(TSFEL_train_df, TSFEL_test_df, patient_col, target_col)
-
-    #         # Jointure avec données statiques
-    #         static_train = train_df.select([extract.ID_COL, *static_feats]).unique()
-    #         static_test = test_df.select([extract.ID_COL, *static_feats]).unique()
-    #         new_train_df = TSFEL_train_clean.join(static_train, on=extract.ID_COL, how="inner")
-    #         new_test_df = TSFEL_test_clean.join(static_test, on=extract.ID_COL, how="inner")
-
-    #         # Save 1 : Dataset complet sans Boruta
-    #         new_train_df.write_parquet(f"tsfel_train_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
-    #         new_test_df.write_parquet(f"tsfel_test_df_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet")
-
-    #         if boruta_filter.value:
-    #             # Calcul de Boruta
-    #             new_train_df, new_test_df, keepVariableList = extract_feat.filtrage_boruta( new_train_df, new_test_df, patient_col, target_col, max_iter = 100, seed = seed)
-
-    #             # Save 2 : Dataset complet avec Boruta
-    #             new_train_df.write_parquet(filename_train)
-    #             new_test_df.write_parquet(filename_test)
-    #     else:
-    #         # Lecture des Dataset soit avec Boruta soit sans
-    #         new_train_df = pl.read_parquet(filename_train)
-    #         new_test_df = pl.read_parquet(filename_test)
-    #         keepVariableList = [c for c in new_train_df.columns if c not in [extract.ID_COL, target_col]]
-
-    #     # Equilibrage
-    #     new_train_df = preproc.equilibrer_dataset_tabulaire(new_train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-    #     # Tri (obligatoire pour comparabilité)
-    #     new_train_df = new_train_df.sort(patient_col)
-    #     new_test_df = new_test_df.sort(patient_col)
-
-    #     # Sécurité reproductibilité/intégrité : On s'assure qu'il n'y a qu'UNE seule ligne par patient
-    #     assert new_train_df.height == new_train_df[extract.ID_COL].n_unique(), "Erreur d'alignement Train TSFEL"
-    #     assert new_test_df.height == new_test_df[extract.ID_COL].n_unique(), "Erreur d'alignement Test TSFEL"
-    #     y_train = new_train_df[target_col].to_numpy()
-    #     y_test = new_test_df[target_col].to_numpy()
-    #     new_train_df = new_train_df.select(pl.exclude(patient_col, target_col))
-    #     new_test_df = new_test_df.select(pl.exclude(patient_col, target_col))
-
-    #     # Scaling
-    #     (X_train, X_test) = preproc.scaling(new_train_df, new_test_df)
-
-    # elif config_models.extraction_type == "time" :
-
-    #     # Gestion exclusive de l'équilibrage homemade (avec polars)
-    #     if config_balance.balance_method in ["downsampling_homemade", ""]:
-    #         train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-    #     # On prépare le jeu d'entraînement
-
-    #     # Scaling
-    #     (train_df, test_df) = preproc.scaling(train_df, test_df)
-
-    #     # Transformation en 3D Array
-    #     (X_train, y_train) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
-    #     (X_test, y_test) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
-
-    #     # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
-    #     if config_balance.balance_method not in ["downsampling_homemade", ""]:
-    #         # On applatit le 3D Array en 2D Array
-    #         n_samples, n_timesteps, n_feats = X_train.shape
-    #         X_train_2d = X_train.reshape(n_samples, n_timesteps * n_feats)
-
-    #         # On applique la méthode d'équilibrage imblearn
-    #         if config_balance.balance_method == "downsampling_50-50":
-    #             from imblearn.under_sampling import RandomUnderSampler
-    #             rs = RandomUnderSampler(random_state=seed)
-    #         elif config_balance.balance_method == "upsampling_50-50":
-    #             from imblearn.over_sampling import RandomOverSampler
-    #             rs = RandomOverSampler(random_state=seed)
-    #         else:
-    #             raise ValueError("Cet équilibrage n'a pas encore été implémenté")
-
-    #         X_res_2d, y_train = rs.fit_resample(X_train_2d, y_train)
-
-    #         # On redonne sa forme 3D d'origine au tenseur équilibré
-    #         X_train = X_res_2d.reshape(-1, n_timesteps, n_feats)
-
-    #     # TODO : externaliser la gestion des NaN
-    #     # On enlève les NaN après extraction de features
-    #     total_nan = np.isnan(X_train).sum()
-    #     # Compte les NaN pour chaque feature
-    #     nan_par_feature = np.isnan(X_train).sum(axis=(0, 1))
-    #     # for i, feat_name in enumerate(final_features):
-    #         # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
-    #     print(f"Nombre total de valeurs NaN : {total_nan}")
-
-    #     X_train = np.nan_to_num(X_train, nan=0.0)
-    #     X_test = np.nan_to_num(X_test, nan = 0.0)
-
-    # else:
-    #     raise ValueError("Modèle inexistant/Pas implémenté")
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Split Train/Test
+    cette cellule ne fonctionne que parce qu'on a des fenêtres qui sont toutes de 24h => Le poids entre les étiquettes est le même peu importe le patient qu'on prend ce qui permet un bon équilibrage train/test
+    """)
     return
 
 
@@ -825,17 +708,14 @@ def _(
     X,
     boruta_filter,
     config_balance,
-    config_cleaning,
-    config_mode,
     config_models,
-    config_y,
     df_clean_3,
+    exp,
     expected_length,
     extract,
     extract_feat,
     extract_tsfel,
     final_features,
-    modex,
     np,
     os,
     patient_col,
@@ -847,7 +727,7 @@ def _(
     y,
 ):
     if config_models.extraction_type == "TSFEL":
-        filename_global_brut = f"tsfel_global_brut_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}.parquet"
+        filename_global_brut = exp.get_tsfel_parquet_path()
         if extract_tsfel.value or not os.path.exists(filename_global_brut):
             print("Lancement de l'extraction TSFEL globale sur tous les patients")
             # On enlève les features statiques
@@ -863,8 +743,10 @@ def _(
         else:
             df_tsfel_complet = pl.read_parquet(filename_global_brut)
         keepVariableList_0 = df_tsfel_complet.columns
-    groups = df_clean_3[patient_col].to_numpy()
+        parent_folder = filename_global_brut.parent
+        np.save(parent_folder / "keepVariableList_0.npy", keepVariableList_0)
 
+    groups = df_clean_3[patient_col].to_numpy()
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
 
     # On stocke les données de tous les folds
@@ -886,11 +768,10 @@ def _(
             test_fold_tsfel = df_tsfel_complet.join(test_patients, on=patient_col, how="inner").sort(patient_col)
             # Filtrage corrélation/variance
             train_clean, test_clean, keepVariableList_1 = extract_feat.filtrage_corr_var(train_fold_tsfel, test_fold_tsfel, patient_col, target_col)
-
             if boruta_filter.value:
                 # Construction du nom de fichier unique intégrant le Fold et la Graine (seed)
-                filename_train_boruta = f"tsfel_train_fold_{fold_idx}_seed_{seed}_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}_Boruta.parquet"
-                filename_test_boruta = f"tsfel_test_fold_{fold_idx}_seed_{seed}_{config_mode.name}_{config_cleaning.clean}_{config_y.target_name}_{modex.value}_Boruta.parquet"
+                filename_train_boruta = exp.get_tsfel_boruta("train", fold_idx)
+                filename_test_boruta = exp.get_tsfel_boruta("test", fold_idx)
 
                 if os.path.exists(filename_train_boruta) and os.path.exists(filename_test_boruta):
                     print(f"Lecture des fichiers Boruta existants pour le fold {fold_idx} (Graine {seed}).")
@@ -898,10 +779,15 @@ def _(
                     test_clean = pl.read_parquet(filename_test_boruta)
                 else:
                     train_clean, test_clean, keepVariableList_2 = extract_feat.filtrage_boruta(train_clean, test_clean, patient_col, target_col, max_iter = 100, seed = seed)
+
                     train_clean.write_parquet(filename_train_boruta)
                     test_clean.write_parquet(filename_test_boruta)
                     print(f"Save de Boruta pour le fold {fold_idx} (Graine {seed}).")
-        
+
+                    parent_folder2 = filename_train_boruta.parent
+                    np.save(parent_folder2 / f"keepVariableList_1_fold_{fold_idx}.npy", keepVariableList_1)
+
+                    np.save(parent_folder2 / f"keepVariableList_2_fold_{fold_idx}.npy", keepVariableList_2)
             # Tri au cas-où
             train_clean = train_clean.sort(patient_col)
             test_clean = test_clean.sort(patient_col)
@@ -915,13 +801,13 @@ def _(
 
             y_train_fold = train_clean[target_col].to_numpy()
             y_test_fold = test_clean[target_col].to_numpy()
-        
+
             train_clean = train_clean.select(pl.exclude(patient_col, target_col))
             test_clean = test_clean.select(pl.exclude(patient_col, target_col))
 
             # Scaling final
             X_train_fold, X_test_fold = preproc.scaling(train_clean, test_clean)
-    
+
         elif config_models.extraction_type == "time" :
             train_df = df_clean_3[train_idx].sort([patient_col, time_col])
             test_df = df_clean_3[test_idx].sort([patient_col, time_col])
@@ -929,22 +815,22 @@ def _(
             # Gestion exclusive de l'équilibrage homemade (avec polars)
             if config_balance.balance_method in ["downsampling_homemade", ""]:
                 train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-    
+
             # On prépare le jeu d'entraînement
-    
+
             # Scaling
             (train_df, test_df) = preproc.scaling(train_df, test_df)
-    
+
             # Transformation en 3D Array
             (X_train_fold, y_train_fold) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
             (X_test_fold, y_test_fold) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
-    
+
             # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
             if config_balance.balance_method not in ["downsampling_homemade", ""]:
                 # On applatit le 3D Array en 2D Array
                 n_samples, n_timesteps, n_feats = X_train_fold.shape
                 X_train_fold_2d = X_train_fold.reshape(n_samples, n_timesteps * n_feats)
-    
+
                 # On applique la méthode d'équilibrage imblearn
                 if config_balance.balance_method == "downsampling_50-50":
                     from imblearn.under_sampling import RandomUnderSampler
@@ -954,14 +840,14 @@ def _(
                     rs = RandomOverSampler(random_state=seed)
                 else:
                     raise ValueError("Cet équilibrage n'a pas encore été implémenté")
-    
+
                 X_res_2d, y_train_fold = rs.fit_resample(X_train_fold_2d, y_train_fold)
-    
+
                 # On redonne sa forme 3D d'origine au tenseur équilibré
                 X_train_fold = X_res_2d.reshape(-1, n_timesteps, n_feats)
-        
+
             # TODO : rajouter une gestion des NaN (appel à fonction de utils.py)
-            
+
             # TODO : externaliser la gestion des NaN
             # On enlève les NaN après extraction de features
             total_nan = np.isnan(X_train_fold).sum()
@@ -970,7 +856,7 @@ def _(
             # for i, feat_name in enumerate(final_features):
                 # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
             print(f"Nombre total de valeurs NaN : {total_nan}")
-    
+
             X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
             X_test_fold = np.nan_to_num(X_test_fold, nan = 0.0)
         else:
@@ -981,7 +867,7 @@ def _(
         folds_y_train.append(y_train_fold)
         folds_y_test.append(y_test_fold)
     print("Les 5 folds ont été calculé avec succès !")
-    return folds_X_test, folds_X_train, folds_y_test, folds_y_train, test_df
+    return folds_X_test, folds_X_train, folds_y_test, folds_y_train
 
 
 @app.cell(hide_code=True)
@@ -1020,12 +906,15 @@ def _(mo, mo_utils, run):
 
 
 @app.cell
-def _(config_keep_pop, config_models):
+def _(config_balance, config_keep_pop, config_models):
     # on créé un nom unique de modèle
     str_pop = ""
     if config_keep_pop.keep_population != "all_diseases":
         str_pop = "_"+config_keep_pop.keep_population
 
+    str_balance_method = ""
+    if config_balance.balance_method:
+        str_balance_method = config_balance.balance_method + "_"
     extension = ".joblib" if config_models.extraction_type == "TSFEL" else ".pt"
 
     default_params = {
@@ -1034,30 +923,26 @@ def _(config_keep_pop, config_models):
         }
 
     parameters = default_params
-    return extension, parameters, str_pop
+    return extension, parameters, str_balance_method, str_pop
 
 
 @app.cell
 def _(
-    config_balance,
-    config_cleaning,
+    class_weight_choice,
     config_models,
-    config_y,
+    exp,
     extension,
     folds_X_train,
     folds_y_train,
     joblib,
     mo,
-    modex,
     np,
     os,
     parameters,
     run,
     seed,
-    str_pop,
     train_inception_time,
     train_lstm_model,
-    underscore,
 ):
     mo.stop(not run.value, "Clique pour lancer")
     print("Entraînement lancé")
@@ -1074,18 +959,19 @@ def _(
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice tabulaire 2D, mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'TSFEL' ?")
 
     for fold_idx_2 in range(5):
+
         print(f"\n─────────────────── Entraînement du Fold {fold_idx_2 + 1}/5 ───────────────────")
         # Extraction des données spécifiques à ce fold
         X_train_fold_2 = folds_X_train[fold_idx_2]
         y_train_fold_2 = folds_y_train[fold_idx_2]
-    
+
         # Génération d'un chemin STRICT et DÉTERMINISTE unique par fold et par graine
-        model_path_fold = (
-            f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
-            f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}/fold_{fold_idx_2}{extension}"
-        )
-        os.makedirs(os.path.dirname(model_path_fold), exist_ok=True)
-    
+        model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension)
+
+        if os.path.exists(model_path_fold) and os.path.getsize(model_path_fold) > 0:
+            print(f"--> Modèle déjà entraîné trouvé à : {model_path_fold} (Passage au fold suivant)")
+            continue  # On passe directement au fold suivant sans réentraîner
+        print(f"\n[DEBUG TRAIN - Fold {fold_idx_2 + 1}] Shape de X_train_fold_2: {X_train_fold_2.shape}")
         if config_models.models_name == "InceptionTimeModified":
             print(parameters)
             model, T, history, splits = train_inception_time(
@@ -1094,8 +980,9 @@ def _(
                 seed = seed,
                 **parameters
                 )
-    
+
         elif config_models.models_name == "LstmTimeModified":
+
             model, T, history, splits = train_lstm_model(
                 X_train_fold_2, y_train_fold_2,
                 epochs=100,
@@ -1103,29 +990,34 @@ def _(
                 save_best_path=model_path_fold,
                 seed = seed,
                 )
-    
+
         elif config_models.models_name == "RandomForest TSFEL":
             from sklearn.ensemble import RandomForestClassifier
-            rf = RandomForestClassifier(class_weight='balanced', random_state=seed)
+            rf = RandomForestClassifier(class_weight=class_weight_choice.value[1:], random_state=seed)
             rf.fit(X_train_fold_2, y_train_fold_2)
             joblib.dump(rf, model_path_fold)
+
+        elif config_models.models_name == "RandomForest Imbalanced TSFEL":
+            from imblearn.ensemble import BalancedRandomForestClassifier
+            brf = BalancedRandomForestClassifier(class_weight = class_weight_choice.value[1:], random_state = seed)
+            brf.fit(X_train_fold_2, y_train_fold_2)
+            joblib.dump(brf, model_path_fold)
         elif config_models.models_name == "XGBoost TSFEL":
             from xgboost import XGBClassifier
-            # TODO : rajouter n_jobs = 1 ou n_threads = 1 pour éviter le random dans le multiprocessing si jamais on a des petites variations
             X_train_fold_2_tsfel = X_train_fold_2.to_numpy()
             y_train_fold_2_tsfel = np.asarray(y_train_fold_2).astype(int)
-    
+
             n_pos = np.sum(y_train_fold_2_tsfel == 1)
             n_neg = np.sum(y_train_fold_2_tsfel == 0)
-    
+
             if n_pos == 0 or n_neg == 0:
                 raise ValueError(
                     f"XGBoost nécessite les deux classes. "
                     f"Classes trouvées: {np.unique(y_train_fold_2_tsfel, return_counts=True)}"
                 )
-    
+
             ratio = n_neg / n_pos
-    
+
             xgb = XGBClassifier(
                 scale_pos_weight=ratio,
                 random_state=seed,
@@ -1133,15 +1025,18 @@ def _(
                 missing=np.nan,
                 # n_jobs = 1 => Si on veut une reproductibilité complète mais plus long donc non pour l'instant
             )
-    
+
             xgb.fit(X_train_fold_2_tsfel, y_train_fold_2_tsfel)
             joblib.dump(xgb, model_path_fold)
-    
+
         elif config_models.models_name == "SVC TSFEL" : 
             from sklearn.svm import SVC
-            svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = "balanced", probability = True)
+            svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = class_weight_choice.value[1:], probability = True)
             svc.fit(X_train_fold_2, y_train_fold_2)
             joblib.dump(svc, model_path_fold)
+        elif config_models.models_name == "LR Lasso TSFEL" :
+            from sklearn.linear_model import Lasso
+            lasso = Lasso(alpha = 1.0)
         else :
             print("oups tu t'es trompé")
     print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès")
@@ -1164,6 +1059,13 @@ def _(mo):
     return
 
 
+@app.cell
+def _(config_models, exp):
+    output_dir = exp.get_output_path(config_models.models_name)
+    print("Dossier de sortie prêt :", output_dir)
+    return (output_dir,)
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -1172,18 +1074,16 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(
     Path,
     calibration,
     calibration_curve,
     classification_report,
-    config_balance,
-    config_cleaning,
     config_models,
-    config_y,
     evaluate_lstm_on_test,
     evaluate_on_test,
+    exp,
     extension,
     folds_X_test,
     folds_X_train,
@@ -1192,16 +1092,14 @@ def _(
     joblib,
     load_lstm_from_checkpoint,
     load_model_from_checkpoint,
-    modex,
     np,
+    output_dir,
     pl,
     plt,
     predict_proba,
+    predict_proba_lstm,
     save_figure,
-    seed,
-    str_pop,
     transparent,
-    underscore,
 ):
     # --- LISTES D'ACCUMULATION POUR LES MÉTRIQUES TEXTES ---
     all_test_scores = []
@@ -1227,40 +1125,33 @@ def _(
         y_test = folds_y_test[fold_idx_bis]
 
         # Reconstruction du fichier à charger
-        loaded_model = (
-            f"models/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
-            f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}/fold_{fold_idx_bis}{extension}"
-        )
+        loaded_model = exp.get_model_path(config_models.models_name, fold_idx_bis, extension)
         print("Modèle chargé :", loaded_model)
-    
-        # Construction du dossier de sortie
-        output_dir = Path("outputs") / Path(config_models.models_name) / Path(loaded_model).stem
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
+
         if config_models.models_name == "InceptionTimeModified":
             X_train_final = X_train
             X_test_final = X_test
-        
+
             (auc, brier, T_1) = evaluate_on_test(X_test_final, y_test, loaded_model)
             (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
 
             probas_fold = predict_proba(model_1, X_test_final, T = T_1)
-        
+
             all_auc_scores.append(auc)
             all_brier_scores.append(brier)
             all_y_test_global.extend(y_test)
             all_probas_uncalib.extend(probas_fold)
             all_probas_calib.extend(probas_fold)
-    
+
         elif config_models.models_name == "LstmTimeModified":
             X_train_final = X_train
             X_test_final = X_test
-        
+            # 🔍 DEBUG ENTRÉE ÉVALUATION
+            print(f"\n[DEBUG EVAL - Fold {fold_idx_bis + 1}] Shape de X_test_final: {X_test_final.shape}")
             (auc, brier, T_1) = evaluate_lstm_on_test(X_test_final, y_test, loaded_model)
             (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
+            probas_fold = predict_proba_lstm(model_1, X_test_final, T = T_1)
 
-            probas_fold = predict_proba(model_1, X_test_final, T = T_1)
-        
             all_auc_scores.append(auc)
             all_brier_scores.append(brier)
             all_y_test_global.extend(y_test)
@@ -1269,14 +1160,14 @@ def _(
 
         elif config_models.extraction_type == "TSFEL":
             clf = joblib.load(loaded_model)
-    
+
             # 1. Extraction universelle des features
             expected_features = None
             if hasattr(clf, "feature_names_in_"):
                 expected_features = list(clf.feature_names_in_)
             elif hasattr(clf, "get_booster"):
                 expected_features = clf.get_booster().feature_names
-    
+
             # 2. Alignement conditionnel
             if expected_features is not None:
                 if expected_features and expected_features[0].startswith('f') and expected_features[0][1:].isdigit():
@@ -1293,7 +1184,7 @@ def _(
                     else:
                         X_train_final = X_train.select(expected_features)
                         X_test_final = X_test.select(expected_features)
-    
+
                     if "XGB" in type(clf).__name__:
                         X_train_final = X_train_final.to_pandas()
                         X_test_final = X_test_final.to_pandas()
@@ -1301,11 +1192,11 @@ def _(
                 print("Aucun nom de feature trouvé dans le modèle. Passage en matrices NumPy brutes.")
                 X_train_final = X_train.to_numpy()
                 X_test_final = X_test.to_numpy()
-    
+
             # 3. Prédictions et Scores
             y_pred_nb_train = clf.predict(X_train_final)
             y_pred_nb_test = clf.predict(X_test_final)
-    
+
             train_score = clf.score(X_train_final, y_train)
             test_score = clf.score(X_test_final, y_test)
 
@@ -1319,7 +1210,7 @@ def _(
             classes = list(clf.classes_)
             positive_idx = classes.index(1)
             prob_uncalib_fold = all_probas_fold[:, positive_idx]
-        
+
             all_probas_uncalib.extend(prob_uncalib_fold)
             all_y_test_global.extend(y_test)
 
@@ -1332,7 +1223,7 @@ def _(
                 all_probas_calib.extend(prob_calib_fold)
             else:
                 all_probas_calib.extend(prob_uncalib_fold)
-        
+
             print(f"Le score (Accuracy) sur le fold {fold_idx_bis + 1} est : {test_score:.4f}")
 
     print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
@@ -1380,14 +1271,14 @@ def _(
 
     # Sauvegarde propre de l'image
     if save_figure.value:
-        plt.savefig(output_dir / Path("Courbe_Calibration"), dpi=300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("Courbe_Calibration"), dpi=300, bbox_inches="tight", transparent=transparent.value)
 
     plt.show()
 
     # --- RE-MAPPING DES ÉTATS GLOBAUX POUR LES CELLULES SUIVANTES (COURBE ROC / MATRICE) ---
     probas = all_probas_calib
     y_test = all_y_test_global
-    return X_train_final, clf, output_dir, probas, y_test
+    return probas, y_test
 
 
 @app.cell(hide_code=True)
@@ -1425,9 +1316,8 @@ def _(
     plt.legend(loc='lower right')
     plt.grid(True)
     if save_figure.value :
-        plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
-
     return (auc_final,)
 
 
@@ -1437,7 +1327,15 @@ def _(df_clean_3, folds_y_test, patient_col):
     total_patients_uniques = df_clean_3[patient_col].n_unique()
 
     print(f"Nombre total de patients uniques dans la cohorte : {total_patients_uniques}")
-    print(f"Somme des tailles de tes 5 jeux de test cumulés : {total_predictions}")
+    print(f"Somme des tailles des 5 jeux de test cumulés : {total_predictions}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Distribution des scores (KDE) de {config_models.models_name}
+    """)
     return
 
 
@@ -1464,8 +1362,16 @@ def _(
     plt.legend()
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("KDE"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("KDE"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Courbe de calibration de {config_models.models_name}
+    """)
     return
 
 
@@ -1493,8 +1399,16 @@ def _(
     plt.legend()
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("Calibration_curve"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("Calibration_curve"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Choix du threshold en fonction du F1 score pour {config_models.models_name}
+    """)
     return
 
 
@@ -1527,10 +1441,18 @@ def _(
     plt.title(f"Evolution du F1 score en fonction du Threshold pour le modèle {config_models.models_name}")
     plt.grid()
     if save_figure.value :
-        plt.savefig(output_dir / Path("threshold"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("threshold"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
     print(f'Le meilleur f1 score de{best_f1: .2f} est atteint lorsque le threshold est égal à{best_t: .2f}')
     return best_f1, best_t
+
+
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Matrice de confusion de {config_models.models_name}
+    """)
+    return
 
 
 @app.cell
@@ -1557,9 +1479,17 @@ def _(
     plt.ylabel('Réel')
     plt.title(f'Confusion matrix du modèle {config_models.models_name}  (threshold={ best_t: .2f}, MCC = {mcc})')
     if save_figure.value :
-        plt.savefig(output_dir / Path("confusion_matrix"), dpi = 300, bbox_inches="tight", transparent=transparent, facecolor = "white")
+        plt.savefig(output_dir / Path("confusion_matrix"), dpi = 300, bbox_inches="tight", transparent=transparent.value, facecolor = "white")
     plt.show()
     return mcc, y_pred
+
+
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Evolution du score de Brier de {config_models.models_name}
+    """)
+    return
 
 
 @app.cell
@@ -1651,7 +1581,7 @@ def _(
     plt.title(f"Brier par tranches fixes de risque ")
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("brierPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
 
 
@@ -1668,7 +1598,7 @@ def _(
     plt.title(f"Brier par déciles de patients ")
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("brierPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
 
 
@@ -1689,7 +1619,7 @@ def _(
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("calibPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
 
 
@@ -1712,34 +1642,30 @@ def _(
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("calibPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
     plt.show()
     return (global_brier,)
 
 
+@app.cell(hide_code=True)
+def _(config_models, mo):
+    mo.md(rf"""
+    ### Enregistrement des scores obtenus de {config_models.models_name}
+    """)
+    return
+
+
 @app.cell
 def _(
-    Path,
     auc_final,
     best_f1,
-    config_balance,
-    config_cleaning,
-    config_models,
-    config_y,
     global_brier,
     joblib,
     mcc,
-    modex,
+    output_dir,
     probas,
-    seed,
-    str_pop,
-    underscore,
     y_pred,
 ):
-    output_agg_dir = Path(
-        f"outputs/{config_models.models_name}/{config_cleaning.clean}_{config_y.target_name}_"
-        f"{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}"
-    )
     # Résumé des scores obtenus
     all_res = {
             'probas': probas,
@@ -1749,17 +1675,30 @@ def _(
             'auc': auc_final,
             'brier': global_brier,
     }
-    output_agg_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(all_res, output_agg_dir / "all_res.joblib")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(all_res, output_dir / "all_res.joblib")
 
-    resu = joblib.load(output_agg_dir / "all_res.joblib")
+    resu = joblib.load(output_dir / "all_res.joblib")
     return
 
 
-@app.cell(disabled=True)
-def _(X_train_final, clf, config_models, extract_feat, keepVariableList):
-    if config_models.extraction_type == "TSFEL":
-        extract_feat.mesureImportance_tsfel(clf, X_train_final, keepVariableList, top_n=20, class_labels=["Survie", "Décès"], savefig = True, transparent = False)
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(rf"""
+    ### Mesure d'importance de nos variables TSFEL + statiques
+    """)
+    return
+
+
+@app.cell
+def _(exp, extract_feat, joblib, np, patient_col, pl, target_col):
+    model_name_shap = "XGBoost TSFEL"
+    output_dir_shap = exp.get_output_path(model_name_shap)
+    loaded_model_shap = exp.get_model_path(model_name_shap, 0, ".joblib",  "",)
+    X_train_fold_shap = exp.get_tsfel_boruta("train", 0)
+    keepVariableList_shap = X_train_fold_shap.parent / "keepVariableList_2_fold_0.npy"
+    clf_shap = joblib.load(loaded_model_shap)
+    extract_feat.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survie", "Décès"], savefig = True, transparent = False, folder = output_dir_shap)
     return
 
 
@@ -1781,9 +1720,9 @@ def _(mo, mo_utils, run_test):
 
 
 @app.cell
-def _(df_clean, pl, test_df):
+def _(df_clean, df_clean_3, pl):
     df_clean_saps2 = (
-        test_df
+        df_clean_3
         .join(
             df_clean.select(["sapsii_prob", "encounterId"]).cast(pl.Float64), 
             on="encounterId", 
@@ -1801,82 +1740,6 @@ def _(df_clean, pl, test_df):
 
 
 @app.cell
-def _(Path, pd, plt, roc_auc_score, roc_curve, tabulate):
-    def générer_rapport_comparatif(y_true, configurations, save_dir=None, table_format='fancy_grid', saps2_pred = None, saps2_true = None):
-        """
-        Génère un tableau comparatif et une courbe ROC unique à partir de scores et 
-        de prédictions déjà calculés.
-
-        y_true : tableau des vraies étiquettes (ex: y_test ou y_news)
-        configurations : dictionnaire contenant les scores, prédictions et couleurs pour chaque modèle
-        """
-        results = {}
-
-        # Configuration de la figure ROC
-        plt.figure(figsize=(8, 8))
-        for name, config in configurations:
-            # Extraction des vecteurs précalculés
-            probas = config['probas']
-            y_pred = config['preds']
-
-            # Calcul des métriques
-
-            f1 = config['f1_score']
-            mcc = config['mcc']
-            auc = config['auc']
-            brier = config ['brier']
-
-            # Stockage pour le tableau
-            results[name] = {
-                'F1-Score': f1,
-                'MCC': mcc,
-                'AUC': auc,
-                "brier" : brier
-            }
-
-            # Ajout à la courbe ROC collective
-            fpr, tpr, _ = roc_curve(y_true, probas)
-            color = config.get('color', None)
-            plt.plot(fpr, tpr, label=f'{name} (AUC = {auc:.3f})', color=color, lw=2)
-
-        # 1. Génération du tableau avec tabulate
-        df_results = pd.DataFrame(results).T
-        print("\n=== TABLEAU COMPARATIF DES PERFORMANCES ===")
-        print(tabulate(df_results, headers='keys', tablefmt=table_format, floatfmt=".3f"))
-        # Calcul de l'AUC de IGS2 : 
-        if saps2_pred is not None and saps2_true is not None:
-            fpr_saps2, tpr_saps2, _ = roc_curve(saps2_true, saps2_pred)
-            auc_saps2 = roc_auc_score(saps2_true, saps2_pred)
-            name_saps2 = "Score IGS2"
-            plt.plot(fpr_saps2, tpr_saps2, label=f'{name_saps2} (AUC = {auc_saps2:.3f})', lw=2, linestyle='-.')
-        # 2. Finalisation de la courbe ROC
-        plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard', color='gray')
-        plt.xlabel('Taux de faux positifs (FPR)')
-        plt.ylabel('Taux de vrais positifs (TPR)')
-        plt.title('Comparaison des Courbes ROC')
-        plt.legend(loc='lower right')
-        plt.grid(True, linestyle=':', alpha=0.6)
-
-        # Sauvegarde automatique des artefacts pour votre publi
-        if save_dir:
-            output_path = Path(save_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
-
-            # Sauvegarde de l'image
-            plt.savefig(output_path / "courbe_roc_collective.png", dpi=300, bbox_inches="tight")
-
-            # Sauvegarde du tableau au format LaTeX booktabs pour Overleaf
-            with open(output_path / "tableau_resultats.tex", "w") as f:
-                f.write(tabulate(df_results, headers='keys', tablefmt='latex_booktabs', floatfmt=".3f"))
-
-        plt.show()
-
-        return df_results
-
-    return (générer_rapport_comparatif,)
-
-
-@app.cell
 def _(mo, run_test):
     mo.stop(not run_test.value, "Clique pour lancer")
     print("Comparaison lancée")
@@ -1884,58 +1747,107 @@ def _(mo, run_test):
 
 
 @app.cell
-def _(
-    Path,
-    config_balance,
-    config_cleaning,
-    config_y,
-    générer_rapport_comparatif,
-    joblib,
-    modex,
-    saps2_pred,
-    saps2_true,
-    seed,
-    str_pop,
-    underscore,
-    y_test,
-):
-    def load_model(model_name):
-        output_directory = (
-            Path("outputs") / 
-            model_name / 
-            f"{config_cleaning.clean}_{config_y.target_name}_{config_balance.balance_method}{underscore}{modex.value}{str_pop}_seed_{seed}"
-        )
-        file_path = output_directory / "all_res.joblib"
-        if not file_path.exists():
-            raise FileNotFoundError(f"Fichier introuvable : {file_path}")
-        
-        return model_name, joblib.load(file_path)
-
-    comparaisons = [load_model("InceptionTimeModified"), load_model("LstmTimeModified"), load_model("RandomForest TSFEL"), load_model("XGBoost TSFEL"), load_model("SVC TSFEL")]
+def _(exp, saps2_pred, saps2_true, utils, y_test):
+    comparaisons = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified"), exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
 
     comparaisons
 
-    générer_rapport_comparatif(y_test, comparaisons, save_dir="Comparaison ALl", table_format='fancy_grid', saps2_pred = saps2_pred, saps2_true = saps2_true )
-    return (load_model,)
-
-
-@app.cell
-def _(générer_rapport_comparatif, load_model, y_test):
-    comparaisons_time = [load_model("InceptionTimeModified"), load_model("LstmTimeModified")]
-
-    générer_rapport_comparatif(y_test, comparaisons_time, save_dir="Comparaison Time", table_format='fancy_grid')
+    utils.générer_rapport_comparatif(y_test, comparaisons, save_dir="Comparaison ALl", table_format='fancy_grid', saps2_pred = saps2_pred, saps2_true = saps2_true)
     return
 
 
 @app.cell
-def _(générer_rapport_comparatif, load_model, y_test):
-    comparaisons_ml = [load_model("RandomForest TSFEL"), load_model("XGBoost TSFEL"), load_model("SVC TSFEL")]
-    générer_rapport_comparatif(y_test, comparaisons_ml, save_dir="Comparaison TSFEL", table_format='fancy_grid')
+def _(exp, utils, y_test):
+    comparaisons_time = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified")]
+
+    utils.générer_rapport_comparatif(y_test, comparaisons_time, save_dir="Comparaison Time", table_format='fancy_grid')
     return
 
 
 @app.cell
-def _():
+def _(exp, utils, y_test):
+    comparaisons_ml = [exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
+    utils.générer_rapport_comparatif(y_test, comparaisons_ml, save_dir="Comparaison TSFEL", table_format='fancy_grid')
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("KDE.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("Calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("Courbe_ROC.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("threshold.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("confusion_matrix.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("calibPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("brierPerTrancheRisk.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
+    return
+
+
+@app.cell
+def _(exp, utils):
+    utils.compare_models_figure("brierPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""),
+    XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
+    SVC = exp.get_output_path("SVC TSFEL", ""))
     return
 
 
@@ -1946,7 +1858,6 @@ def _(
     custom_features,
     keep_feats,
     keep_pop,
-    metric_name,
     mo,
     mo_utils,
     mode,
@@ -1956,6 +1867,7 @@ def _(
     save_figure,
     seed,
     str_keep_feats,
+    sys,
     transparent,
     ui_tsfel,
     y_dd,
@@ -1964,6 +1876,7 @@ def _(
     mo.vstack([
         mo.md(mo_utils.config_sidebar),
         mo.md(f"<U>Seed utilisée pour l'ensemble du code : **{seed}**</U>"),
+        mo.md(f"Version de python : {sys.version}"),
         mo.md("-------------------------------"),
         mode,
         mo.md("-------------------------------"),
@@ -1979,8 +1892,6 @@ def _(
         mo.md(f"**Soit en Français (dynamic feature only):** \n{str_keep_feats}"),
         save_figure,
         transparent,
-        mo.md("-------------------------------"),
-        metric_name,
         mo.md("-------------------------------"),
         run,
         mo.md("-------------------------------"),

@@ -125,15 +125,15 @@ MODELS = {
     "XGBoost TSFEL" : ConfigModels(
         models_name = "XGBoost TSFEL",
         extraction_type = "TSFEL",
-        models_type = "calibrated"
+        models_type = "Normal"
     ),
     "SVC TSFEL" : ConfigModels(
         models_name = "SVC TSFEL",
         extraction_type = "TSFEL",
-        models_type = "Normal"
+        models_type = "calibrated"
     ),
     "RandomForest Imbalanced TSFEL":ConfigModels(
-        models_name = "RandomForest TSFEL",
+        models_name = "RandomForest Imbalanced TSFEL",
         extraction_type = "TSFEL",
         models_type = "imbalanced"
     ),
@@ -204,6 +204,12 @@ FEAT = {
     ),
     "Mode All" : ConfigFeatures(
         keep_feats = "all"
+    ),
+    "Mode Commonly Used Without pmsi" : ConfigFeatures(
+        keep_feats = "mcuwp"
+    ),
+    "Mode Commonly Used": ConfigFeatures(
+        keep_feats = "mcu"
     )
 }
 
