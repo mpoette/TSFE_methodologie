@@ -132,6 +132,11 @@ MODELS = {
         extraction_type = "TSFEL",
         models_type = "calibrated"
     ),
+    "Logistic Regression Lasso TSFEL" : ConfigModels(
+        models_name = "Linear Regression Lasso",
+        extraction_type = "TSFEL",
+        models_type = "calibrated"
+    ),
     "RandomForest Imbalanced TSFEL":ConfigModels(
         models_name = "RandomForest Imbalanced TSFEL",
         extraction_type = "TSFEL",

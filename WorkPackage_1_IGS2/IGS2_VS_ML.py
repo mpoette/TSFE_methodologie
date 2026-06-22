@@ -64,13 +64,9 @@ def _():
     import polars as pl
     import seaborn as sns
     import tsfel
-    from sklearn.calibration import calibration_curve
     from sklearn.metrics import (
         brier_score_loss,
         classification_report,
-        confusion_matrix,
-        f1_score,
-        matthews_corrcoef,
         roc_auc_score,
         roc_curve,
     )
@@ -85,7 +81,8 @@ def _():
     import utilitaries.optuna.optuna_utils as optuna_utils
     import utilitaries.preprocessing_utils as preproc
     import utilitaries.preprocessing_utils as ui
-    import utilitaries.utils as utils
+    import utilitaries.path_utils as path_utils
+    import utilitaries.show_fig_utils as sfu
     from utilitaries.models.inceptionTimeModified import (
         evaluate_on_test,
         load_model_from_checkpoint,
@@ -102,38 +99,31 @@ def _():
     return (
         Path,
         StratifiedGroupKFold,
-        brier_score_loss,
-        calibration_curve,
         classification_report,
-        confusion_matrix,
         create_merged_dataset,
         evaluate_lstm_on_test,
         evaluate_on_test,
         extract,
         extract_feat,
-        f1_score,
         joblib,
         json,
         load_lstm_from_checkpoint,
         load_model_from_checkpoint,
-        matthews_corrcoef,
         mo,
         mo_utils,
         np,
         os,
+        path_utils,
         pl,
         plt,
         predict_proba,
         predict_proba_lstm,
         preproc,
-        roc_auc_score,
-        roc_curve,
         seed,
-        sns,
+        sfu,
         sys,
         train_inception_time,
         train_lstm_model,
-        utils,
     )
 
 
@@ -349,12 +339,12 @@ def _(
     config_mode,
     config_y,
     modex,
+    path_utils,
     seed,
     str_balance_method,
     str_pop,
-    utils,
 ):
-    exp = utils.Experiment(config_mode, config_cleaning, config_y, str_balance_method, modex, class_weight_choice, str_pop, seed)
+    exp = path_utils.Experiment(config_mode, config_cleaning, config_y, str_balance_method, modex, class_weight_choice, str_pop, seed)
     return (exp,)
 
 
@@ -658,9 +648,9 @@ def _(cs, df_clean_2, keep_features, modex, pl, target_col):
         keep_features.extend(cols_admission)
     final_features = list(dict.fromkeys(keep_features))
     print(final_features)
-    X = df_clean_3.select(final_features).to_numpy()
-    y = df_clean_3[target_col].to_numpy()
-    return X, df_clean_3, final_features, y
+    X_init = df_clean_3.select(final_features).to_numpy()
+    y_init = df_clean_3[target_col].to_numpy()
+    return X_init, df_clean_3, final_features, y_init
 
 
 @app.cell
@@ -689,8 +679,71 @@ def _(mo):
 
 
 @app.cell
-def _():
-    return
+def _(
+    StratifiedGroupKFold,
+    X_init,
+    config_models,
+    df_clean_3,
+    exp,
+    extract,
+    extract_feat,
+    extract_tsfel,
+    final_features,
+    np,
+    os,
+    patient_col,
+    pl,
+    seed,
+    target_col,
+    time_col,
+    y_init,
+):
+    if config_models.extraction_type == "TSFEL":
+        filename_global_brut = exp.get_tsfel_parquet_path()
+        if extract_tsfel.value or not os.path.exists(filename_global_brut):
+            print("Lancement de l'extraction TSFEL globale sur tous les patients")
+            # On enlève les features statiques
+            static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
+            tsfel_features = [c for c in final_features if c not in static_feats]
+
+            TSFEL_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
+            static_global = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
+
+            df_tsfel_complet = TSFEL_global_df.join(static_global, on = extract.ID_COL, how = "inner")
+            df_tsfel_complet.write_parquet(filename_global_brut)
+            print("Extraction globale sauvegardée")
+        else:
+            df_tsfel_complet = pl.read_parquet(filename_global_brut)
+        keepVariableList_0 = df_tsfel_complet.columns
+        parent_folder = filename_global_brut.parent
+        np.save(parent_folder / "keepVariableList_0.npy", keepVariableList_0)
+
+    groups_init = df_clean_3[patient_col].to_numpy()
+    sgkf_init = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+
+    train_init_idx, test_init_idx = next(sgkf_init.split(X=X_init, y=y_init, groups = groups_init))
+
+    train_init_patients = df_clean_3[train_init_idx].select(patient_col).unique()
+    test_init_patients = df_clean_3[test_init_idx].select(patient_col).unique()
+
+    if config_models.extraction_type == "TSFEL" : 
+        # On filtre notre gros DataFrame TSFEL pré-calculé pour ce fold (unique)
+        train_init_tsfel = df_tsfel_complet.join(train_init_patients, on=patient_col, how="inner").sort(patient_col)
+        test_holdout_tsfel = df_tsfel_complet.join(test_init_patients, on=patient_col, how="inner").sort(patient_col)
+
+        X = train_init_tsfel
+        y = train_init_tsfel[target_col].to_numpy()
+        groups = train_init_tsfel[patient_col].to_numpy()
+
+    elif config_models.extraction_type == "time":
+        train_init_df = df_clean_3[train_init_idx].sort([patient_col, time_col])
+        test_holdout_df = df_clean_3[test_init_idx].sort([patient_col, time_col])
+
+        X = train_init_df
+        y = train_init_df[target_col].to_numpy()
+        groups = train_init_df[patient_col].to_numpy()
+
+    return X, groups, train_init_df, train_init_tsfel, y
 
 
 @app.cell(hide_code=True)
@@ -714,8 +767,8 @@ def _(
     expected_length,
     extract,
     extract_feat,
-    extract_tsfel,
     final_features,
+    groups,
     np,
     os,
     patient_col,
@@ -724,29 +777,10 @@ def _(
     seed,
     target_col,
     time_col,
+    train_init_df,
+    train_init_tsfel,
     y,
 ):
-    if config_models.extraction_type == "TSFEL":
-        filename_global_brut = exp.get_tsfel_parquet_path()
-        if extract_tsfel.value or not os.path.exists(filename_global_brut):
-            print("Lancement de l'extraction TSFEL globale sur tous les patients")
-            # On enlève les features statiques
-            static_feats = ["admission_type_Medical", "admission_type_Scheduled Surgery", "admission_type_Unknown", "admission_type_Unscheduled Surgery", "score_glasgow", "age"]
-            tsfel_features = [c for c in final_features if c not in static_feats]
-
-            TSFEL_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
-            static_global = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
-
-            df_tsfel_complet = TSFEL_global_df.join(static_global, on = extract.ID_COL, how = "inner")
-            df_tsfel_complet.write_parquet(filename_global_brut)
-            print("Extraction globale sauvegardée")
-        else:
-            df_tsfel_complet = pl.read_parquet(filename_global_brut)
-        keepVariableList_0 = df_tsfel_complet.columns
-        parent_folder = filename_global_brut.parent
-        np.save(parent_folder / "keepVariableList_0.npy", keepVariableList_0)
-
-    groups = df_clean_3[patient_col].to_numpy()
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
 
     # On stocke les données de tous les folds
@@ -761,11 +795,10 @@ def _(
         # Récupération des IDs patients correspondants au split de ce fold
         train_patients = df_clean_3[train_idx].select(patient_col).unique()
         test_patients = df_clean_3[test_idx].select(patient_col).unique()
-
         if config_models.extraction_type == "TSFEL" : 
-            # On filtre notre gros DataFrame TSFEL pré-calculé pour ce fold
-            train_fold_tsfel = df_tsfel_complet.join(train_patients, on=patient_col, how="inner").sort(patient_col)
-            test_fold_tsfel = df_tsfel_complet.join(test_patients, on=patient_col, how="inner").sort(patient_col)
+            # On filtre notre gros DataFrame train pré-calculé pour ce fold
+            train_fold_tsfel = train_init_tsfel.join(train_patients, on=patient_col, how="inner").sort(patient_col)
+            test_fold_tsfel = train_init_tsfel.join(test_patients, on=patient_col, how="inner").sort(patient_col)
             # Filtrage corrélation/variance
             train_clean, test_clean, keepVariableList_1 = extract_feat.filtrage_corr_var(train_fold_tsfel, test_fold_tsfel, patient_col, target_col)
             if boruta_filter.value:
@@ -801,7 +834,7 @@ def _(
 
             y_train_fold = train_clean[target_col].to_numpy()
             y_test_fold = test_clean[target_col].to_numpy()
-
+            groups_fold = train_clean[patient_col].to_numpy()
             train_clean = train_clean.select(pl.exclude(patient_col, target_col))
             test_clean = test_clean.select(pl.exclude(patient_col, target_col))
 
@@ -809,8 +842,8 @@ def _(
             X_train_fold, X_test_fold = preproc.scaling(train_clean, test_clean)
 
         elif config_models.extraction_type == "time" :
-            train_df = df_clean_3[train_idx].sort([patient_col, time_col])
-            test_df = df_clean_3[test_idx].sort([patient_col, time_col])
+            train_df = train_init_df[train_idx].sort([patient_col, time_col])
+            test_df = train_init_df[test_idx].sort([patient_col, time_col])
 
             # Gestion exclusive de l'équilibrage homemade (avec polars)
             if config_balance.balance_method in ["downsampling_homemade", ""]:
@@ -867,7 +900,13 @@ def _(
         folds_y_train.append(y_train_fold)
         folds_y_test.append(y_test_fold)
     print("Les 5 folds ont été calculé avec succès !")
-    return folds_X_test, folds_X_train, folds_y_test, folds_y_train
+    return (
+        folds_X_test,
+        folds_X_train,
+        folds_y_test,
+        folds_y_train,
+        groups_fold,
+    )
 
 
 @app.cell(hide_code=True)
@@ -928,12 +967,15 @@ def _(config_balance, config_keep_pop, config_models):
 
 @app.cell
 def _(
+    LogisticRegressionCV,
+    StratifiedGroupKFold,
     class_weight_choice,
     config_models,
     exp,
     extension,
     folds_X_train,
     folds_y_train,
+    groups_fold,
     joblib,
     mo,
     np,
@@ -964,7 +1006,8 @@ def _(
         # Extraction des données spécifiques à ce fold
         X_train_fold_2 = folds_X_train[fold_idx_2]
         y_train_fold_2 = folds_y_train[fold_idx_2]
-
+        groups_fold_2 = groups_fold[fold_idx_2].to_numpy()
+    
         # Génération d'un chemin STRICT et DÉTERMINISTE unique par fold et par graine
         model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension)
 
@@ -1034,9 +1077,21 @@ def _(
             svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = class_weight_choice.value[1:], probability = True)
             svc.fit(X_train_fold_2, y_train_fold_2)
             joblib.dump(svc, model_path_fold)
-        elif config_models.models_name == "LR Lasso TSFEL" :
-            from sklearn.linear_model import Lasso
-            lasso = Lasso(alpha = 1.0)
+        elif config_models.models_name == "Logistic Regression Lasso TSFEL" :
+            from sklearn.linear_model import LogisticRegression
+            inner_cv = StratifiedGroupKFold(n_splits=3)
+            lasso_cv = LogisticRegressionCV(
+                penalty='l1', 
+                solver='saga', 
+                cv=inner_cv, 
+                max_iter=10000, 
+                random_state=seed,
+                n_jobs=-1
+            )
+        
+            lasso_cv.fit(X_train_fold_2, y_train_fold_2, groups=groups_fold_2)
+            print(f"    [INFO] Meilleur alpha trouvé pour le Fold {fold_idx_2 + 1} : {lasso_cv.alpha_}")
+            joblib.dump(lasso_cv, model_path_fold)
         else :
             print("oups tu t'es trompé")
     print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès")
@@ -1074,11 +1129,9 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
+@app.cell
 def _(
-    Path,
     calibration,
-    calibration_curve,
     classification_report,
     config_models,
     evaluate_lstm_on_test,
@@ -1095,10 +1148,10 @@ def _(
     np,
     output_dir,
     pl,
-    plt,
     predict_proba,
     predict_proba_lstm,
     save_figure,
+    sfu,
     transparent,
 ):
     # --- LISTES D'ACCUMULATION POUR LES MÉTRIQUES TEXTES ---
@@ -1251,34 +1304,72 @@ def _(
 
     print("\nGénération de la courbe de calibration poolée...")
 
-    plt.figure(figsize=(8, 6))
-    plt.plot([0, 1], [0, 1], "k:", label="Calibration parfaite")
-
-    # Courbe de base (Modèle brut ou modèle DL déjà calibré en température)
-    fraction_pos_uncalib, mean_pred_uncalib = calibration_curve(all_y_test_global, all_probas_uncalib, n_bins=10)
-    plt.plot(mean_pred_uncalib, fraction_pos_uncalib, "s-", color="red", label=f"Courbe ({config_models.models_name})")
-
-    # Courbe calibrée (Uniquement affichée pour TSFEL si demandée)
-    if config_models.extraction_type == "TSFEL" and calibration.value:
-        fraction_pos_calib, mean_pred_calib = calibration_curve(all_y_test_global, all_probas_calib, n_bins=10)
-        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label="Après calibration (Isotonique)")
-
-    plt.ylabel("Fraction réelle de positifs")
-    plt.xlabel("Probabilité moyenne prédite")
-    plt.title(f"Courbe de Calibration Globale (Cross-Validation 5 Folds)\nModèle : {config_models.models_name}")
-    plt.legend(loc="lower right")
-    plt.grid(True)
-
-    # Sauvegarde propre de l'image
-    if save_figure.value:
-        plt.savefig(output_dir / Path("Courbe_Calibration"), dpi=300, bbox_inches="tight", transparent=transparent.value)
-
-    plt.show()
+    sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_test_global, config_models.models_name, config_models.extraction_type, calibration.value, save_figure.value, output_dir, transparent.value)
 
     # --- RE-MAPPING DES ÉTATS GLOBAUX POUR LES CELLULES SUIVANTES (COURBE ROC / MATRICE) ---
     probas = all_probas_calib
     y_test = all_y_test_global
     return probas, y_test
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Si on est en mode Logistic Regression Lasso TSFEL, on montre le logistic_regression_path
+    """)
+    return
+
+
+@app.cell
+def _(
+    Path,
+    X_scaled,
+    config_models,
+    exp,
+    extension,
+    joblib,
+    np,
+    output_dir,
+    plt,
+    save_figure,
+    seed,
+    transparent,
+    y,
+):
+    if config_models.models_name == "Logistic Regression Lasso TSFEL":
+        from sklearn.linear_model import logistic_regression_path
+        best_Cs = []
+        for fold_idx_L1 in range(5):
+            model_path = exp.get_model_path("Logistic Regression Lasso TSFEL", fold_idx_L1, extension)
+            model_L1 = joblib.load(model_path)
+            best_Cs.append(model_L1.C_[0])
+        
+        mean_C = np.mean(best_Cs)
+        _, coefs_path, _ = logistic_regression_path(
+            X_scaled, y, 
+            penalty='l1', 
+            solver='saga', 
+            max_iter=10000,
+            random_state=seed
+        )
+        Cs_grid = np.logspace(-4, 4, coefs_path.shape[1])
+        plt.figure(figsize=(10, 6))
+        plt.plot(Cs_grid, coefs_path[0].T)
+        # Ligne verticale pour le C moyen
+        plt.axvline(x=mean_C, color='black', linestyle='--', label=f'C Moyen (CV) = {mean_C:.4f}')
+    
+        # Échelle logarithmique pour l'axe X car C varie souvent de 0.0001 à 10000
+        plt.xscale('log') 
+    
+        plt.xlabel('Paramètre de régularisation C (Log Scale)')
+        plt.ylabel('Coefficients')
+        plt.title('L1 Logistic Regression Path (Features Selection)')
+        plt.grid(True, which="both", ls="-")
+        plt.legend()
+        if save_figure.value:
+            plt.savefig(output_dir / Path("L1_Log_path.png"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.show()
+    return
 
 
 @app.cell(hide_code=True)
@@ -1291,33 +1382,15 @@ def _(config_models, mo):
 
 @app.cell
 def _(
-    Path,
     config_models,
     output_dir,
-    plt,
     probas,
-    roc_auc_score,
-    roc_curve,
     save_figure,
+    sfu,
     transparent,
     y_test,
 ):
-    (fpr, tpr, _thresholds) = roc_curve(y_test, probas)
-        # TODO : là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle elle est calculée par rapport à 20% des données de train (validation) alors que là c'est par rapport à test.
-    auc_final = roc_auc_score(y_test, probas)
-    plt.figure(figsize=(6, 6))
-    plt.plot(fpr, tpr, label=f'ROC {config_models.models_name} (AUC = {auc_final:.3f})')
-
-    plt.plot([0, 1], [0, 1], linestyle='--', label='Hasard', color = "green")
-
-    plt.xlabel('Taux de faux positifs')
-    plt.ylabel('Taux de vrais positifs')
-    plt.title(f'Courbe ROC du modèle {config_models.models_name}')
-    plt.legend(loc='lower right')
-    plt.grid(True)
-    if save_figure.value :
-        plt.savefig(output_dir / Path("Courbe_ROC"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
+    auc_final, fpr, tpr, thresholds_roc = sfu.roc_curve_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
     return (auc_final,)
 
 
@@ -1341,66 +1414,22 @@ def _(config_models, mo):
 
 @app.cell
 def _(
-    Path,
     config_models,
     output_dir,
-    plt,
     probas,
     save_figure,
-    sns,
+    sfu,
     transparent,
     y_test,
 ):
-    plt.figure()
-
-    sns.kdeplot(probas[y_test == 0], label="Survivants", fill=True)
-    sns.kdeplot(probas[y_test == 1], label="Décès", fill=True)
-
-    plt.xlabel("Probabilité prédite")
-    plt.ylabel("Densité")
-    plt.title(f"Distribution des scores (KDE) de {config_models.models_name}")
-    plt.legend()
-    plt.grid()
-    if save_figure.value :
-        plt.savefig(output_dir / Path("KDE"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
-    return
-
-
-@app.cell(hide_code=True)
-def _(config_models, mo):
-    mo.md(rf"""
-    ### Courbe de calibration de {config_models.models_name}
-    """)
-    return
+    non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1 = sfu.kde_plot_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
+    return asymetric_incertitude, mean_p1, mean_risk_diff, non_overlap_area
 
 
 @app.cell
-def _(
-    Path,
-    calibration_curve,
-    config_models,
-    output_dir,
-    plt,
-    probas,
-    save_figure,
-    transparent,
-    y_test,
-):
-    prob_true, prob_pred = calibration_curve(y_test, probas, n_bins=10)
-
-    plt.figure()
-    plt.plot(prob_pred, prob_true, marker="o", label=f"{config_models.models_name}")
-    plt.plot([0, 1], [0, 1], "--", label="Calibration idéale")
-
-    plt.xlabel("Probabilité prédite")
-    plt.ylabel("Fréquence observée")
-    plt.title(f"Calibration curve de {config_models.models_name} ")
-    plt.legend()
-    plt.grid()
-    if save_figure.value :
-        plt.savefig(output_dir / Path("Calibration_curve"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
+def _(exp, sfu):
+    sfu.compare_models_figure("kde_plot.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", ""),
+    LSTMT = exp.get_output_path("LstmTimeModified", ""))
     return
 
 
@@ -1414,36 +1443,15 @@ def _(config_models, mo):
 
 @app.cell
 def _(
-    Path,
     config_models,
-    f1_score,
-    np,
     output_dir,
-    plt,
     probas,
     save_figure,
+    sfu,
     transparent,
     y_test,
 ):
-    _thresholds = np.linspace(0.1, 0.9, 50)
-    f1s = []
-    best_f1 = 0
-    for t in _thresholds:
-        _y_pred = (probas >= t).astype(int)
-        f1s.append(f1_score(y_test, _y_pred))
-        f1 = f1_score(y_test, _y_pred)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_t = t
-    plt.plot(_thresholds, f1s)
-    plt.xlabel('Threshold')
-    plt.ylabel('F1 score')
-    plt.title(f"Evolution du F1 score en fonction du Threshold pour le modèle {config_models.models_name}")
-    plt.grid()
-    if save_figure.value :
-        plt.savefig(output_dir / Path("threshold"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
-    print(f'Le meilleur f1 score de{best_f1: .2f} est atteint lorsque le threshold est égal à{best_t: .2f}')
+    best_f1, best_t = sfu.f1_score_evolution(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
     return best_f1, best_t
 
 
@@ -1457,30 +1465,16 @@ def _(config_models, mo):
 
 @app.cell
 def _(
-    Path,
     best_t,
     config_models,
-    confusion_matrix,
-    matthews_corrcoef,
     output_dir,
-    plt,
     probas,
     save_figure,
-    sns,
+    sfu,
     transparent,
     y_test,
 ):
-    y_pred = (probas >= best_t).astype(int)
-    mcc = matthews_corrcoef(y_test, y_pred)
-    cm = confusion_matrix(y_test, y_pred)
-    plt.figure()
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.xlabel('Prédit')
-    plt.ylabel('Réel')
-    plt.title(f'Confusion matrix du modèle {config_models.models_name}  (threshold={ best_t: .2f}, MCC = {mcc})')
-    if save_figure.value :
-        plt.savefig(output_dir / Path("confusion_matrix"), dpi = 300, bbox_inches="tight", transparent=transparent.value, facecolor = "white")
-    plt.show()
+    y_pred, mcc = sfu.confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, save_figure.value, output_dir, transparent.value)
     return mcc, y_pred
 
 
@@ -1493,157 +1487,8 @@ def _(config_models, mo):
 
 
 @app.cell
-def _(
-    Path,
-    brier_score_loss,
-    output_dir,
-    pl,
-    plt,
-    probas,
-    save_figure,
-    transparent,
-    y_test,
-):
-    df_brier = pl.DataFrame({"y" : y_test, "pred" : probas})
-
-    df_brier = df_brier.with_columns(
-        ((pl.col("pred") - pl.col("y")) ** 2).alias("brier")
-    )
-
-    # score global de brier
-    global_brier = brier_score_loss(df_brier["y"], df_brier["pred"])
-    print("score de brier : ",global_brier)
-    # bins fixes de risque
-    df_brier_fixed = (
-        df_brier.with_columns(
-            (
-                pl.col("pred")
-                .clip(0, 0.999999)
-                .mul(10)
-                .floor()
-                .cast(pl.Int64)
-            ).alias("bin_fixed")
-        )
-        .group_by("bin_fixed")
-        .agg([
-            pl.col("brier").mean().alias("brier_mean"),
-            pl.len().alias("n"),
-            pl.col("pred").mean().alias("pred_mean"),
-            pl.col("y").mean().alias("obs_rate"),
-        ])
-        .sort("bin_fixed")
-        .with_columns(
-            ((pl.col("bin_fixed") + 0.5) / 10).alias("x")
-        )
-    )
-
-    # déciles de patients 
-    n_total = df_brier.height
-
-    df_brier_dec = (
-        df_brier.sort("pred")
-        .with_row_count("row_idx")
-        .with_columns(
-            (
-                (pl.col("row_idx") * 10 / n_total)
-                .floor()
-                .clip(upper_bound=9)
-                .cast(pl.Int64)
-            ).alias("decile")
-        )
-        .group_by("decile")
-        .agg([
-            pl.col("brier").mean().alias("brier_mean"),
-            pl.len().alias("n"),
-            pl.col("pred").mean().alias("pred_mean"),
-            pl.col("y").mean().alias("obs_rate"),
-        ])
-        .sort("decile")
-        .with_columns(
-            (pl.col("decile") + 1).alias("x")
-        )
-    )
-
-    fixed_pd = df_brier_fixed.to_pandas()
-    dec_pd = df_brier_dec.to_pandas()
-
-    # Pour avoir 2 plots au même endroit, on utilise twinx
-    fig, ax1 = plt.subplots(figsize=(7, 5))
-
-    ax1.bar(fixed_pd["x"], fixed_pd["n"], width=0.08, alpha=0.3)
-    ax1.set_xlabel("Risque prédit")
-    ax1.set_ylabel("Nombre de patients")
-
-    ax2 = ax1.twinx()
-    ax2.plot(fixed_pd["x"], fixed_pd["brier_mean"], marker="o")
-    ax2.set_ylabel("Brier moyen")
-
-    plt.title(f"Brier par tranches fixes de risque ")
-    plt.tight_layout()
-    if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
-
-
-    fig, ax1 = plt.subplots(figsize=(7, 5))
-
-    ax1.bar(dec_pd["x"], dec_pd["n"], alpha=0.3)
-    ax1.set_xlabel("Décile de patients")
-    ax1.set_ylabel("Nombre de patients")
-
-    ax2 = ax1.twinx()
-    ax2.plot(dec_pd["x"], dec_pd["brier_mean"], marker="o")
-    ax2.set_ylabel("Brier moyen")
-
-    plt.title(f"Brier par déciles de patients ")
-    plt.tight_layout()
-    if save_figure.value:
-        plt.savefig(output_dir / Path("brierPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
-
-
-    fig, ax1 = plt.subplots(figsize=(7, 5))
-
-    # Histogramme des patients
-    ax1.bar(dec_pd["x"], dec_pd["n"], alpha=0.3, color='grey', edgecolor='black')
-    ax1.set_xlabel("Décile de patients")
-    ax1.set_ylabel("Nombre de patients")
-
-    # Courbe de calibration
-    ax2 = ax1.twinx()
-    ax2.plot(dec_pd["x"], dec_pd["obs_rate"], marker="o", label="Risque prédit", color="black")
-    ax2.plot(dec_pd["x"], dec_pd["pred_mean"], marker="s", label="Mortalité observée", color="black", linestyle="--")
-    ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
-
-    plt.title(f"Courbe de Calibration par déciles de patients ")
-    fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
-    plt.tight_layout()
-    if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerDec"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
-
-
-    fig, ax1 = plt.subplots(figsize=(7, 5))
-
-    # Histogramme des patients (Tranches fixes)
-    ax1.bar(fixed_pd["x"], fixed_pd["n"], width=0.08, alpha=0.3, color='grey', edgecolor='black')
-    ax1.set_xlabel("Risque prédit (Tranches de 10%)")
-    ax1.set_ylabel("Nombre de patients")
-    ax1.set_xlim(0, 1)
-
-    # Courbe de calibration (axe Y droit)
-    ax2 = ax1.twinx()
-    ax2.plot(fixed_pd["x"], fixed_pd["obs_rate"], marker="o", label="Risque moyen prédit", color="black", linestyle="-")
-    ax2.plot(fixed_pd["x"], fixed_pd["pred_mean"], marker="s", label="Mortalité observée", color="black", linestyle="--")
-    ax2.set_ylabel("Mortalité (Taux observé vs Risque prédit)")
-    ax2.set_ylim(0, 1) 
-
-    plt.title(f"Courbe de Calibration par tranches fixes de risque ")
-    fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
-    plt.tight_layout()
-    if save_figure.value:
-        plt.savefig(output_dir / Path("calibPerTrancheRisk"), dpi = 300, bbox_inches="tight", transparent=transparent.value)
-    plt.show()
+def _(output_dir, probas, save_figure, sfu, transparent, y_test):
+    global_brier = sfu.brier_evolution(probas, y_test, save_figure.value, output_dir, transparent=transparent.value, )
     return (global_brier,)
 
 
@@ -1657,11 +1502,15 @@ def _(config_models, mo):
 
 @app.cell
 def _(
+    asymetric_incertitude,
     auc_final,
     best_f1,
     global_brier,
     joblib,
     mcc,
+    mean_p1,
+    mean_risk_diff,
+    non_overlap_area,
     output_dir,
     probas,
     y_pred,
@@ -1674,6 +1523,10 @@ def _(
             'mcc': mcc,
             'auc': auc_final,
             'brier': global_brier,
+        "non_overlap_area" : non_overlap_area, 
+        "asymetric_incertitude" : asymetric_incertitude,
+        "mean_risk_diff" : mean_risk_diff,
+        "mean_deaths_prediction" : mean_p1
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(all_res, output_dir / "all_res.joblib")
@@ -1690,15 +1543,44 @@ def _(mo):
     return
 
 
-@app.cell
-def _(exp, extract_feat, joblib, np, patient_col, pl, target_col):
+@app.cell(disabled=True)
+def _(exp, joblib, np, patient_col, pl, sfu, target_col):
+    show_shap = {}
     model_name_shap = "XGBoost TSFEL"
-    output_dir_shap = exp.get_output_path(model_name_shap)
-    loaded_model_shap = exp.get_model_path(model_name_shap, 0, ".joblib",  "",)
-    X_train_fold_shap = exp.get_tsfel_boruta("train", 0)
-    keepVariableList_shap = X_train_fold_shap.parent / "keepVariableList_2_fold_0.npy"
-    clf_shap = joblib.load(loaded_model_shap)
-    extract_feat.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survie", "Décès"], savefig = True, transparent = False, folder = output_dir_shap)
+
+    for f_idx in range(5):
+        output_dir_shap = exp.get_output_path(model_name_shap) / f"fold_{f_idx}"
+        output_dir_shap.mkdir(parents = True, exist_ok = True)
+        loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".joblib",  "",)
+        X_train_fold_shap = exp.get_tsfel_boruta("train", f_idx)
+        keepVariableList_shap = X_train_fold_shap.parent / f"keepVariableList_2_fold_{f_idx}.npy"
+        clf_shap = joblib.load(loaded_model_shap)
+        sfu.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
+        show_shap[f"XGB_{f_idx}"] = output_dir_shap
+    return
+
+
+@app.cell
+def _(exp):
+    show_shap2 = {}
+    model_name_shap_show = "XGBoost TSFEL"
+
+    for f_idx2 in range(5):
+        output_dir_shap_show = exp.get_output_path(model_name_shap_show) / f"fold_{f_idx2}"
+        output_dir_shap_show.mkdir(parents = True, exist_ok = True)
+        show_shap2[f"XGB_{f_idx2}"] = output_dir_shap_show
+    return model_name_shap_show, show_shap2
+
+
+@app.cell
+def _(exp, model_name_shap_show, sfu, show_shap2):
+    sfu.compare_models_figure("feature_importance.png",savefig=True, folder = exp.get_output_path(model_name_shap_show), **show_shap2)
+    return
+
+
+@app.cell
+def _(exp, model_name_shap_show, sfu, show_shap2):
+    sfu.compare_models_figure("global_feature_importance_mdi.png",savefig=True, folder = exp.get_output_path(model_name_shap_show), **show_shap2)
     return
 
 
@@ -1747,33 +1629,33 @@ def _(mo, run_test):
 
 
 @app.cell
-def _(exp, saps2_pred, saps2_true, utils, y_test):
+def _(exp, saps2_pred, saps2_true, sfu, y_test):
     comparaisons = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified"), exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
 
     comparaisons
 
-    utils.générer_rapport_comparatif(y_test, comparaisons, save_dir="Comparaison ALl", table_format='fancy_grid', saps2_pred = saps2_pred, saps2_true = saps2_true)
+    sfu.générer_rapport_comparatif(y_test, comparaisons, save_dir="Comparaison ALl", table_format='fancy_grid', saps2_pred = saps2_pred, saps2_true = saps2_true)
     return
 
 
 @app.cell
-def _(exp, utils, y_test):
+def _(exp, sfu, y_test):
     comparaisons_time = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified")]
 
-    utils.générer_rapport_comparatif(y_test, comparaisons_time, save_dir="Comparaison Time", table_format='fancy_grid')
+    sfu.générer_rapport_comparatif(y_test, comparaisons_time, save_dir="Comparaison Time", table_format='fancy_grid')
     return
 
 
 @app.cell
-def _(exp, utils, y_test):
+def _(exp, sfu, y_test):
     comparaisons_ml = [exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
-    utils.générer_rapport_comparatif(y_test, comparaisons_ml, save_dir="Comparaison TSFEL", table_format='fancy_grid')
+    sfu.générer_rapport_comparatif(y_test, comparaisons_ml, save_dir="Comparaison TSFEL", table_format='fancy_grid')
     return
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("KDE.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("KDE.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1782,8 +1664,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("Calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("Calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1792,8 +1674,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("Courbe_ROC.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("Courbe_ROC.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1802,8 +1684,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("threshold.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("threshold.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1812,8 +1694,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("confusion_matrix.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("confusion_matrix.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1822,8 +1704,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("calibPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("calibPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1832,8 +1714,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("brierPerTrancheRisk.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("brierPerTrancheRisk.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1842,8 +1724,8 @@ def _(exp, utils):
 
 
 @app.cell
-def _(exp, utils):
-    utils.compare_models_figure("brierPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+def _(exp, sfu):
+    sfu.compare_models_figure("brierPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1897,6 +1779,166 @@ def _(
         mo.md("-------------------------------"),
         mo.md(mo_utils.config_end)]),
     width = "550px")
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
     return
 
 
