@@ -72,6 +72,7 @@ def _():
     )
     from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
 
     # 5. Imports locaux (modules customs)
     import utilitaries.create_merged_dataset as create_merged_dataset
@@ -97,6 +98,7 @@ def _():
     )
     pl.Config.set_tbl_cols(-1)
     return (
+        LogisticRegression,
         Path,
         StratifiedGroupKFold,
         classification_report,
@@ -218,6 +220,14 @@ def _(config_models, mo):
         label=f"Lancer l'entraînement du modèle {config_models.models_name}"
     )
     return (run,)
+
+
+@app.cell
+def _(mo):
+    run_lasso = mo.ui.run_button(
+        label=f"Lancer la recherche du Lasso Path"
+    )
+    return (run_lasso,)
 
 
 @app.cell
@@ -726,6 +736,8 @@ def _(
     train_init_patients = df_clean_3[train_init_idx].select(patient_col).unique()
     test_init_patients = df_clean_3[test_init_idx].select(patient_col).unique()
 
+
+
     if config_models.extraction_type == "TSFEL" : 
         # On filtre notre gros DataFrame TSFEL pré-calculé pour ce fold (unique)
         train_init_tsfel = df_tsfel_complet.join(train_init_patients, on=patient_col, how="inner").sort(patient_col)
@@ -742,7 +754,6 @@ def _(
         X = train_init_df
         y = train_init_df[target_col].to_numpy()
         groups = train_init_df[patient_col].to_numpy()
-
     return X, groups, train_init_df, train_init_tsfel, y
 
 
@@ -788,6 +799,7 @@ def _(
     folds_X_test = []
     folds_y_train = []
     folds_y_test = []
+    folds_groups = []
 
     for fold_idx, (train_idx, test_idx) in enumerate (sgkf.split(X=X, y=y, groups = groups)):
         print(f"\n─────────────────── Traitement du Fold {fold_idx + 1}/5 ───────────────────")
@@ -795,7 +807,7 @@ def _(
         # Récupération des IDs patients correspondants au split de ce fold
         train_patients = df_clean_3[train_idx].select(patient_col).unique()
         test_patients = df_clean_3[test_idx].select(patient_col).unique()
-        if config_models.extraction_type == "TSFEL" : 
+        if config_models.extraction_type == "TSFEL" :
             # On filtre notre gros DataFrame train pré-calculé pour ce fold
             train_fold_tsfel = train_init_tsfel.join(train_patients, on=patient_col, how="inner").sort(patient_col)
             test_fold_tsfel = train_init_tsfel.join(test_patients, on=patient_col, how="inner").sort(patient_col)
@@ -837,6 +849,8 @@ def _(
             groups_fold = train_clean[patient_col].to_numpy()
             train_clean = train_clean.select(pl.exclude(patient_col, target_col))
             test_clean = test_clean.select(pl.exclude(patient_col, target_col))
+
+            folds_groups.append(groups_fold)
 
             # Scaling final
             X_train_fold, X_test_fold = preproc.scaling(train_clean, test_clean)
@@ -903,9 +917,9 @@ def _(
     return (
         folds_X_test,
         folds_X_train,
+        folds_groups,
         folds_y_test,
         folds_y_train,
-        groups_fold,
     )
 
 
@@ -967,15 +981,17 @@ def _(config_balance, config_keep_pop, config_models):
 
 @app.cell
 def _(
-    LogisticRegressionCV,
+    CalibratedClassifierCV,
+    LogisticRegression,
     StratifiedGroupKFold,
+    calibration,
     class_weight_choice,
     config_models,
     exp,
     extension,
     folds_X_train,
+    folds_groups,
     folds_y_train,
-    groups_fold,
     joblib,
     mo,
     np,
@@ -1000,25 +1016,49 @@ def _(
     elif not is_dl_model and n_dims != 2:
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice tabulaire 2D, mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'TSFEL' ?")
 
+    folds_X_fit_exact = []
+    folds_y_fit_exact = []
     for fold_idx_2 in range(5):
 
         print(f"\n─────────────────── Entraînement du Fold {fold_idx_2 + 1}/5 ───────────────────")
         # Extraction des données spécifiques à ce fold
         X_train_fold_2 = folds_X_train[fold_idx_2]
         y_train_fold_2 = folds_y_train[fold_idx_2]
-        groups_fold_2 = groups_fold[fold_idx_2].to_numpy()
-    
+        groups_fold_2 = folds_groups[fold_idx_2]
+
         # Génération d'un chemin STRICT et DÉTERMINISTE unique par fold et par graine
         model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension)
+
+        file_X_exact = exp.get_lasso_path("X", fold_idx_2, "parquet")
+        file_y_exact = exp.get_lasso_path("y", fold_idx_2, "npy")
 
         if os.path.exists(model_path_fold) and os.path.getsize(model_path_fold) > 0:
             print(f"--> Modèle déjà entraîné trouvé à : {model_path_fold} (Passage au fold suivant)")
             continue  # On passe directement au fold suivant sans réentraîner
         print(f"\n[DEBUG TRAIN - Fold {fold_idx_2 + 1}] Shape de X_train_fold_2: {X_train_fold_2.shape}")
+        X_train_final_fold, y_train_final = X_train_fold_2, y_train_fold_2
+        X_calib, y_calib = None, None
+
+        if calibration.value:
+            print(f"    [INFO] Calibration activée. Séparation du fold en sous-jeux d'entraînement et de calibration (respect des groupes)...")
+            skf_calib = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
+            train_idx_calib, calib_idx = next(skf_calib.split(X_train_fold_2, y_train_fold_2, groups=groups_fold_2))
+
+            # Sous-jeu pour l'entraînement du modèle de base
+            X_train_final_fold = X_train_fold_2[train_idx_calib]
+            y_train_final = y_train_fold_2[train_idx_calib]
+
+            # Sous-jeu "held-out" pour la calibration
+            X_calib = X_train_fold_2[calib_idx]
+            y_calib = y_train_fold_2[calib_idx]
+            print(f"    [DEBUG] Shapes - Train Base: {X_train_final_fold.shape}, Calib: {X_calib.shape}")
+
+        final_model_to_save = None
+
         if config_models.models_name == "InceptionTimeModified":
             print(parameters)
             model, T, history, splits = train_inception_time(
-                X_train_fold_2, y_train_fold_2,
+                X_train_final_fold, y_train_final,
                 save_best_path=model_path_fold,
                 seed = seed,
                 **parameters
@@ -1027,7 +1067,7 @@ def _(
         elif config_models.models_name == "LstmTimeModified":
 
             model, T, history, splits = train_lstm_model(
-                X_train_fold_2, y_train_fold_2,
+                X_train_final_fold, y_train_final,
                 epochs=100,
                 patience=10,
                 save_best_path=model_path_fold,
@@ -1037,64 +1077,116 @@ def _(
         elif config_models.models_name == "RandomForest TSFEL":
             from sklearn.ensemble import RandomForestClassifier
             rf = RandomForestClassifier(class_weight=class_weight_choice.value[1:], random_state=seed)
-            rf.fit(X_train_fold_2, y_train_fold_2)
-            joblib.dump(rf, model_path_fold)
-
+            rf.fit(X_train_final_fold, y_train_final)
+            final_model_to_save = rf
         elif config_models.models_name == "RandomForest Imbalanced TSFEL":
             from imblearn.ensemble import BalancedRandomForestClassifier
             brf = BalancedRandomForestClassifier(class_weight = class_weight_choice.value[1:], random_state = seed)
-            brf.fit(X_train_fold_2, y_train_fold_2)
-            joblib.dump(brf, model_path_fold)
+            brf.fit(X_train_final_fold, y_train_final)
+            final_model_to_save = brf
         elif config_models.models_name == "XGBoost TSFEL":
             from xgboost import XGBClassifier
-            X_train_fold_2_tsfel = X_train_fold_2.to_numpy()
-            y_train_fold_2_tsfel = np.asarray(y_train_fold_2).astype(int)
+            X_train_base_numpy = X_train_final_fold.to_numpy()
+            y_train_base_numpy = np.asarray(y_train_final).astype(int)
 
-            n_pos = np.sum(y_train_fold_2_tsfel == 1)
-            n_neg = np.sum(y_train_fold_2_tsfel == 0)
+            n_pos = np.sum(y_train_base_numpy == 1)
+            n_neg = np.sum(y_train_base_numpy == 0)
 
             if n_pos == 0 or n_neg == 0:
                 raise ValueError(
                     f"XGBoost nécessite les deux classes. "
-                    f"Classes trouvées: {np.unique(y_train_fold_2_tsfel, return_counts=True)}"
+                    # Correction de la variable ici
+                    f"Classes trouvées: {np.unique(y_train_base_numpy, return_counts=True)}"
                 )
 
             ratio = n_neg / n_pos
 
-            xgb = XGBClassifier(
+            xgb_base = XGBClassifier(
                 scale_pos_weight=ratio,
                 random_state=seed,
                 eval_metric="logloss",
                 missing=np.nan,
+                n_jobs = -1
                 # n_jobs = 1 => Si on veut une reproductibilité complète mais plus long donc non pour l'instant
             )
 
-            xgb.fit(X_train_fold_2_tsfel, y_train_fold_2_tsfel)
-            joblib.dump(xgb, model_path_fold)
+            xgb_base.fit(X_train_base_numpy, y_train_base_numpy)
+            final_model_to_save = xgb_base
 
         elif config_models.models_name == "SVC TSFEL" : 
             from sklearn.svm import SVC
-            svc = SVC(kernel = "rbf", C = 1.0, random_state = seed, class_weight = class_weight_choice.value[1:], probability = True)
-            svc.fit(X_train_fold_2, y_train_fold_2)
-            joblib.dump(svc, model_path_fold)
+            svc_base = SVC(kernel="rbf", C=1.0, random_state=seed, class_weight=class_weight_choice.value[1:], probability=False)
+            svc_base.fit(X_train_final_fold, y_train_final)
+            final_model_to_save = svc_base
         elif config_models.models_name == "Logistic Regression Lasso TSFEL" :
-            from sklearn.linear_model import LogisticRegression
-            inner_cv = StratifiedGroupKFold(n_splits=3)
-            lasso_cv = LogisticRegressionCV(
-                penalty='l1', 
-                solver='saga', 
-                cv=inner_cv, 
-                max_iter=10000, 
-                random_state=seed,
+            from sklearn.model_selection import GridSearchCV
+            # Si X_train_final_fold est déjà standardisé ou stocké en DataFrame Polars :
+            X_train_final_fold.write_parquet(file_X_exact)
+            np.save(file_y_exact, y_train_final)
+            print(f"    [DISK-SAVE] X et y exacts enregistrés pour le Lasso Path.")
+
+            print(f"    [INFO] Entraînement LogisticRegression avec Lasso via GridSearchCV...")
+
+            inner_cv = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
+
+            lr_base = LogisticRegression(
+                l1_ratio = 1.0,
+                solver='saga',
+                max_iter=10000,
+                random_state=seed
+            )
+
+            # On teste 10 valeurs de C sur une échelle logarithmique
+            param_grid = {'C': np.logspace(-4, 4, 10)}
+
+            # 5. On enveloppe le tout dans un GridSearchCV
+            lasso_cv = GridSearchCV(
+                estimator=lr_base,
+                param_grid=param_grid,
+                cv=inner_cv,
+                scoring='roc_auc',
                 n_jobs=-1
             )
-        
-            lasso_cv.fit(X_train_fold_2, y_train_fold_2, groups=groups_fold_2)
-            print(f"    [INFO] Meilleur alpha trouvé pour le Fold {fold_idx_2 + 1} : {lasso_cv.alpha_}")
-            joblib.dump(lasso_cv, model_path_fold)
+            groups_for_fit = groups_fold_2
+
+            if calibration.value:
+                 groups_for_fit = groups_fold_2[train_idx_calib]
+
+            # On utilise groups_for_fit pour éviter les problèmes d'indices
+            lasso_cv.fit(X_train_final_fold, y_train_final, groups=groups_for_fit)
+
+            # On récupère le meilleur C trouvé
+            best_C = lasso_cv.best_params_['C']
+            print(f"    [INFO] Meilleur C trouvé pour le Fold {fold_idx_2 + 1} : {best_C:.4f}")
+
+            # On sauvegarde le meilleur modèle estimé (.best_estimator_)
+            final_model_to_save = lasso_cv.best_estimator_
         else :
-            print("oups tu t'es trompé")
-    print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès")
+            print(f"oups tu t'es trompé : {config_models.models_name}")
+
+        if calibration.value and final_model_to_save is not None:
+            print(f"    [INFO] Application de la calibration Isotonique (prefit) sur le jeu held-out...")
+            # cv='prefit' indique d'utiliser le modèle déjà entraîné et de calibrer sur (X_calib, y_calib)
+            calibrated_clf = CalibratedClassifierCV(estimator=final_model_to_save, method='isotonic', cv='prefit')
+
+            # Gestion spécifique pour XGBoost qui n'aime pas les DataFrames Polars/Pandas dans CalibratedClassifierCV
+            X_calib_final, y_calib_final = X_calib, y_calib
+            if "XGB" in type(final_model_to_save).__name__:
+                X_calib_final = X_calib.to_numpy()
+                y_calib_final = np.asarray(y_calib).astype(int)
+
+            calibrated_clf.fit(X_calib_final, y_calib_final)
+            final_model_to_save = calibrated_clf
+
+        # --- SAUVEGARDE FINALE DU MODÈLE (BASE OU CALIBRÉ) ---
+        if final_model_to_save is not None:
+            joblib.dump(final_model_to_save, model_path_fold)
+            print(f"--> Modèle final enregistré à : {model_path_fold}")
+        folds_X_fit_exact.append(X_train_final_fold)
+        folds_y_fit_exact.append(y_train_final)
+
+
+    print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès.")
     return
 
 
@@ -1212,12 +1304,16 @@ def _(
             all_probas_calib.extend(probas_fold)
 
         elif config_models.extraction_type == "TSFEL":
+            from sklearn.calibration import CalibratedClassifierCV
             clf = joblib.load(loaded_model)
 
             # 1. Extraction universelle des features
             expected_features = None
             if hasattr(clf, "feature_names_in_"):
                 expected_features = list(clf.feature_names_in_)
+            # Cas spécifique où CalibratedClassifierCV enveloppe un modèle avec feature_names_in_
+            elif hasattr(clf, "estimator") and hasattr(clf.estimator, "feature_names_in_"):
+                expected_features = list(clf.estimator.feature_names_in_)
             elif hasattr(clf, "get_booster"):
                 expected_features = clf.get_booster().feature_names
 
@@ -1258,25 +1354,49 @@ def _(
             all_y_true_report.extend(y_test)
             all_y_pred_report.extend(y_pred_nb_test)
 
-            # 4. Calcul des probabilités brutes pour la calibration
-            all_probas_fold = clf.predict_proba(X_test_final)
-            classes = list(clf.classes_)
-            positive_idx = classes.index(1)
-            prob_uncalib_fold = all_probas_fold[:, positive_idx]
+            # 4. RÉCUPÉRATION DES PROBABILITÉS
+            prob_uncalib_fold = None
+            prob_calib_fold = None
+            # Gestion spécifique pour XGBoost numpy vs pandas
+            X_test_final_numpy = X_test_final
+            if hasattr(X_test_final, "to_numpy"):
+                 X_test_final_numpy = X_test_final.to_numpy()
 
-            all_probas_uncalib.extend(prob_uncalib_fold)
-            all_y_test_global.extend(y_test)
+            if isinstance(clf, CalibratedClassifierCV):
+                # Le modèle EST calibré (ex: SVC, XGBoost)
+                print("    [INFO] Modèle calibré détecté. Extraction des probabilités brutes et calibrées...")
 
-            # 5. Calcul de la calibration Isotonique (Conditionnelle)
-            if calibration.value:
-                from sklearn.calibration import CalibratedClassifierCV
-                iso_calibrator = CalibratedClassifierCV(estimator=clf, method='isotonic', cv=5)
-                iso_calibrator.fit(X_train_final, y_train)
-                prob_calib_fold = iso_calibrator.predict_proba(X_test_final)[:, 1]
-                all_probas_calib.extend(prob_calib_fold)
+                # A. Probabilités CALIBRÉES (via le CalibratedClassifierCV)
+                all_probas_calib_fold = clf.predict_proba(X_test_final)
+                # On assume que la classe positive (1) est à l'indice 1
+                prob_calib_fold = all_probas_calib_fold[:, 1]
+
+                # B. Probabilités NON-CALIBRÉES (via l'estimateur de base brut)
+                base_estimator = clf.estimator
+
+                # XGBoost base estimator nécessite souvent du numpy pur
+                if "XGB" in type(base_estimator).__name__:
+                     all_probas_uncalib_fold = base_estimator.predict_proba(X_test_final_numpy)
+                else:
+                     all_probas_uncalib_fold = base_estimator.predict_proba(X_test_final)
+
+                prob_uncalib_fold = all_probas_uncalib_fold[:, 1]
+
             else:
-                all_probas_calib.extend(prob_uncalib_fold)
+                # Le modèle N'EST PAS calibré extraordinairement (Lasso, RF)
+                # calibration.value était False lors de l'entraînement
+                print("    [INFO] Modèle non-calibré (ou naturellement calibré) détecté.")
+                all_probas_fold = clf.predict_proba(X_test_final)
+                prob_fold = all_probas_fold[:, 1]
 
+                # Les probabilités sont les mêmes avant/après
+                prob_uncalib_fold = prob_fold
+                prob_calib_fold = prob_fold
+
+            # Accumulation dans les listes globales
+            all_probas_uncalib.extend(prob_uncalib_fold)
+            all_probas_calib.extend(prob_calib_fold)
+            all_y_test_global.extend(y_test)
             print(f"Le score (Accuracy) sur le fold {fold_idx_bis + 1} est : {test_score:.4f}")
 
     print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
@@ -1303,13 +1423,13 @@ def _(
     print("="*79)
 
     print("\nGénération de la courbe de calibration poolée...")
-
+    print(f"DEBUG SIZES -> y_true: {len(all_y_test_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}")
     sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_test_global, config_models.models_name, config_models.extraction_type, calibration.value, save_figure.value, output_dir, transparent.value)
 
     # --- RE-MAPPING DES ÉTATS GLOBAUX POUR LES CELLULES SUIVANTES (COURBE ROC / MATRICE) ---
     probas = all_probas_calib
     y_test = all_y_test_global
-    return probas, y_test
+    return CalibratedClassifierCV, probas, y_test
 
 
 @app.cell(hide_code=True)
@@ -1321,54 +1441,93 @@ def _(mo):
 
 
 @app.cell
+def _(mo, mo_utils, run_lasso):
+    mo.vstack([
+        mo.md(mo_utils.config_run_button),
+        run_lasso,
+        mo.md(mo_utils.config_end)])
+    return
+
+
+@app.cell
 def _(
+    LogisticRegression,
     Path,
-    X_scaled,
     config_models,
     exp,
     extension,
     joblib,
+    mo,
     np,
     output_dir,
+    pl,
     plt,
+    run_lasso,
     save_figure,
     seed,
     transparent,
-    y,
 ):
+    mo.stop(not run_lasso.value, "Clique pour lancer")
+    print("Lasso Path lancé")
     if config_models.models_name == "Logistic Regression Lasso TSFEL":
-        from sklearn.linear_model import logistic_regression_path
-        best_Cs = []
-        for fold_idx_L1 in range(5):
-            model_path = exp.get_model_path("Logistic Regression Lasso TSFEL", fold_idx_L1, extension)
+        from joblib import Parallel, delayed
+        print("Génération ultra-rapide des Lasso Paths (Warm Start + Multi-processing)...")
+
+        Cs_grid = np.logspace(-4, 4, 100) 
+
+        # Fonction isolée pour traiter un fold (permet la parallélisation)
+        def process_single_fold(idx):
+            # Chargement des données
+            file_X = exp.get_lasso_path("X", idx, "parquet")
+            file_y = exp.get_lasso_path("y", idx, "npy")
+            X_pure_fit_np = pl.read_parquet(file_X).to_numpy()
+            y_pure_fit = np.load(file_y)
+
+            # Chargement du C optimal
+            model_path = exp.get_model_path("Logistic Regression Lasso TSFEL", idx, extension)
             model_L1 = joblib.load(model_path)
-            best_Cs.append(model_L1.C_[0])
+            best_C2 = model_L1.C
+
+            lr_path_model = LogisticRegression(
+                l1_ratio=1.0,
+                solver='saga',
+                max_iter=1000,
+                random_state=seed,
+                warm_start=True
+            )
+
+            coefs_list = []
+            # Crucial : On parcourt la grille du plus petit C (gros Lasso) au plus grand C (Lasso faible)
+            # C'est dans ce sens que le warm start est le plus efficace géométriquement
+            sorted_Cs = np.sort(Cs_grid) 
         
-        mean_C = np.mean(best_Cs)
-        _, coefs_path, _ = logistic_regression_path(
-            X_scaled, y, 
-            penalty='l1', 
-            solver='saga', 
-            max_iter=10000,
-            random_state=seed
-        )
-        Cs_grid = np.logspace(-4, 4, coefs_path.shape[1])
-        plt.figure(figsize=(10, 6))
-        plt.plot(Cs_grid, coefs_path[0].T)
-        # Ligne verticale pour le C moyen
-        plt.axvline(x=mean_C, color='black', linestyle='--', label=f'C Moyen (CV) = {mean_C:.4f}')
-    
-        # Échelle logarithmique pour l'axe X car C varie souvent de 0.0001 à 10000
-        plt.xscale('log') 
-    
-        plt.xlabel('Paramètre de régularisation C (Log Scale)')
-        plt.ylabel('Coefficients')
-        plt.title('L1 Logistic Regression Path (Features Selection)')
-        plt.grid(True, which="both", ls="-")
-        plt.legend()
-        if save_figure.value:
-            plt.savefig(output_dir / Path("L1_Log_path.png"), dpi = 300, bbox_inches="tight", transparent=transparent)
-        plt.show()
+            for c_val in sorted_Cs:
+                lr_path_model.set_params(C=c_val)
+                lr_path_model.fit(X_pure_fit_np, y_pure_fit)
+                coefs_list.append(lr_path_model.coef_[0].copy())
+            
+            return sorted_Cs, np.array(coefs_list), best_C2, X_pure_fit_np.shape[1]
+
+        # Lancement des 5 folds en parallèle sur tous tes cœurs CPU (-1)
+        results = Parallel(n_jobs=-1)(delayed(process_single_fold)(f_idx) for f_idx in range(5))
+
+        # Récupération et affichage des graphiques (ultra rapide car les calculs sont déjà faits)
+        for fold_idx_L1, (sorted_Cs, coefs_path, best_C2, n_features) in enumerate(results):
+            plt.figure(figsize=(10, 6))
+            plt.plot(sorted_Cs, coefs_path, alpha=0.7)
+            plt.axvline(x=best_C2, color='black', linestyle='--', linewidth=2, 
+                        label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_C2:.4f}')
+            plt.xscale('log')
+            plt.xlabel('Paramètre de régularisation C (Log Scale)')
+            plt.ylabel(f'Coefficients ({n_features} features)')
+            plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
+            plt.grid(True, which="both", ls="-", alpha=0.5)
+            plt.legend()
+        
+            if save_figure.value:
+                filename = f"L1_Log_path_fold_{fold_idx_L1 + 1}.png"
+                plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches="tight", transparent=transparent.value)
+            plt.show()
     return
 
 
@@ -1779,171 +1938,6 @@ def _(
         mo.md("-------------------------------"),
         mo.md(mo_utils.config_end)]),
     width = "550px")
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
     return
 
 

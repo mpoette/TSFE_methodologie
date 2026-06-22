@@ -133,7 +133,7 @@ MODELS = {
         models_type = "calibrated"
     ),
     "Logistic Regression Lasso TSFEL" : ConfigModels(
-        models_name = "Linear Regression Lasso",
+        models_name = "Logistic Regression Lasso TSFEL",
         extraction_type = "TSFEL",
         models_type = "calibrated"
     ),
