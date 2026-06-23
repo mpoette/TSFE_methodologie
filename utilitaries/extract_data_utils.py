@@ -93,7 +93,6 @@ def generate_random_windows(patients, df_agg, max_hour, used_distribution, targe
     # On extrait l'ID_COL parallèlement pour être sûr de reconstruire proprement l'alignement
     list_ids = patients[ID_COL].to_list()
     if used_distribution == "uniform": 
-        # Remplacement de np.random.randint par rng.integers
         offsets = np.array([
             rng.integers(0, max(1, (-min_h - max_hour - (WINDOW_SIZE - 1)) + 1))
             for min_h in patients["min_h"].to_list()

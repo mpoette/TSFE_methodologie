@@ -535,7 +535,7 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     X_global_arr = X_global_df.values
 
     # 3. Agrégation des Shapley Values pour la classe de ton choix (ex: classe 0)
-    class_id = 0  
+    class_id = 1
     shap_classe_pure = shap_arr[..., class_id] # Forme (n_samples, n_features)
 
     # Initialisation de la matrice SHAP globale : (n_samples, n_racines)

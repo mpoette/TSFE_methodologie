@@ -11,55 +11,62 @@ import warnings
 import shap
 import matplotlib.pyplot as plt
 import re
-def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols,
-    target_col):
-    # --- LE MONKEY PATCH DE LA DERNIÈRE CHANCE ---
-    # On force TSFEL à remplacer sa fonction hist_mode qui bugue par un truc inoffensif
+def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
+    """Fonction atomique exécutée en parallèle pour un patient donné."""
+    patient_id = g[patient_col][0]
+    X_pl = g.select(feature_cols)
+    
+    # Conversion Pandas obligatoire pour TSFEL
+    X_pd = X_pl.to_pandas()
+    X_pd = X_pd.apply(pd.to_numeric, errors="coerce")
+
+    # Extraction locale
+    feats_pd = tsfel.time_series_features_extractor(cfg, X_pd, fs=1, verbose=0)
+    
+    # Post-processing et typage
+    feats_pd[target_col] = g[target_col][-1]
+    feats_pd[patient_col] = patient_id
+    cols_to_cast = [c for c in feats_pd.columns if c not in [patient_col, target_col]]
+    feats_pd[cols_to_cast] = feats_pd[cols_to_cast].astype(float)
+    
+    return pl.from_pandas(feats_pd)
+
+
+def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_col):
+    # Monkey patch pour contourner les erreurs d'histogramme
     import tsfel.feature_extraction.features as tsfel_feats
     tsfel_feats.hist_mode = lambda signal, nbins=10: 0.0
     tsfel_feats.hist_entropy = lambda signal, nbins=10: 0.0
-    # ---------------------------------------------
-    # Juste pour avoir un tqdm propre
+    
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message="Precision loss occurred in moment calculation.*",
             category=RuntimeWarning,
         )
-        results = []
-        # Tri global (on sait jamais)
-        df = df.sort([patient_col, time_col])
-        # On enlève les features spectrales car avec 24 points elles renvoient des erreurs
-        cfg = tsfel.get_features_by_domain()
-        cfg.pop("spectral", None)          
         
-        # Sécurisation du domaine statistique pour les séries courtes de 24 points
-        # if "statistical" in cfg:
-        #     # On crée une copie des clés pour pouvoir itérer sans casser le dictionnaire
-        #     stat_keys = list(cfg["statistical"].keys())
-        #     for k in stat_keys:
-        #         if "hist" in k:  # Supprime 'hist_mode', 'hist_entropy', etc.
-        #             cfg["statistical"].pop(k, None)
+        # 1. Tri et préparation de la config TSFEL
+        df = df.sort([patient_col, time_col])
+        cfg = tsfel.get_features_by_domain()
+        cfg.pop("spectral", None)  # On retire le domaine spectral obsolète ici
+        
+        # 2. Découpage en groupes par patient (Polars fait ça très vite)
         groups = df.partition_by(patient_col, maintain_order=True)
 
-        for g in tqdm(groups, desc = "Extraction TSFEL par patient", unit = "patient") :
-            patient_id = g[patient_col][0] # On prend la première ligne vu qu'elles sont toutes pareil
-            X_pl = g.select(feature_cols)
-            # On transforme en pandas parce que TSFEL est capricieux
-            X_pd = X_pl.to_pandas()
-            X_pd = X_pd.apply(pd.to_numeric, errors="coerce")
-
-            feats_pd = tsfel.time_series_features_extractor(cfg, X_pd, fs = 1, verbose = 0)
-            feats_pd[target_col] = g[target_col][-1]
-            feats_pd[patient_col] = patient_id
-            cols_to_cast = [c for c in feats_pd.columns if c not in [patient_col, target_col]]
-            feats_pd[cols_to_cast] = feats_pd[cols_to_cast].astype(float)
-            results.append(pl.from_pandas(feats_pd))
+        print(f"Lancement du calcul parallèle sur {len(groups)} patients...")
+        
+        # n_jobs=-1 utilise TOUS les coeurs du serveur
+        # require='sharedmem' évite de copier tout le dataframe en mémoire pour chaque cœur (gain de RAM)
+        results = Parallel(n_jobs=-1, require='sharedmem')(
+            delayed(_process_single_patient)(g, cfg, feature_cols, patient_col, target_col)
+            for g in tqdm(groups, desc="Extraction TSFEL parallèle", unit="patient")
+        )
 
         if not results:
             raise ValueError("Aucun groupe traité !")
 
-        return pl.concat(results, how = "vertical")
+        # 4. Reconstitution du DataFrame final
+        return pl.concat(results, how="vertical")
 
 
 # Fonction reprise de mon stage de M1 (adaptée quand même ^^')

@@ -494,7 +494,10 @@ def _(df_merged_1, extract, pl):
     df_clean = df_clean.with_columns(
         (pl.col("is_ventilated").fill_null(pl.lit(False))).alias("is_ventilated"),
         (pl.col("is_prone").fill_null(pl.lit(False))).alias("is_prone"),
-        (pl.col("is_conscious").fill_null(pl.lit(False))).alias("is_conscious")
+        (pl.col("is_conscious").fill_null(pl.lit(False))).alias("is_conscious"),
+        (pl.col("is_cvvhf").fill_null(pl.lit(False))).alias("is_cvvhf"),
+        (pl.col("is_hdi").fill_null(pl.lit(False))).alias("is_hdi"),
+
     )
     df_clean = df_clean.filter(pl.col("taille").is_not_null() & pl.col("poids_admission").is_not_null())
     return (df_clean,)
@@ -579,10 +582,10 @@ def _(df_clean_keep, mo):
 
 @app.cell
 def _(custom_features, df_clean_keep, icu_useful, json, mo, mo_utils, modex):
+    import polars.selectors as cs
+
     with open ("../../Preprocessing_pipeline/preprocessing-pipelines/json/dynamic_features.json", "r") as file:
         json_feat = json.load(file)
-
-    import polars.selectors as cs
 
     if modex.value == "Mode All":
         keep_feats = df_clean_keep.columns
@@ -835,11 +838,6 @@ def _(X, df_clean, pl, type_donnees):
 @app.cell
 def _(df_clean_3):
     df_clean_3.describe()
-    return
-
-
-@app.cell
-def _():
     return
 
 
@@ -1096,7 +1094,7 @@ def _(
     if len(folds_X_train) == 0:
         raise ValueError("Les listes de folds sont vides")
 
-    # --- BARRIÈRE DE SÉCURITÉ GÉOMÉTRIQUE ---
+    # Sécurité
     is_dl_model = config_models.models_name in ["InceptionTimeModified", "LstmTimeModified"]
     n_dims = len(folds_X_train[0].shape) if hasattr(folds_X_train[0], "shape") else 0
     if is_dl_model and n_dims != 3:
@@ -1267,7 +1265,7 @@ def _(
             calibrated_clf.fit(X_calib_final, y_calib_final)
             final_model_to_save = calibrated_clf
 
-        # --- SAUVEGARDE FINALE DU MODÈLE (BASE OU CALIBRÉ) ---
+        # Sauvegarde du modèle
         if final_model_to_save is not None:
             joblib.dump(final_model_to_save, model_path_fold)
             print(f"--> Modèle final enregistré à : {model_path_fold}")
@@ -1362,14 +1360,11 @@ def _(
     sfu,
     transparent,
 ):
-
-    # --- LISTES D'ACCUMULATION POUR LES MÉTRIQUES TEXTES ---
     all_test_scores = []
     all_train_scores = []
     all_auc_scores = []
     all_brier_scores = []
 
-    # --- LISTES D'ACCUMULATION POUR LES GRAPHIQUES ---
     all_y_true_report = []  
     all_y_pred_report = []  
 
@@ -1559,7 +1554,6 @@ def _(Counter, config_models, exp, extension, joblib, np, pl, seed):
             if len(features_gardees_triees) > 10:
                 print(f"  ... et {len(features_gardees_triees) - 10} autres variables.")
 
-        # ─── ANALYSE DE CONSENSUS GLOBAL & STRUCTURATION POLARS ───
         print("\n" + "═"*50)
         print("CONSTRUCTION DU DATAFRAME DE CONSENSUS (POLARS)")
         print("═"*50)
@@ -1586,8 +1580,7 @@ def _(Counter, config_models, exp, extension, joblib, np, pl, seed):
             descending=[True, True]
         )
 
-        # ─── SAUVEGARDE STRICTE DANS LES INPUTS ───
-        # On utilise ton dossier 'X' du lasso path pour y stocker le dictionnaire de features clean
+        # Sauvegarde
         input_save_dir = exp.get_lasso_path("X", 0, "parquet").parent.parent
         file_output_path = input_save_dir / f"lasso_features_consensus_seed_{seed}.parquet"
 
@@ -1676,7 +1669,7 @@ def _(
 
             return sorted_Cs, np.array(coefs_list), best_C2, X_pure_fit_np.shape[1]
 
-        # Lancement des 5 folds en parallèle sur tous tes cœurs CPU (-1)
+        # Lancement des 5 folds en parallèle
         results = Parallel(n_jobs=-1)(delayed(process_single_fold)(f_idx) for f_idx in range(5))
 
         # Récupération et affichage des graphiques (ultra rapide car les calculs sont déjà faits)
@@ -1722,9 +1715,9 @@ def _(
 
 
 @app.cell
-def _(df_clean_3, folds_y_test, patient_col):
+def _(df_train_init, folds_y_test, patient_col):
     total_predictions = sum(len(f) for f in folds_y_test)
-    total_patients_uniques = df_clean_3[patient_col].n_unique()
+    total_patients_uniques = df_train_init[patient_col].n_unique()
 
     print(f"Nombre total de patients uniques dans la cohorte : {total_patients_uniques}")
     print(f"Somme des tailles des 5 jeux de test cumulés : {total_predictions}")

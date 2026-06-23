@@ -31,12 +31,12 @@ class Experiment:
     def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight = "",):
         """Retourne le chemin d'un fold spécifique et crée le dossier parent s'il manque."""
         path = Path("models") / model_name / self.shortdirname(class_weight)
-        path.mkdir(parents=True, exist_ok=True) # Sécurité création de dossier
+        path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}{extension}"
     
     def get_output_path(self, model_name, class_weight = ""):
         path = Path("outputs") / model_name / self.shortdirname(class_weight)
-        path.mkdir(parents=True, exist_ok=True) # Sécurité création de dossier
+        path.mkdir(parents=True, exist_ok=True)
         return path
     
     def load_model(self, model_name, class_weight = "", name_file = "all_res.joblib"):
@@ -47,12 +47,12 @@ class Experiment:
 
     def get_tsfel_parquet_path(self):
         path = Path("inputs") 
-        path.mkdir(parents=True, exist_ok=True) # Sécurité création de dossier
+        path.mkdir(parents=True, exist_ok=True)
         return path / f"tsfel_global_brut_{self.config_mode}_{self.clean}_{self.target_name}_{self.modex}.parquet"
     
     def get_tsfel_boruta(self, mode, fold_idx):
         path = Path("inputs") / f"tsfel_{mode}_{self.shortdirname()}"
-        path.mkdir(parents=True, exist_ok=True) # Sécurité création de dossier
+        path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}.parquet"
     
     def get_lasso_path(self, mode, fold_idx, extension):
