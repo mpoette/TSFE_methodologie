@@ -70,10 +70,15 @@ def _():
         roc_auc_score,
         roc_curve,
     )
+    from sklearn.frozen import FrozenEstimator
+    from sklearn.model_selection import GridSearchCV
+    from sklearn.calibration import CalibratedClassifierCV
     from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
 
+    from joblib import Parallel, delayed
+    from collections import Counter
     # 5. Imports locaux (modules customs)
     import utilitaries.create_merged_dataset as create_merged_dataset
     import utilitaries.extract_data_utils as extract
@@ -98,11 +103,17 @@ def _():
     )
     pl.Config.set_tbl_cols(-1)
     return (
+        CalibratedClassifierCV,
+        Counter,
+        FrozenEstimator,
+        GridSearchCV,
         LogisticRegression,
+        Parallel,
         Path,
         StratifiedGroupKFold,
         classification_report,
         create_merged_dataset,
+        delayed,
         evaluate_lstm_on_test,
         evaluate_on_test,
         extract,
@@ -175,12 +186,30 @@ def _(mo, mo_utils):
 
 
 @app.cell
-def _(mo, mo_utils):
-    models = mo.ui.dropdown(
+def _(mo):
+    type_donnees = mo.ui.dropdown(
+        options = {"modèle" : "modèle", "score" : "score"},
+        value = "modèle",
+        label = "Type de données affichées pour les figures (score ou modèle)"
+    )
+    return (type_donnees,)
+
+
+@app.cell
+def _(mo, mo_utils, type_donnees):
+    if type_donnees.value == "modèle":
+        models = mo.ui.dropdown(
         options=mo_utils.MODELS,
         value="InceptionTimeModified",
         label="Modèle utilisé",
-    )
+        )
+        value_models = "InceptionTimeModified"
+    else:
+        models = mo.ui.dropdown(
+        options=mo_utils.SCORE,
+        value="IGS2",
+        label="Score utilisé",
+        )
     return (models,)
 
 
@@ -420,6 +449,24 @@ def _(df_merged, pl):
     return (df_merged_1,)
 
 
+@app.cell
+def _(df_merged_1):
+    df_merged_1.columns
+    return
+
+
+@app.cell
+def _(df_merged_1):
+    df_merged_1["hosp_admissionMode"].describe()
+    return
+
+
+@app.cell
+def _(df_merged_1):
+    df_merged_1["icu_mode_entree"].describe()
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -509,15 +556,15 @@ def _(mo):
 @app.cell
 def _(df_clean, pl, target_col):
     score = ["NEWS", "NEWS2", "sapsii", "sapsii_prob"]
-    dustbin = ["endotracheal_tube","tracheo", "installation", "eer", "hx_comorbidité_majeure", "imc", "neuro_status", "ecmo_all", "prone"]
+    dustbin = ["endotracheal_tube","tracheo", "installation", "eer", "hx_comorbidité_majeure", "imc", "neuro_status", "ecmo_all", "prone", "plq"]
     useless = ["arret_therapeutique", "limitation_therapeutique", "hematocrit", "peak_pressure"]
-    icu_useless = ["icu_DP", "icu_actes", "icu_mode_entree", "icu_mode_sortie", "icu_DA", "hosp_admissionMode", "hosp_primaryDiagnosis", "hosp_primaryDiagnosisCode"]
-    icu_useful = ["icu_ghm", "icu_DP_code"]
-    broken = ["urine_rate"]
+    icu_useless = ["icu_actes", "icu_mode_sortie", "icu_DA", "hosp_admissionMode", "hosp_primaryDiagnosis", "hosp_primaryDiagnosisCode"]
+    icu_useful = ["icu_ghm", "icu_DP_code", "icu_DP", "icu_mode_entree",]
+    broken = []
     cheat = ["category", "heure_entiere", "encounterId", "delta_hour", "heure_calibree", "heure_entiere", "year_inTime", target_col, "deces_datediff_days", "isDeceased", "adm_unit", "out_unit", "transition_units", "los", "adm_year", "hosp_los", "hosp_dischargeMode", "deces_hosp"]
     df_clean_keep = df_clean.drop([*score, *dustbin, *useless, *cheat, *icu_useless, *broken])
     df_clean_keep = df_clean_keep.select([pl.col(c) for c in df_clean_keep.columns if not c.endswith("_detected_term")])
-    return (df_clean_keep,)
+    return df_clean_keep, icu_useful
 
 
 @app.cell
@@ -531,7 +578,7 @@ def _(df_clean_keep, mo):
 
 
 @app.cell
-def _(custom_features, df_clean_keep, json, mo, mo_utils, modex):
+def _(custom_features, df_clean_keep, icu_useful, json, mo, mo_utils, modex):
     with open ("../../Preprocessing_pipeline/preprocessing-pipelines/json/dynamic_features.json", "r") as file:
         json_feat = json.load(file)
 
@@ -548,8 +595,14 @@ def _(custom_features, df_clean_keep, json, mo, mo_utils, modex):
 
     elif modex.value == "Mode Commonly Used Without pmsi":
         keep_feats = df_clean_keep.select(
-            ["score_glasgow", "heart_rate", "creat", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "diurese" ]
-        )
+            ["score_glasgow", "is_conscious", "heart_rate", "creat", "is_cvvhf", "is_hdi", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "urine_rate", "pas", "pam", "pad", "bili_tot", "leucocytes", "admission_type", "fr", "ph", "sodium", "potassium", "num_plq", "blood_urea", "nad_dose_poids", "dobu_dose_poids", "hemoglobine", "tp", "spo2", "hco3", "glyc_cap"],
+        ).columns
+    elif modex.value == "Mode Commonly Used":
+        keep_feats = df_clean_keep.select(
+            ["score_glasgow", "is_conscious", "heart_rate", "creat", "is_cvvhf", "is_hdi", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "urine_rate", "pas", "pam", "pad", "bili_tot", "leucocytes", "admission_type", "fr", "ph", "sodium", "potassium", "num_plq", "blood_urea", "nad_dose_poids", "dobu_dose_poids", "hemoglobine", "tp", "spo2", "hco3", "glyc_cap", ],
+            *icu_useful,
+            cs.starts_with("hx_")
+        ).columns
     elif modex.value == "Mode Custom":
         keep_feats = custom_features.value
     else:
@@ -706,6 +759,7 @@ def _(
     seed,
     target_col,
     time_col,
+    type_donnees,
     y_init,
 ):
     if config_models.extraction_type == "TSFEL":
@@ -747,7 +801,7 @@ def _(
         y = train_init_tsfel[target_col].to_numpy()
         groups = train_init_tsfel[patient_col].to_numpy()
 
-    elif config_models.extraction_type == "time":
+    elif config_models.extraction_type == "time" or type_donnees.value == "score":
         train_init_df = df_clean_3[train_init_idx].sort([patient_col, time_col])
         test_holdout_df = df_clean_3[test_init_idx].sort([patient_col, time_col])
 
@@ -755,6 +809,38 @@ def _(
         y = train_init_df[target_col].to_numpy()
         groups = train_init_df[patient_col].to_numpy()
     return X, groups, train_init_df, train_init_tsfel, y
+
+
+@app.cell
+def _(X, df_clean, pl, type_donnees):
+    if type_donnees.value == "score":
+        df_clean_saps2 = (
+            X
+            .join(
+                df_clean.select(["sapsii_prob", "encounterId"]).cast(pl.Float64), 
+                on="encounterId", 
+                how="inner"
+            )
+            .filter(pl.col("sapsii_prob").is_not_null())
+            .group_by("encounterId")
+            .first()
+            .sort(by="encounterId")
+        )
+        df_clean_saps2.describe()
+        saps2_pred = df_clean_saps2["sapsii_prob"].to_numpy()
+        saps2_true = df_clean_saps2["isDeceased_lt_28d"].to_numpy()
+    return saps2_pred, saps2_true
+
+
+@app.cell
+def _(df_clean_3):
+    df_clean_3.describe()
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell(hide_code=True)
@@ -982,6 +1068,8 @@ def _(config_balance, config_keep_pop, config_models):
 @app.cell
 def _(
     CalibratedClassifierCV,
+    FrozenEstimator,
+    GridSearchCV,
     LogisticRegression,
     StratifiedGroupKFold,
     calibration,
@@ -1024,7 +1112,8 @@ def _(
         # Extraction des données spécifiques à ce fold
         X_train_fold_2 = folds_X_train[fold_idx_2]
         y_train_fold_2 = folds_y_train[fold_idx_2]
-        groups_fold_2 = folds_groups[fold_idx_2]
+        if config_models.extraction_type == "TSFEL":
+            groups_fold_2 = folds_groups[fold_idx_2]
 
         # Génération d'un chemin STRICT et DÉTERMINISTE unique par fold et par graine
         model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension)
@@ -1119,7 +1208,6 @@ def _(
             svc_base.fit(X_train_final_fold, y_train_final)
             final_model_to_save = svc_base
         elif config_models.models_name == "Logistic Regression Lasso TSFEL" :
-            from sklearn.model_selection import GridSearchCV
             # Si X_train_final_fold est déjà standardisé ou stocké en DataFrame Polars :
             X_train_final_fold.write_parquet(file_X_exact)
             np.save(file_y_exact, y_train_final)
@@ -1165,9 +1253,10 @@ def _(
             print(f"oups tu t'es trompé : {config_models.models_name}")
 
         if calibration.value and final_model_to_save is not None:
-            print(f"    [INFO] Application de la calibration Isotonique (prefit) sur le jeu held-out...")
-            # cv='prefit' indique d'utiliser le modèle déjà entraîné et de calibrer sur (X_calib, y_calib)
-            calibrated_clf = CalibratedClassifierCV(estimator=final_model_to_save, method='isotonic', cv='prefit')
+            print(f"    [INFO] Application de la calibration Isotonique sur le jeu held-out...")
+            frozen_model = FrozenEstimator(final_model_to_save)
+            calibrated_clf = CalibratedClassifierCV(estimator=frozen_model, method="sigmoid")
+            # Là j'utilise Platt parce qu'on a pas assez de données pour calibrer correctement avec une régression isotonique
 
             # Gestion spécifique pour XGBoost qui n'aime pas les DataFrames Polars/Pandas dans CalibratedClassifierCV
             X_calib_final, y_calib_final = X_calib, y_calib
@@ -1188,6 +1277,32 @@ def _(
 
     print("Cross Validation terminée ! 5 modèles ont été enregistrés avec succès.")
     return
+
+
+@app.cell
+def _(
+    config_models,
+    output_dir,
+    saps2_pred,
+    saps2_true,
+    save_figure,
+    sfu,
+    transparent,
+    type_donnees,
+):
+    if type_donnees.value == "score":
+        auc_final_score, fpr_score, tpr_score, th_score, brier_score_score, best_f1_score, best_t_score, y_pred_score, mcc_score, non_overlap_area_score, asymetric_incertitude_score, mean_risk_diff_score, mean_p1_score = sfu.plot_all_figs(saps2_pred, saps2_true, config_models, False, save_figure.value, output_dir, transparent.value)
+    return (
+        asymetric_incertitude_score,
+        auc_final_score,
+        best_f1_score,
+        brier_score_score,
+        mcc_score,
+        mean_p1_score,
+        mean_risk_diff_score,
+        non_overlap_area_score,
+        y_pred_score,
+    )
 
 
 @app.cell(hide_code=True)
@@ -1223,6 +1338,7 @@ def _(mo):
 
 @app.cell
 def _(
+    CalibratedClassifierCV,
     calibration,
     classification_report,
     config_models,
@@ -1246,6 +1362,7 @@ def _(
     sfu,
     transparent,
 ):
+
     # --- LISTES D'ACCUMULATION POUR LES MÉTRIQUES TEXTES ---
     all_test_scores = []
     all_train_scores = []
@@ -1253,23 +1370,21 @@ def _(
     all_brier_scores = []
 
     # --- LISTES D'ACCUMULATION POUR LES GRAPHIQUES ---
-    all_y_true_report = []  # Pour le classification report cumulé (TSFEL)
-    all_y_pred_report = []  # Pour le classification report cumulé (TSFEL)
+    all_y_true_report = []  
+    all_y_pred_report = []  
 
-    all_y_test_global = []      # Cibles réelles pour la courbe de calibration
-    all_probas_uncalib = []     # Probas brutes pour la courbe de calibration
-    all_probas_calib = []       # Probas calibrées pour la courbe de calibration
+    all_y_test_global = []      
+    all_probas_uncalib = []     
+    all_probas_calib = []       
 
 
     for fold_idx_bis in range(5):
         print(f"\n─────────────────── Évaluation du Fold {fold_idx_bis + 1}/5 ───────────────────")
-        # Extraction des matrices propres à ce fold
         X_train = folds_X_train[fold_idx_bis]
         X_test = folds_X_test[fold_idx_bis]
         y_train = folds_y_train[fold_idx_bis]
         y_test = folds_y_test[fold_idx_bis]
 
-        # Reconstruction du fichier à charger
         loaded_model = exp.get_model_path(config_models.models_name, fold_idx_bis, extension)
         print("Modèle chargé :", loaded_model)
 
@@ -1291,7 +1406,6 @@ def _(
         elif config_models.models_name == "LstmTimeModified":
             X_train_final = X_train
             X_test_final = X_test
-            # 🔍 DEBUG ENTRÉE ÉVALUATION
             print(f"\n[DEBUG EVAL - Fold {fold_idx_bis + 1}] Shape de X_test_final: {X_test_final.shape}")
             (auc, brier, T_1) = evaluate_lstm_on_test(X_test_final, y_test, loaded_model)
             (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
@@ -1304,20 +1418,16 @@ def _(
             all_probas_calib.extend(probas_fold)
 
         elif config_models.extraction_type == "TSFEL":
-            from sklearn.calibration import CalibratedClassifierCV
             clf = joblib.load(loaded_model)
 
-            # 1. Extraction universelle des features
             expected_features = None
             if hasattr(clf, "feature_names_in_"):
                 expected_features = list(clf.feature_names_in_)
-            # Cas spécifique où CalibratedClassifierCV enveloppe un modèle avec feature_names_in_
             elif hasattr(clf, "estimator") and hasattr(clf.estimator, "feature_names_in_"):
                 expected_features = list(clf.estimator.feature_names_in_)
             elif hasattr(clf, "get_booster"):
                 expected_features = clf.get_booster().feature_names
 
-            # 2. Alignement conditionnel
             if expected_features is not None:
                 if expected_features and expected_features[0].startswith('f') and expected_features[0][1:].isdigit():
                     print("XGBoost utilise des indices génériques. Utilisation des matrices brutes.")
@@ -1342,7 +1452,6 @@ def _(
                 X_train_final = X_train.to_numpy()
                 X_test_final = X_test.to_numpy()
 
-            # 3. Prédictions et Scores
             y_pred_nb_train = clf.predict(X_train_final)
             y_pred_nb_test = clf.predict(X_test_final)
 
@@ -1354,46 +1463,25 @@ def _(
             all_y_true_report.extend(y_test)
             all_y_pred_report.extend(y_pred_nb_test)
 
-            # 4. RÉCUPÉRATION DES PROBABILITÉS
             prob_uncalib_fold = None
             prob_calib_fold = None
-            # Gestion spécifique pour XGBoost numpy vs pandas
-            X_test_final_numpy = X_test_final
-            if hasattr(X_test_final, "to_numpy"):
-                 X_test_final_numpy = X_test_final.to_numpy()
-
-            if isinstance(clf, CalibratedClassifierCV):
-                # Le modèle EST calibré (ex: SVC, XGBoost)
-                print("    [INFO] Modèle calibré détecté. Extraction des probabilités brutes et calibrées...")
-
-                # A. Probabilités CALIBRÉES (via le CalibratedClassifierCV)
-                all_probas_calib_fold = clf.predict_proba(X_test_final)
-                # On assume que la classe positive (1) est à l'indice 1
-                prob_calib_fold = all_probas_calib_fold[:, 1]
-
-                # B. Probabilités NON-CALIBRÉES (via l'estimateur de base brut)
+            X_test_final_numpy = X_test_final.to_numpy() if hasattr(X_test_final, "to_numpy") else X_test_final
+            if calibration.value and(isinstance(clf, CalibratedClassifierCV) or hasattr(clf, "estimator")):
+                print("    [INFO] Objet de calibration détecté sur le disque.")
+                prob_calib_fold = clf.predict_proba(X_test_final)[:, 1]
                 base_estimator = clf.estimator
-
-                # XGBoost base estimator nécessite souvent du numpy pur
+                if hasattr(base_estimator, "estimator"):
+                    base_estimator = base_estimator.estimator
                 if "XGB" in type(base_estimator).__name__:
-                     all_probas_uncalib_fold = base_estimator.predict_proba(X_test_final_numpy)
+                    prob_uncalib_fold = base_estimator.predict_proba(X_test_final_numpy)[:, 1]
                 else:
-                     all_probas_uncalib_fold = base_estimator.predict_proba(X_test_final)
-
-                prob_uncalib_fold = all_probas_uncalib_fold[:, 1]
-
+                    prob_uncalib_fold = base_estimator.predict_proba(X_test_final)[:, 1]
             else:
-                # Le modèle N'EST PAS calibré extraordinairement (Lasso, RF)
-                # calibration.value était False lors de l'entraînement
-                print("    [INFO] Modèle non-calibré (ou naturellement calibré) détecté.")
-                all_probas_fold = clf.predict_proba(X_test_final)
-                prob_fold = all_probas_fold[:, 1]
+                print("    [INFO] Modèle brut détecté (non calibré sur le disque).")
+                prob_fold_brut = clf.predict_proba(X_test_final)[:, 1]
+                prob_uncalib_fold = prob_fold_brut
+                prob_calib_fold = prob_fold_brut
 
-                # Les probabilités sont les mêmes avant/après
-                prob_uncalib_fold = prob_fold
-                prob_calib_fold = prob_fold
-
-            # Accumulation dans les listes globales
             all_probas_uncalib.extend(prob_uncalib_fold)
             all_probas_calib.extend(prob_calib_fold)
             all_y_test_global.extend(y_test)
@@ -1426,10 +1514,89 @@ def _(
     print(f"DEBUG SIZES -> y_true: {len(all_y_test_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}")
     sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_test_global, config_models.models_name, config_models.extraction_type, calibration.value, save_figure.value, output_dir, transparent.value)
 
-    # --- RE-MAPPING DES ÉTATS GLOBAUX POUR LES CELLULES SUIVANTES (COURBE ROC / MATRICE) ---
     probas = all_probas_calib
     y_test = all_y_test_global
-    return CalibratedClassifierCV, probas, y_test
+    return probas, y_test
+
+
+@app.cell
+def _(Counter, config_models, exp, extension, joblib, np, pl, seed):
+    if config_models.models_name == "Logistic Regression Lasso TSFEL":
+
+        print("Extraction des variables sélectionnées par le Lasso...")
+
+        variables_par_fold = {}
+        toutes_les_variables_gardees = []
+
+        for fold_idx_test in range(5):
+            # 1. Charger le fichier X pour récupérer le nom d'origine des colonnes
+            file_X = exp.get_lasso_path("X", fold_idx_test, "parquet")
+            df_X = pl.read_parquet(file_X)
+            features_names = df_X.columns
+
+            # 2. Charger le modèle entraîné de ce fold
+            model_path = exp.get_model_path("Logistic Regression Lasso TSFEL", fold_idx_test, extension)
+            model_L1 = joblib.load(model_path)
+
+            # 3. Récupérer les coefficients finaux (au niveau du C optimal)
+            coefficients = model_L1.coef_[0]
+
+            # 4. Filtrer les variables dont le coefficient n'est pas nul
+            features_gardees = [
+                (name, coef) for name, coef in zip(features_names, coefficients) if coef != 0.0
+            ]
+
+            # Tri par valeur absolue du coefficient
+            features_gardees_triees = sorted(features_gardees, key=lambda x: abs(x[1]), reverse=True)
+
+            variables_par_fold[fold_idx_test] = features_gardees_triees
+            toutes_les_variables_gardees.extend([name for name, _ in features_gardees_triees])
+
+            # Affichage pour ce fold
+            print(f"\n--- FOLD {fold_idx_test + 1} : {len(features_gardees_triees)} variables conservées sur {len(features_names)} ---")
+            for i, (name, coef) in enumerate(features_gardees_triees[:10]): 
+                print(f"  {i+1}. [{coef:+.4f}] -> {name}")
+            if len(features_gardees_triees) > 10:
+                print(f"  ... et {len(features_gardees_triees) - 10} autres variables.")
+
+        # ─── ANALYSE DE CONSENSUS GLOBAL & STRUCTURATION POLARS ───
+        print("\n" + "═"*50)
+        print("CONSTRUCTION DU DATAFRAME DE CONSENSUS (POLARS)")
+        print("═"*50)
+
+        compteur_occurrences = Counter(toutes_les_variables_gardees)
+
+        # Préparation des données pour le DataFrame
+        data_rows = []
+        for name, count in compteur_occurrences.items():
+            # Extrait les coefficients à travers les 5 folds
+            coefs_across_folds = [dict(variables_par_fold[f]).get(name, 0.0) for f in range(5)]
+            mean_coef = np.mean(coefs_across_folds)
+
+            data_rows.append({
+                "feature_name": name,
+                "folds_presence_count": count,
+                "mean_coefficient": mean_coef,
+                "is_pure_consensus": 1 if count == 5 else 0
+            })
+
+        # Création du DataFrame Polars
+        df_consensus = pl.DataFrame(data_rows).sort(
+            ["is_pure_consensus", "mean_coefficient"], 
+            descending=[True, True]
+        )
+
+        # ─── SAUVEGARDE STRICTE DANS LES INPUTS ───
+        # On utilise ton dossier 'X' du lasso path pour y stocker le dictionnaire de features clean
+        input_save_dir = exp.get_lasso_path("X", 0, "parquet").parent.parent
+        file_output_path = input_save_dir / f"lasso_features_consensus_seed_{seed}.parquet"
+
+        df_consensus.write_parquet(file_output_path)
+
+        print(f"\n✨ Succès ! Le consensus Polars a été sauvegardé dans tes inputs :")
+        print(f"   --> {file_output_path}")
+        print(f"   --> Nombre de variables robustes (5/5 folds) : {df_consensus.filter(pl.col('is_pure_consensus') == 1).height}")
+    return
 
 
 @app.cell(hide_code=True)
@@ -1452,8 +1619,10 @@ def _(mo, mo_utils, run_lasso):
 @app.cell
 def _(
     LogisticRegression,
+    Parallel,
     Path,
     config_models,
+    delayed,
     exp,
     extension,
     joblib,
@@ -1470,7 +1639,6 @@ def _(
     mo.stop(not run_lasso.value, "Clique pour lancer")
     print("Lasso Path lancé")
     if config_models.models_name == "Logistic Regression Lasso TSFEL":
-        from joblib import Parallel, delayed
         print("Génération ultra-rapide des Lasso Paths (Warm Start + Multi-processing)...")
 
         Cs_grid = np.logspace(-4, 4, 100) 
@@ -1500,12 +1668,12 @@ def _(
             # Crucial : On parcourt la grille du plus petit C (gros Lasso) au plus grand C (Lasso faible)
             # C'est dans ce sens que le warm start est le plus efficace géométriquement
             sorted_Cs = np.sort(Cs_grid) 
-        
+
             for c_val in sorted_Cs:
                 lr_path_model.set_params(C=c_val)
                 lr_path_model.fit(X_pure_fit_np, y_pure_fit)
                 coefs_list.append(lr_path_model.coef_[0].copy())
-            
+
             return sorted_Cs, np.array(coefs_list), best_C2, X_pure_fit_np.shape[1]
 
         # Lancement des 5 folds en parallèle sur tous tes cœurs CPU (-1)
@@ -1523,7 +1691,7 @@ def _(
             plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
             plt.grid(True, which="both", ls="-", alpha=0.5)
             plt.legend()
-        
+
             if save_figure.value:
                 filename = f"L1_Log_path_fold_{fold_idx_L1 + 1}.png"
                 plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches="tight", transparent=transparent.value)
@@ -1662,31 +1830,56 @@ def _(config_models, mo):
 @app.cell
 def _(
     asymetric_incertitude,
+    asymetric_incertitude_score,
     auc_final,
+    auc_final_score,
     best_f1,
+    best_f1_score,
+    brier_score_score,
     global_brier,
     joblib,
     mcc,
+    mcc_score,
     mean_p1,
+    mean_p1_score,
     mean_risk_diff,
+    mean_risk_diff_score,
     non_overlap_area,
+    non_overlap_area_score,
     output_dir,
     probas,
+    saps2_pred,
+    type_donnees,
     y_pred,
+    y_pred_score,
 ):
     # Résumé des scores obtenus
-    all_res = {
-            'probas': probas,
-            'preds': y_pred,       
-            'f1_score': best_f1, 
-            'mcc': mcc,
-            'auc': auc_final,
-            'brier': global_brier,
-        "non_overlap_area" : non_overlap_area, 
-        "asymetric_incertitude" : asymetric_incertitude,
-        "mean_risk_diff" : mean_risk_diff,
-        "mean_deaths_prediction" : mean_p1
-    }
+    if type_donnees.value == "modèle":
+        all_res = {
+                'probas': probas,
+                'preds': y_pred,       
+                'f1_score': best_f1, 
+                'mcc': mcc,
+                'auc': auc_final,
+                'brier': global_brier,
+            "non_overlap_area" : non_overlap_area, 
+            "asymetric_incertitude" : asymetric_incertitude,
+            "mean_risk_diff" : mean_risk_diff,
+            "mean_deaths_prediction" : mean_p1
+        }
+    else:
+        all_res = {
+                'probas': saps2_pred,
+                'preds': y_pred_score,       
+                'f1_score': best_f1_score, 
+                'mcc': mcc_score,
+                'auc': auc_final_score,
+                'brier': brier_score_score,
+            "non_overlap_area" : non_overlap_area_score, 
+            "asymetric_incertitude" : asymetric_incertitude_score,
+            "mean_risk_diff" : mean_risk_diff_score,
+            "mean_deaths_prediction" : mean_p1_score
+        }
     output_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(all_res, output_dir / "all_res.joblib")
 
@@ -1761,26 +1954,6 @@ def _(mo, mo_utils, run_test):
 
 
 @app.cell
-def _(df_clean, df_clean_3, pl):
-    df_clean_saps2 = (
-        df_clean_3
-        .join(
-            df_clean.select(["sapsii_prob", "encounterId"]).cast(pl.Float64), 
-            on="encounterId", 
-            how="inner"
-        )
-        .filter(pl.col("sapsii_prob").is_not_null())
-        .group_by("encounterId")
-        .first()
-        .sort(by="encounterId")
-    )
-    df_clean_saps2.describe()
-    saps2_pred = df_clean_saps2["sapsii_prob"].to_numpy()
-    saps2_true = df_clean_saps2["isDeceased_lt_28d"].to_numpy()
-    return saps2_pred, saps2_true
-
-
-@app.cell
 def _(mo, run_test):
     mo.stop(not run_test.value, "Clique pour lancer")
     print("Comparaison lancée")
@@ -1814,7 +1987,7 @@ def _(exp, sfu, y_test):
 
 @app.cell
 def _(exp, sfu):
-    sfu.compare_models_figure("KDE.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    sfu.compare_models_figure("kde_plot.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1824,7 +1997,7 @@ def _(exp, sfu):
 
 @app.cell
 def _(exp, sfu):
-    sfu.compare_models_figure("Calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    sfu.compare_models_figure("calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1834,7 +2007,7 @@ def _(exp, sfu):
 
 @app.cell
 def _(exp, sfu):
-    sfu.compare_models_figure("Courbe_ROC.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    sfu.compare_models_figure("roc_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1844,7 +2017,7 @@ def _(exp, sfu):
 
 @app.cell
 def _(exp, sfu):
-    sfu.compare_models_figure("threshold.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
+    sfu.compare_models_figure("threshold_evolution.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
     LSTMT = exp.get_output_path("LstmTimeModified", ""),
     XGBoost = exp.get_output_path("XGBoost TSFEL", ""),
@@ -1910,34 +2083,62 @@ def _(
     str_keep_feats,
     sys,
     transparent,
+    type_donnees,
     ui_tsfel,
     y_dd,
 ):
-    mo.sidebar(
-    mo.vstack([
+    # 1. On définit les éléments communs du haut
+    sidebar_items = [
         mo.md(mo_utils.config_sidebar),
         mo.md(f"<U>Seed utilisée pour l'ensemble du code : **{seed}**</U>"),
         mo.md(f"Version de python : {sys.version}"),
         mo.md("-------------------------------"),
+        type_donnees,
+        mo.md("-------------------------------"),
         mode,
         mo.md("-------------------------------"),
-        balance,
         models,
-        ui_tsfel,
-        cleaning,
-        y_dd,
-        keep_pop,
-        modex,
-        custom_features if modex.value == "Mode Custom" else "(features fixe)",
-        mo.md(f"**Features gardées :** `{keep_feats}`"),
-        mo.md(f"**Soit en Français (dynamic feature only):** \n{str_keep_feats}"),
+    ]
+
+    # 2. On ajoute les éléments spécifiques selon la condition
+    if type_donnees.value == "modèle":
+        sidebar_items.extend([
+            balance,
+            ui_tsfel,
+            cleaning,
+            y_dd,
+            keep_pop,
+            modex,
+            custom_features if modex.value == "Mode Custom" else "(features fixe)",
+            mo.md(f"**Features gardées :** `{keep_feats}`"),
+            mo.md(f"**Soit en Français (dynamic feature only):** \n{str_keep_feats}"),
+        ])
+    else:
+        sidebar_items.extend([
+            y_dd,
+            keep_pop,
+        ])
+
+    # 3. On ajoute les éléments communs du bas
+    sidebar_items.extend([
         save_figure,
         transparent,
         mo.md("-------------------------------"),
-        run,
+        mo.md(mo_utils.config_end)
+    ])
+    if type_donnees.value == "modèle":
+        sidebar_items.extend([
         mo.md("-------------------------------"),
-        mo.md(mo_utils.config_end)]),
-    width = "550px")
+        run,
+        ])
+
+    # 4. On ONLINE / AFFICHE la sidebar (Marimo va capter l'output de la cellule ici)
+    mo.sidebar(mo.vstack(sidebar_items), width="550px")
+    return
+
+
+@app.cell
+def _():
     return
 
 

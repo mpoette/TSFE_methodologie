@@ -101,6 +101,25 @@ POPULATION = {
     ),
 }
 
+
+@dataclass(frozen=True)
+class ConfigScores:
+    models_name : str
+    extraction_type : str
+    models_type : str
+SCORE = {
+    "IGS2" : ConfigScores(
+        models_name = "IGS2",
+        extraction_type = None,
+        models_type = "Normal"
+    ),
+    "NEWS2" : ConfigScores(
+        models_name = "NEWS2",
+        extraction_type = None,
+        models_type = "Normal"
+    ),
+}
+
 @dataclass(frozen=True)
 class ConfigModels:
     models_name : str
