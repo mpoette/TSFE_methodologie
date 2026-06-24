@@ -36,7 +36,7 @@ def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global,
     # Courbe calibrée (Uniquement affichée pour TSFEL si demandée)
     if extraction_type == "TSFEL" and calibration:
         fraction_pos_calib, mean_pred_calib = calibration_curve(y_test_global, probas_calib, n_bins=10)
-        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label="After calibration (Isotonic)")
+        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label="After calibration (Platt)")
 
     plt.ylabel("True fraction of positives")
     plt.xlabel("Mean predicted probability")
@@ -352,7 +352,17 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     k = int(min(top_n, len(varnames)))
 
     # ----- 1) Importances "forêt" -----
-    importances = model.feature_importances_
+    # Gestion des modèles calibrés pour récupérer l'importance des features
+    if hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+    elif hasattr(model, 'calibrated_classifiers_'):
+        # On fait la moyenne des importances de tous les sous-modèles de la calibration
+        importances = np.mean([
+            clf.estimator.feature_importances_ 
+            for clf in model.calibrated_classifiers_
+        ], axis=0)
+    else:
+        raise AttributeError("Le modèle fourni n'a pas d'attribut 'feature_importances_' ni d'estimateur calibré accessible.")
     sorted_idx = np.argsort(importances)[::-1]
     sorted_varnames = np.array(varnames)[sorted_idx]
     sorted_importances = importances[sorted_idx]
@@ -389,18 +399,24 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     plt.show()
     # ----- 2) SHAP -----
     X_pure_numpy = np.array(X_arr, dtype = np.float32)
-
+    shap_model = model
     # On autorise le multicoeur
     if hasattr(model, 'n_jobs'):
         model.n_jobs = -1
+
+    if hasattr(model, 'calibrated_classifiers_'):
+        # On prend le premier estimateur de la calibration (ils partagent la même structure)
+        shap_model = model.calibrated_classifiers_[0].estimator
     
-    if isinstance(model, XGBClassifier):
-        explainer = shap.TreeExplainer(model)
+    if shap_model.__class__.__name__ == "FrozenEstimator" and hasattr(shap_model, "estimator"):
+        shap_model = shap_model.estimator
+    if isinstance(shap_model, XGBClassifier):
+        explainer = shap.TreeExplainer(shap_model)
     else:
         try:
-            explainer = shap.Explainer(model)
+            explainer = shap.Explainer(shap_model)
         except Exception:
-            explainer = shap.TreeExplainer(model)
+            explainer = shap.TreeExplainer(shap_model)
     shap_values = explainer.shap_values(X_pure_numpy)
 
     # Gestion de la structure des shap_values selon la version de SHAP / type de modèle
@@ -428,10 +444,14 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     if class_labels is not None:
         class_names = list(class_labels)
     else:
-        class_names = [str(i) for i in range(n_classes)]
-        
-    if len(class_names) != n_classes:
-        class_names = [class_names[i] if i < len(class_names) else f"Class {i}" for i in range(n_classes)]
+        # Si pas de labels, on génère par défaut ["0", "1"] basés sur la vraie logique binaire
+        # et non pas sur la dimension technique de shap_arr (n_classes)
+        class_names = ["0", "1"] if (shap_arr.ndim == 3 or (shap_arr.ndim == 2 and "XGB" in str(type(shap_model)))) else [str(i) for i in range(n_classes)]
+
+    # Si XGBoost nous donne une seule matrice, elle correspond TOUJOURS à la classe positive (la dernière)
+    if n_classes == 1 and len(class_names) > 1:
+        # On force la liste des noms à ne contenir que la classe d'intérêt (Deaths)
+        class_names = [class_names[-1]]
 
     # ----- 4) Barres empilées -----
     fig, ax = plt.subplots(figsize=(16, 8))
@@ -535,8 +555,9 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     X_global_arr = X_global_df.values
 
     # 3. Agrégation des Shapley Values pour la classe de ton choix (ex: classe 0)
-    class_id = 1
-    shap_classe_pure = shap_arr[..., class_id] # Forme (n_samples, n_features)
+    target_class_idx = n_classes - 1
+    actual_class_name = class_names[-1]
+    shap_classe_pure = shap_arr[..., target_class_idx] # Forme (n_samples, n_features)
 
     # Initialisation de la matrice SHAP globale : (n_samples, n_racines)
     shap_global_arr = np.zeros((n_samples, len(liste_racines)), dtype=np.float32)
@@ -554,12 +575,12 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
         feature_names=liste_racines, 
         show=False
     )
-    plt.title(f"SHAP Value Impact (Global Fused) - {class_names[class_id]}")
+    plt.title(f"SHAP Value Impact (Global Fused) - {actual_class_name}")
     plt.tight_layout()
 
     if savefig:
-        plt.savefig(f"{folder}/global_fused_shap_summary_{class_names[class_id]}.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/global_fused_shap_summary_{class_names[class_id]}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(f"{folder}/global_fused_shap_summary_{actual_class_name}.pdf", bbox_inches="tight", transparent=transparent)
+        plt.savefig(f"{folder}/global_fused_shap_summary_{actual_class_name}.png", dpi=300, bbox_inches="tight")
     plt.show()
     return {
         "X_by_class": X_by_class,

@@ -8,11 +8,26 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 import warnings
-import shap
 import matplotlib.pyplot as plt
 import re
+from joblib import Parallel, delayed
+
+
+import warnings
+# Monkey patch pour contourner les erreurs d'histogramme
+import tsfel.feature_extraction.features as tsfel_feats
+tsfel_feats.hist_mode = lambda signal, nbins=10: 0.0
+tsfel_feats.hist_entropy = lambda signal, nbins=10: 0.0
+
 def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
     """Fonction atomique exécutée en parallèle pour un patient donné."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation.*",
+            category=RuntimeWarning,
+        )
+
     patient_id = g[patient_col][0]
     X_pl = g.select(feature_cols)
     
@@ -33,17 +48,6 @@ def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
 
 
 def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_col):
-    # Monkey patch pour contourner les erreurs d'histogramme
-    import tsfel.feature_extraction.features as tsfel_feats
-    tsfel_feats.hist_mode = lambda signal, nbins=10: 0.0
-    tsfel_feats.hist_entropy = lambda signal, nbins=10: 0.0
-    
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Precision loss occurred in moment calculation.*",
-            category=RuntimeWarning,
-        )
         
         # 1. Tri et préparation de la config TSFEL
         df = df.sort([patient_col, time_col])
@@ -57,7 +61,7 @@ def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_co
         
         # n_jobs=-1 utilise TOUS les coeurs du serveur
         # require='sharedmem' évite de copier tout le dataframe en mémoire pour chaque cœur (gain de RAM)
-        results = Parallel(n_jobs=-1, require='sharedmem')(
+        results = Parallel(n_jobs=-1)(
             delayed(_process_single_patient)(g, cfg, feature_cols, patient_col, target_col)
             for g in tqdm(groups, desc="Extraction TSFEL parallèle", unit="patient")
         )

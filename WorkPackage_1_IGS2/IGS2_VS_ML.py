@@ -857,7 +857,6 @@ def _(
     boruta_filter,
     config_balance,
     config_models,
-    df_clean_3,
     exp,
     expected_length,
     extract,
@@ -889,9 +888,9 @@ def _(
         print(f"\n─────────────────── Traitement du Fold {fold_idx + 1}/5 ───────────────────")
 
         # Récupération des IDs patients correspondants au split de ce fold
-        train_patients = df_clean_3[train_idx].select(patient_col).unique()
-        test_patients = df_clean_3[test_idx].select(patient_col).unique()
         if config_models.extraction_type == "TSFEL" :
+            train_patients = X[train_idx].select(patient_col).unique()
+            test_patients = X[test_idx].select(patient_col).unique()
             # On filtre notre gros DataFrame train pré-calculé pour ce fold
             train_fold_tsfel = train_init_tsfel.join(train_patients, on=patient_col, how="inner").sort(patient_col)
             test_fold_tsfel = train_init_tsfel.join(test_patients, on=patient_col, how="inner").sort(patient_col)
@@ -1888,7 +1887,7 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
+@app.cell
 def _(exp, joblib, np, patient_col, pl, sfu, target_col):
     show_shap = {}
     model_name_shap = "XGBoost TSFEL"
@@ -1917,13 +1916,13 @@ def _(exp):
     return model_name_shap_show, show_shap2
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, model_name_shap_show, sfu, show_shap2):
     sfu.compare_models_figure("feature_importance.png",savefig=True, folder = exp.get_output_path(model_name_shap_show), **show_shap2)
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, model_name_shap_show, sfu, show_shap2):
     sfu.compare_models_figure("global_feature_importance_mdi.png",savefig=True, folder = exp.get_output_path(model_name_shap_show), **show_shap2)
     return
@@ -1953,7 +1952,7 @@ def _(mo, run_test):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, saps2_pred, saps2_true, sfu, y_test):
     comparaisons = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified"), exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
 
@@ -1963,7 +1962,7 @@ def _(exp, saps2_pred, saps2_true, sfu, y_test):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu, y_test):
     comparaisons_time = [exp.load_model("InceptionTimeModified"), exp.load_model("LstmTimeModified")]
 
@@ -1971,14 +1970,14 @@ def _(exp, sfu, y_test):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu, y_test):
     comparaisons_ml = [exp.load_model("RandomForest TSFEL", "_balanced"), exp.load_model("XGBoost TSFEL"), exp.load_model("SVC TSFEL")]
     sfu.générer_rapport_comparatif(y_test, comparaisons_ml, save_dir="Comparaison TSFEL", table_format='fancy_grid')
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("kde_plot.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -1988,7 +1987,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("calibration_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -1998,7 +1997,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("roc_curve.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -2008,7 +2007,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("threshold_evolution.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -2018,7 +2017,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("confusion_matrix.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -2028,7 +2027,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("calibPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -2038,7 +2037,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("brierPerTrancheRisk.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
@@ -2048,7 +2047,7 @@ def _(exp, sfu):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(exp, sfu):
     sfu.compare_models_figure("brierPerDec.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", "_balanced"),
     InceptionTime = exp.get_output_path("InceptionTimeModified", ""),
