@@ -55,6 +55,15 @@ class Experiment:
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}.parquet"
     
+    def get_time_path(self, mode, fold_idx):
+        path = Path("inputs") / f"time_{mode}_{self.shortdirname()}"
+        path.mkdir(parents = True, exist_ok = True)
+        return path / f"fold_{fold_idx}.npy"
+    
+    def get_var_path(self):
+        path = Path("inputs")
+        path.mkdir(parents = True, exist_ok = True)
+        return path / f"keepVarTime_{self.shortdirname()}.npy"    
     def get_lasso_path(self, mode, fold_idx, extension):
         path = Path("inputs") / f"lasso_{mode}_{self.shortdirname()}"
         path.mkdir(parents = True, exist_ok = True)

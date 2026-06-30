@@ -131,10 +131,10 @@ def _():
         plt,
         predict_proba,
         predict_proba_lstm,
-        preproc,
         seed,
         sfu,
         sys,
+        torch,
         train_inception_time,
         train_lstm_model,
     )
@@ -811,7 +811,7 @@ def _(
         X = train_init_df
         y = train_init_df[target_col].to_numpy()
         groups = train_init_df[patient_col].to_numpy()
-    return X, groups, train_init_df, train_init_tsfel, y
+    return (X,)
 
 
 @app.cell
@@ -850,31 +850,8 @@ def _(mo):
     return
 
 
-@app.cell
-def _(
-    StratifiedGroupKFold,
-    X,
-    boruta_filter,
-    config_balance,
-    config_models,
-    exp,
-    expected_length,
-    extract,
-    extract_feat,
-    final_features,
-    groups,
-    np,
-    os,
-    patient_col,
-    pl,
-    preproc,
-    seed,
-    target_col,
-    time_col,
-    train_init_df,
-    train_init_tsfel,
-    y,
-):
+app._unparsable_cell(
+    r"""
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
 
     # On stocke les données de tous les folds
@@ -989,6 +966,9 @@ def _(
 
             X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
             X_test_fold = np.nan_to_num(X_test_fold, nan = 0.0)
+            np.save(exp.get_time_path(mode = "train", fold_idx))
+            np.save(exp.get_time_path(mode = "test", fold_idx))
+            np.save(exp.get_var_path(mode = "test", fold_idx))
         else:
             raise ValueError("Modèle inexistant/Pas implémenté")
         # On accumule les données nettoyées du fold en cours
@@ -997,13 +977,9 @@ def _(
         folds_y_train.append(y_train_fold)
         folds_y_test.append(y_test_fold)
     print("Les 5 folds ont été calculé avec succès !")
-    return (
-        folds_X_test,
-        folds_X_train,
-        folds_groups,
-        folds_y_test,
-        folds_y_train,
-    )
+    """,
+    name="_"
+)
 
 
 @app.cell(hide_code=True)
@@ -1201,7 +1177,7 @@ def _(
 
         elif config_models.models_name == "SVC TSFEL" : 
             from sklearn.svm import SVC
-            svc_base = SVC(kernel="rbf", C=1.0, random_state=seed, class_weight=class_weight_choice.value[1:], probability=False)
+            svc_base = SVC(kernel="rbf", C=1.0, random_state=seed, class_weight=class_weight_choice.value[1:], probability=True)
             svc_base.fit(X_train_final_fold, y_train_final)
             final_model_to_save = svc_base
         elif config_models.models_name == "Logistic Regression Lasso TSFEL" :
@@ -1460,7 +1436,7 @@ def _(
             prob_uncalib_fold = None
             prob_calib_fold = None
             X_test_final_numpy = X_test_final.to_numpy() if hasattr(X_test_final, "to_numpy") else X_test_final
-            if calibration.value and(isinstance(clf, CalibratedClassifierCV) or hasattr(clf, "estimator")):
+            if calibration.value and (isinstance(clf, CalibratedClassifierCV) or hasattr(clf, "estimator")):
                 print("    [INFO] Objet de calibration détecté sur le disque.")
                 prob_calib_fold = clf.predict_proba(X_test_final)[:, 1]
                 base_estimator = clf.estimator
@@ -1651,7 +1627,7 @@ def _(
             lr_path_model = LogisticRegression(
                 l1_ratio=1.0,
                 solver='saga',
-                max_iter=1000,
+                max_iter=100001,
                 random_state=seed,
                 warm_start=True
             )
@@ -1713,16 +1689,6 @@ def _(
     return (auc_final,)
 
 
-@app.cell
-def _(df_train_init, folds_y_test, patient_col):
-    total_predictions = sum(len(f) for f in folds_y_test)
-    total_patients_uniques = df_train_init[patient_col].n_unique()
-
-    print(f"Nombre total de patients uniques dans la cohorte : {total_patients_uniques}")
-    print(f"Somme des tailles des 5 jeux de test cumulés : {total_predictions}")
-    return
-
-
 @app.cell(hide_code=True)
 def _(config_models, mo):
     mo.md(rf"""
@@ -1743,13 +1709,6 @@ def _(
 ):
     non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1 = sfu.kde_plot_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
     return asymetric_incertitude, mean_p1, mean_risk_diff, non_overlap_area
-
-
-@app.cell
-def _(exp, sfu):
-    sfu.compare_models_figure("kde_plot.png", RandomForestTSFEL= exp.get_output_path("RandomForest TSFEL", ""),
-    LSTMT = exp.get_output_path("LstmTimeModified", ""))
-    return
 
 
 @app.cell(hide_code=True)
@@ -1888,18 +1847,33 @@ def _(mo):
 
 
 @app.cell
-def _(exp, joblib, np, patient_col, pl, sfu, target_col):
+def _(config_models, exp, joblib, np, patient_col, pl, sfu, target_col, torch):
     show_shap = {}
-    model_name_shap = "XGBoost TSFEL"
+    model_name_shap = config_models.models_name
 
     for f_idx in range(5):
         output_dir_shap = exp.get_output_path(model_name_shap) / f"fold_{f_idx}"
         output_dir_shap.mkdir(parents = True, exist_ok = True)
-        loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".joblib",  "",)
-        X_train_fold_shap = exp.get_tsfel_boruta("train", f_idx)
-        keepVariableList_shap = X_train_fold_shap.parent / f"keepVariableList_2_fold_{f_idx}.npy"
-        clf_shap = joblib.load(loaded_model_shap)
-        sfu.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
+        if config_models.extraction_type == "TSFEL":
+            X_train_fold_shap = exp.get_tsfel_boruta("train", f_idx)
+            keepVariableList_shap = X_train_fold_shap.parent / f"keepVariableList_2_fold_{f_idx}.npy"
+            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".joblib",  "",)
+            clf_shap = joblib.load(loaded_model_shap)
+
+            sfu.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
+        
+        else:
+            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".pt",  "",)
+            checkpoint = torch.load(loaded_model_shap, weights_only = False)
+            if config_models.models_name == "InceptionTimeModified":
+                from utilitaries.models.inceptionTimeModified import InceptionModel
+                varnames_3d = np.load(exp.get_var_path())
+                X_train_3d = np.load(exp.get_time_path(mode="train", fold_idx = f_idx))
+                clf_shap = InceptionModel(**checkpoint['init_args'])
+                clf_shap.load_state_dict(checkpoint['state_dict'])
+                clf_shap.eval()
+                print("Le modèle InceptionModel a été instancié et chargé avec succès !")
+            sfu.mesureImportance_tsfel(clf_shap, X_train_3d, varnames_3d, top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
         show_shap[f"XGB_{f_idx}"] = output_dir_shap
     return
 

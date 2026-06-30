@@ -19,6 +19,13 @@ import tsfel.feature_extraction.features as tsfel_feats
 tsfel_feats.hist_mode = lambda signal, nbins=10: 0.0
 tsfel_feats.hist_entropy = lambda signal, nbins=10: 0.0
 
+with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation.*",
+            category=RuntimeWarning,
+        )
+        
 def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
     """Fonction atomique exécutée en parallèle pour un patient donné."""
     with warnings.catch_warnings():
@@ -48,7 +55,12 @@ def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
 
 
 def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_col):
-        
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Precision loss occurred in moment calculation.*",
+                category=RuntimeWarning,
+            )
         # 1. Tri et préparation de la config TSFEL
         df = df.sort([patient_col, time_col])
         cfg = tsfel.get_features_by_domain()

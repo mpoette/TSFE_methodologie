@@ -75,7 +75,7 @@ def create_merged_dataset(df_static, df_dynamic, remove_continuous_monitoring, m
     
     # Nettoyage des colonnes temporaires avant le join
     df_static = df_static.drop(["temp_lower"])
-    # Join entre les 2
+    # Join entre les 2 (duplication des données statiques pour correspondre au nombre de ligne de df_dynamic)
     df_merged = df_dynamic.join(df_static, on=extract.ID_COL, how='inner')
 
     # Sécurité d'ordre

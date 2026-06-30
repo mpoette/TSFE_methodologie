@@ -344,14 +344,23 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     varnames : liste ou array des noms de ces features
     """
     np.random.seed(seed)
-    X_train = X_train.to_pandas()
-    X_arr = X_train.values if isinstance(X_train, pd.DataFrame) else np.asarray(X_train)
+    if isinstance(X_train, pl.DataFrame):
+        X_train = X_train.to_pandas()
+    
+    if isinstance(X_train, pd.DataFrame):
+        X_arr = X_train.values
+    else:
+        X_arr = np.asarray(X_train) # Conserve le format 3D pour InceptionTime
+        
     varnames = list(varnames)
     
     # On ajuste top_n si on a moins de features que prévu
     k = int(min(top_n, len(varnames)))
-
+    # Si c'est un GridSearchCV / RandomizedSearchCV, on prend le meilleur modèle
+    if hasattr(model, 'best_estimator_'):
+        model = model.best_estimator_
     # ----- 1) Importances "forêt" -----
+    importances = None
     # Gestion des modèles calibrés pour récupérer l'importance des features
     if hasattr(model, 'feature_importances_'):
         importances = model.feature_importances_
@@ -362,41 +371,46 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
             for clf in model.calibrated_classifiers_
         ], axis=0)
     else:
-        raise AttributeError("Le modèle fourni n'a pas d'attribut 'feature_importances_' ni d'estimateur calibré accessible.")
-    sorted_idx = np.argsort(importances)[::-1]
-    sorted_varnames = np.array(varnames)[sorted_idx]
-    sorted_importances = importances[sorted_idx]
-    plt.figure(figsize=(12, 4))
-    plt.bar(range(k), sorted_importances[:k])
-    plt.xticks(range(k), sorted_varnames[:k], rotation=90)
-    plt.ylabel("Importance (forest)")
-    plt.tight_layout()
-    if savefig:
-        plt.savefig(f"{folder}/feature_importance.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/feature_importance.png", dpi=300, bbox_inches="tight")
-    plt.show()
+        print("⚠️ Ce modèle ne supporte pas 'feature_importances_'.")
+        print("   -> Saut de l'étape MDI, passage direct à l'analyse SHAP.")
+    if importances is not None:
+        sorted_idx = np.argsort(importances)[::-1]
+        sorted_varnames = np.array(varnames)[sorted_idx]
+        sorted_importances = importances[sorted_idx]
+        plt.figure(figsize=(12, 4))
+        plt.bar(range(k), sorted_importances[:k])
+        plt.xticks(range(k), sorted_varnames[:k], rotation=90)
+        plt.ylabel("Importance (forest)")
+        plt.tight_layout()
+        if savefig:
+            plt.savefig(f"{folder}/feature_importance.pdf", bbox_inches="tight", transparent=transparent)
+            plt.savefig(f"{folder}/feature_importance.png", dpi=300, bbox_inches="tight")
+        plt.show()
 
-    # Pareil mais cumulé : 
-    suffixes = feu.generer_suffixes_tsfel()
-    racines_varnames = [feu.extraire_racine(name, suffixes) for name in varnames]
-    df_mdi = pd.DataFrame({
-        'Feature_Globale': racines_varnames,
-        'Importance': importances
-    })
-    # On additionne les importances des sous-features appartenant à la même feature globale
-    df_mdi_agg = df_mdi.groupby('Feature_Globale').sum().sort_values(by='Importance', ascending=False)
-    k_agg = int(min(top_n, len(df_mdi_agg)))
-    
-    plt.figure(figsize=(12, 4))
-    plt.bar(range(k_agg), df_mdi_agg['Importance'].head(k_agg))
-    plt.xticks(range(k_agg), df_mdi_agg.index[:k_agg], rotation=90)
-    plt.ylabel("Cumulative Global Importance (forest)")
-    plt.title("Top Global Feature Importance (MDI)")
-    plt.tight_layout()
-    if savefig:
-        plt.savefig(f"{folder}/global_feature_importance_mdi.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/global_feature_importance_mdi.png", dpi=300, bbox_inches="tight")
-    plt.show()
+        # Pareil mais cumulé : 
+        suffixes = feu.generer_suffixes_tsfel()
+        racines_varnames = [feu.extraire_racine(name, suffixes) for name in varnames]
+        df_mdi = pd.DataFrame({
+            'Feature_Globale': racines_varnames,
+            'Importance': importances
+        })
+        # On additionne les importances des sous-features appartenant à la même feature globale
+        df_mdi_agg = df_mdi.groupby('Feature_Globale').sum().sort_values(by='Importance', ascending=False)
+        k_agg = int(min(top_n, len(df_mdi_agg)))
+        
+        plt.figure(figsize=(12, 4))
+        plt.bar(range(k_agg), df_mdi_agg['Importance'].head(k_agg))
+        plt.xticks(range(k_agg), df_mdi_agg.index[:k_agg], rotation=90)
+        plt.ylabel("Cumulative Global Importance (forest)")
+        plt.title("Top Global Feature Importance (MDI)")
+        plt.tight_layout()
+        if savefig:
+            plt.savefig(f"{folder}/global_feature_importance_mdi.pdf", bbox_inches="tight", transparent=transparent)
+            plt.savefig(f"{folder}/global_feature_importance_mdi.png", dpi=300, bbox_inches="tight")
+        plt.show()
+    else:
+        suffixes = feu.generer_suffixes_tsfel()
+        racines_varnames = [feu.extraire_racine(name, suffixes) for name in varnames]
     # ----- 2) SHAP -----
     X_pure_numpy = np.array(X_arr, dtype = np.float32)
     shap_model = model
