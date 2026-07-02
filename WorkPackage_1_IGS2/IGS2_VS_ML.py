@@ -131,6 +131,7 @@ def _():
         plt,
         predict_proba,
         predict_proba_lstm,
+        preproc,
         seed,
         sfu,
         sys,
@@ -687,7 +688,7 @@ def _(mo):
 
 
 @app.cell
-def _(cs, df_clean_2, keep_features, modex, pl, target_col):
+def _(config_models, cs, df_clean_2, keep_features, modex, pl, target_col):
     # On passe le type d'admission en one hot encoding avec polars 
     df_clean_3 = (
         df_clean_2
@@ -712,11 +713,21 @@ def _(cs, df_clean_2, keep_features, modex, pl, target_col):
     if "admission_type" in keep_features:
         keep_features.remove("admission_type") 
         keep_features.extend(cols_admission)
+
     final_features = list(dict.fromkeys(keep_features))
-    print(final_features)
+
+    assert target_col not in final_features, f"Alerte Leakage : {target_col} est présente dans les features !"
+    print(f"Nombre de features envoyées au {config_models.models_name} : {len(final_features)} : {final_features}")
+
     X_init = df_clean_3.select(final_features).to_numpy()
     y_init = df_clean_3[target_col].to_numpy()
     return X_init, df_clean_3, final_features, y_init
+
+
+@app.cell
+def _(keep_features):
+    print(keep_features)
+    return
 
 
 @app.cell
@@ -811,7 +822,13 @@ def _(
         X = train_init_df
         y = train_init_df[target_col].to_numpy()
         groups = train_init_df[patient_col].to_numpy()
-    return (X,)
+    return X, groups, train_init_df, train_init_tsfel, y
+
+
+@app.cell
+def _(X):
+    X.describe()
+    return
 
 
 @app.cell
@@ -850,8 +867,31 @@ def _(mo):
     return
 
 
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(
+    StratifiedGroupKFold,
+    X,
+    boruta_filter,
+    config_balance,
+    config_models,
+    exp,
+    expected_length,
+    extract,
+    extract_feat,
+    final_features,
+    groups,
+    np,
+    os,
+    patient_col,
+    pl,
+    preproc,
+    seed,
+    target_col,
+    time_col,
+    train_init_df,
+    train_init_tsfel,
+    y,
+):
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
 
     # On stocke les données de tous les folds
@@ -966,9 +1006,8 @@ app._unparsable_cell(
 
             X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
             X_test_fold = np.nan_to_num(X_test_fold, nan = 0.0)
-            np.save(exp.get_time_path(mode = "train", fold_idx))
-            np.save(exp.get_time_path(mode = "test", fold_idx))
-            np.save(exp.get_var_path(mode = "test", fold_idx))
+            np.save(exp.get_time_path(mode = "train", fold_idx = fold_idx), X_train_fold)
+            np.save(exp.get_time_path(mode = "test", fold_idx = fold_idx), X_test_fold)
         else:
             raise ValueError("Modèle inexistant/Pas implémenté")
         # On accumule les données nettoyées du fold en cours
@@ -976,10 +1015,15 @@ app._unparsable_cell(
         folds_X_test.append(X_test_fold)
         folds_y_train.append(y_train_fold)
         folds_y_test.append(y_test_fold)
+    np.save(exp.get_var_path(), final_features)
     print("Les 5 folds ont été calculé avec succès !")
-    """,
-    name="_"
-)
+    return (
+        folds_X_test,
+        folds_X_train,
+        folds_groups,
+        folds_y_test,
+        folds_y_train,
+    )
 
 
 @app.cell(hide_code=True)
@@ -1861,7 +1905,7 @@ def _(config_models, exp, joblib, np, patient_col, pl, sfu, target_col, torch):
             clf_shap = joblib.load(loaded_model_shap)
 
             sfu.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
-        
+
         else:
             loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".pt",  "",)
             checkpoint = torch.load(loaded_model_shap, weights_only = False)

@@ -51,25 +51,46 @@ PRIORITY_PROFILE = (1, 1)   # protect this class first
 def prepare_labels(df, mode):
     if mode == "relative":
         return df.with_columns([
+            # H24 (delta + 24h)
             ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
              (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24))
             .fill_null(False).alias("isDeceased_lt_24h"),
             
+            # J7 (delta + 168h)
+            ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
+             (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 168))
+            .fill_null(False).alias("isDeceased_lt_7d"),
+            
+            # J28 (delta + 672h)
             ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
              (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 672))
-            .fill_null(False).alias("isDeceased_lt_28d")
+            .fill_null(False).alias("isDeceased_lt_28d"),
+            
+            # 3 Mois / J90 (delta + 2160h)
+            ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
+             (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 2160))
+            .fill_null(False).alias("isDeceased_lt_3m")
         ])
+        
     elif mode == "absolute":
         return df.with_columns([
             (pl.col("deces_datediff_days") * 24 <= 24).fill_null(False).alias("isDeceased_lt_24h"),
-            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d")
+            (pl.col("deces_datediff_days") <= 7).fill_null(False).alias("isDeceased_lt_7d"),
+            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d"),
+            (pl.col("deces_datediff_days") <= 90).fill_null(False).alias("isDeceased_lt_3m")
         ])
+        
     elif mode == "mixed": 
         return df.with_columns([
+            # H24 reste en relatif
             ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
              (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24))
             .fill_null(False).alias("isDeceased_lt_24h"),
-            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d")
+            
+            # Le reste passe en absolu à partir de J0
+            (pl.col("deces_datediff_days") <= 7).fill_null(False).alias("isDeceased_lt_7d"),
+            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d"),
+            (pl.col("deces_datediff_days") <= 90).fill_null(False).alias("isDeceased_lt_3m")
         ])
 
 # ──────────────────────────────────────────────

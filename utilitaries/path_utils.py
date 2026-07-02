@@ -2,7 +2,7 @@ from pathlib import Path
 import joblib
 
 class Experiment:
-    def __init__(self, config_mode, config_cleaning, config_y, str_balance_method, modex, class_weight_choice, str_pop, seed):
+    def __init__(self, config_mode, config_cleaning, config_y, str_balance_method, modex, class_weight_choice, str_pop, seed, stratify_mode = ""):
         self.clean = config_cleaning.clean
         self.target_name = config_y.target_name
         self.str_balance_method = str_balance_method
@@ -11,6 +11,7 @@ class Experiment:
         self.str_pop = str_pop
         self.seed = seed
         self.config_mode = config_mode.name
+        self.stratify_mode = stratify_mode
 
     @property
     def dirname(self):
@@ -18,29 +19,36 @@ class Experiment:
         return (
             f"Clean_{self.clean}_{self.target_name}_"
             f"{self.str_balance_method}{self.modex}"
-            f"{self.class_weight}{self.str_pop}_seed_{self.seed}"
+            f"{self.class_weight}{self.str_pop}_seed_{self.seed}{self.stratify_mode}"
         )
     
-    def shortdirname(self, class_weight = ""):
+    def shortdirname(self, class_weight = "", config_mode = ""):
         return (
-            f"Clean_{self.clean}_{self.target_name}_"
+            f"Clean_{config_mode}{self.clean}_{self.target_name}_"
             f"{self.str_balance_method}{self.modex}"
-            f"{class_weight}{self.str_pop}_seed_{self.seed}"
+            f"{class_weight}{self.str_pop}_seed_{self.seed}{self.stratify_mode}"
         )
 
-    def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight = "",):
+    def veryShortDirName(self, class_weight = ""):
+        return (
+            f"Clean_{config_mode}{self.clean}_"
+            f"{self.modex}"
+            f"{self.str_pop}_seed_{self.seed}{self.stratify_mode}"
+        )
+
+    def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight = "", config_mode = ""):
         """Retourne le chemin d'un fold spécifique et crée le dossier parent s'il manque."""
-        path = Path("models") / model_name / self.shortdirname(class_weight)
+        path = Path("models") / model_name / self.shortdirname(class_weight, config_mode)
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}{extension}"
     
-    def get_output_path(self, model_name, class_weight = ""):
-        path = Path("outputs") / model_name / self.shortdirname(class_weight)
+    def get_output_path(self, model_name, class_weight = "", config_mode = ""):
+        path = Path("outputs") / model_name / self.shortdirname(class_weight, config_mode)
         path.mkdir(parents=True, exist_ok=True)
         return path
     
-    def load_model(self, model_name, class_weight = "", name_file = "all_res.joblib"):
-        file_path = self.get_output_path(model_name, class_weight) / name_file
+    def load_model(self, model_name, class_weight = "", name_file = "all_res.joblib", config_mode = ""):
+        file_path = self.get_output_path(model_name, class_weight, config_mode) / name_file
         if not file_path.exists():
             raise FileNotFoundError(f"Fichier introuvable : {file_path}")
         return model_name, joblib.load(file_path)
@@ -50,21 +58,26 @@ class Experiment:
         path.mkdir(parents=True, exist_ok=True)
         return path / f"tsfel_global_brut_{self.config_mode}_{self.clean}_{self.target_name}_{self.modex}.parquet"
     
-    def get_tsfel_boruta(self, mode, fold_idx):
-        path = Path("inputs") / f"tsfel_{mode}_{self.shortdirname()}"
+    def get_tsfel_boruta(self, mode, fold_idx, config_mode = ""):
+        path = Path("inputs") / f"tsfel_{mode}_{self.shortdirname(config_mode = config_mode)}"
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}.parquet"
     
-    def get_time_path(self, mode, fold_idx):
-        path = Path("inputs") / f"time_{mode}_{self.shortdirname()}"
+    def get_time_path(self, mode, fold_idx, config_mode = ""):
+        path = Path("inputs") / f"time_{mode}_{self.shortdirname(config_mode = config_mode)}"
         path.mkdir(parents = True, exist_ok = True)
         return path / f"fold_{fold_idx}.npy"
     
-    def get_var_path(self):
+    def get_var_path(self, config_mode = ""):
         path = Path("inputs")
         path.mkdir(parents = True, exist_ok = True)
-        return path / f"keepVarTime_{self.shortdirname()}.npy"    
-    def get_lasso_path(self, mode, fold_idx, extension):
-        path = Path("inputs") / f"lasso_{mode}_{self.shortdirname()}"
+        return path / f"keepVarTime_{self.shortdirname(config_mode = config_mode)}.npy"    
+    def get_lasso_path(self, mode, fold_idx, extension, config_mode = ""):
+        path = Path("inputs") / f"lasso_{mode}_{self.shortdirname(config_mode = config_mode)}"
         path.mkdir(parents = True, exist_ok = True)
         return path / f"fold_{fold_idx}.{extension}"
+
+    def get_resampling_path(self, target_length, class_weight = ""):
+        path = Path("inputs")
+        path.mkdir(parents = True, exist_ok = True)
+        return path / f"resampling_{target_length}_{self.veryShortDirName(class_weight)}.parquet"    
