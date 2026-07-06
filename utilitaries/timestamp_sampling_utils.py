@@ -38,8 +38,8 @@ from collections import defaultdict
 
 SANCTUARY_HOURS = 6
 MIN_OBSERVATION_HOURS = 24
-LOMAX_ALPHA = 1.5
-LOMAX_LAMBDA = 1.0
+LOMAX_ALPHA = 4.3085
+LOMAX_LAMBDA = 1161.9368
 RANDOM_SEED = 42
 
 PRIORITY_PROFILE = (1, 1)   # protect this class first
@@ -313,20 +313,17 @@ def draw_timestamps(
     # 3. Tri chronologique indispensable pour le calcul des cumsums
     df_assigned = df_assigned.sort(["encounterId", "delta_hour"])
 
-    # 4. Calcul des positions relatives [0, 1] par fenêtre patient via fenêtrage (.over)
+    # 4. Au lieu d'une position [0, 1], on calcule le nombre d'heures réelles 
+    # qui séparent la ligne actuelle de la fin de la fenêtre de ce profil.
     df_assigned = df_assigned.with_columns([
-        pl.col("delta_hour").min().over("encounterId").alias("h_min"),
-        pl.col("delta_hour").max().over("encounterId").alias("h_max"),
+        pl.col("delta_hour").max().over("encounterId").alias("h_max")
     ]).with_columns(
-        pl.when(pl.col("h_max") > pl.col("h_min"))
-        .then((pl.col("delta_hour") - pl.col("h_min")) / (pl.col("h_max") - pl.col("h_min")))
-        .otherwise(0.0)
-        .alias("position")
+        (pl.col("h_max") - pl.col("delta_hour")).alias("distance_fin_zone")
     )
 
     # 5. Calcul des poids Lomax en une seule passe NumPy
-    positions_np = df_assigned["position"].to_numpy()
-    raw_weights = lomax.pdf(positions_np, c=lomax_alpha, scale=lomax_lambda)
+    distances_np = df_assigned["distance_fin_zone"].to_numpy()
+    raw_weights = lomax.pdf(distances_np, c=lomax_alpha, scale=lomax_lambda)
 
     # 6. Normalisation des poids à l'échelle de chaque patient
     df_assigned = df_assigned.with_columns(pl.Series("raw_weight", raw_weights))
@@ -368,7 +365,7 @@ def draw_timestamps(
 
     # Nettoyage final des colonnes de calcul pour coller au schéma d'origine
     cols_to_drop = [
-        "assigned_h24", "assigned_j28", "h_min", "h_max", "position", 
+        "assigned_h24", "assigned_j28", "h_max", "distance_fin_zone", 
         "raw_weight", "total_weight", "weight", "cum_weight", "u", 
         "max_hour", "min_candidate_hour"
     ]

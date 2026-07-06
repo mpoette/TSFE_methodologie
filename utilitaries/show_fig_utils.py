@@ -649,12 +649,12 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
         plt.savefig(f"{folder}/comparison_{figname}", dpi=300, bbox_inches="tight")
     plt.show()
 
-def générer_rapport_comparatif(y_true, configurations, save_dir=None, table_format='fancy_grid', saps2_pred = None, saps2_true = None):
+def générer_rapport_comparatif(configurations, y_true_base = None, save_dir=None, table_format='fancy_grid', saps2_pred = None, saps2_true = None):
     """
     Génère un tableau comparatif et une courbe ROC unique à partir de scores et 
     de prédictions déjà calculés.
 
-    y_true : tableau des vraies étiquettes (ex: y_test ou y_news)
+    y_true_base : tableau des vraies étiquettes 
     configurations : dictionnaire contenant les scores, prédictions et couleurs pour chaque modèle
     """
     results = {}
@@ -664,9 +664,12 @@ def générer_rapport_comparatif(y_true, configurations, save_dir=None, table_fo
     for name, config in configurations:
         # Extraction des vecteurs précalculés
         probas = config['probas']
-
+        if y_true_base is None:
+            y_true = config['y_true']
+        else:
+            y_true = y_true_base
+            
         # Calcul des métriques
-
         f1 = config['f1_score']
         mcc = config['mcc']
         auc = config['auc']
@@ -718,3 +721,37 @@ def générer_rapport_comparatif(y_true, configurations, save_dir=None, table_fo
     plt.show()
 
     return df_results
+
+
+
+def plot_collected_learning_curve(sample_sizes, train_matrix, val_matrix, model_name="Model",  folder = "", savefig = True, transparent = True):
+    """
+    Trace la courbe d'apprentissage récoltée en direct pendant le training des folds.
+    
+    train_matrix : np.array de shape [5_folds, n_paliers]
+    val_matrix   : np.array de shape [5_folds, n_paliers]
+    """
+
+    # Calcul des moyennes et std sur l'axe des folds (axis=0)
+    train_mean = np.mean(train_matrix, axis=0)
+    val_mean = np.mean(val_matrix, axis=0)
+    val_std = np.std(val_matrix, axis=0)
+    
+    plt.figure(figsize=(10, 5))
+    
+    # Courbe de Train
+    plt.plot(sample_sizes, train_mean, "o-", color="crimson", label="Training Score (Mean)", linewidth=2)
+    
+    # Courbe de Validation Out-Of-Fold avec son ombre de volatilité
+    plt.plot(sample_sizes, val_mean, "o-", color="royalblue", label="Validation Score (Mean OOF)", linewidth=2)
+    plt.fill_between(sample_sizes, val_mean - val_std, val_mean + val_std, alpha=0.15, color="royalblue", label="OOF Volatility (± 1 STD)")
+    
+    plt.title(f"Learning Curve — {model_name} (Embedded Fold Splitting)", fontsize=13, fontweight="bold")
+    plt.xlabel("Number of Training Samples (Aggregated)")
+    plt.ylabel("AUC-ROC Score")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    if savefig:
+        plt.savefig(f"{folder}/learning_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
+    plt.show()
