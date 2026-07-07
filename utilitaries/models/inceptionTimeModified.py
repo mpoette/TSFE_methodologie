@@ -395,6 +395,8 @@ def train_inception_time(
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
     progress: bool = True,
     seed : int = 42,
+    X_val: Optional[np.ndarray] = None,  # <-- AJOUT : Paramètre optionnel
+    y_val: Optional[np.ndarray] = None,  # <-- AJOUT : Paramètre optionnel
 ) -> Tuple[InceptionModel, float, Dict[str, list], Dict[str, np.ndarray]]:
     """
     Entraîne InceptionTime from scratch avec toutes les améliorations.
@@ -438,24 +440,40 @@ def train_inception_time(
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    
+
     # Générateur déterministe pour le DataLoader
     gen = torch.Generator()
     gen.manual_seed(seed)
-    # Split stratifié
-    train_idx, val_idx = stratified_train_val_indices(y, val_ratio=val_ratio, seed=seed)
+    if X_val is not None and y_val is not None:
+        assert X_val.ndim == 3, f"X_val doit être (N,T,F), reçu shape {X_val.shape}"
+        assert X_val.shape[0] == y_val.reshape(-1).shape[0], "Mismatch N entre X_val et y_val"
+        assert X_val.shape[2] == X.shape[2], "Mismatch de features entre X et X_val"
+        
+        # On utilise les jeux passés en paramètres directement
+        train_ds = TimeSeriesDataset(X, y)
+        val_ds = TimeSeriesDataset(X_val, y_val)
+        
+        # Remplissage par défaut pour éviter de casser les dictionnaires de splits retournés
+        train_idx = np.arange(len(X))
+        val_idx = np.arange(len(X_val))
+    else:
+        # Ancien comportement : Split stratifié automatique
+        train_idx, val_idx = stratified_train_val_indices(y, val_ratio=val_ratio, seed=seed)
+        ds = TimeSeriesDataset(X, y)
+        train_ds = Subset(ds, train_idx)
+        val_ds = Subset(ds, val_idx)
     
     # DataLoaders
     ds = TimeSeriesDataset(X, y)
     train_loader = DataLoader(
-        Subset(ds, train_idx),
+        train_ds,
         batch_size=batch_size,
         shuffle=True,
         pin_memory=(device.type == 'cuda'),
-        generator = gen
+        generator=gen
     )
     val_loader = DataLoader(
-        Subset(ds, val_idx),
+        val_ds,
         batch_size=batch_size,
         shuffle=False,
         pin_memory=(device.type == 'cuda')
@@ -610,7 +628,10 @@ def train_inception_time(
     if calibrate:
         print("Calibration température sur validation...")
         logits_val = _gather_logits(model, val_loader, device)
-        y_val = torch.from_numpy(y.reshape(-1)[val_idx]).to(device)
+        if X_val is not None and y_val is not None:
+            y_val = torch.from_numpy(y_val.reshape(-1)).float().to(device)
+        else:
+            y_val = torch.from_numpy(y.reshape(-1)[val_idx]).to(device)
         
         if logits_val.ndim == 1:
             logits_val = logits_val.unsqueeze(-1)

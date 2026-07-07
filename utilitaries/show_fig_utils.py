@@ -24,7 +24,7 @@ from pathlib import Path
 
 def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global, 
                              model_name, extraction_type, calibration, save_figure, 
-                             output_dir, transparent):
+                             output_dir, transparent, calibration_mode = "Platt"):
     
     plt.figure(figsize=(8, 6))
     plt.plot([0, 1], [0, 1], "k:", label="Perfect calibration")
@@ -36,7 +36,7 @@ def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global,
     # Courbe calibrée (Uniquement affichée pour TSFEL si demandée)
     if extraction_type == "TSFEL" and calibration:
         fraction_pos_calib, mean_pred_calib = calibration_curve(y_test_global, probas_calib, n_bins=10)
-        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label="After calibration (Platt)")
+        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label=f"After calibration ({calibration_mode[1:]})")
 
     plt.ylabel("True fraction of positives")
     plt.xlabel("Mean predicted probability")
@@ -749,6 +749,7 @@ def plot_collected_learning_curve(sample_sizes, train_matrix, val_matrix, model_
     plt.title(f"Learning Curve — {model_name} (Embedded Fold Splitting)", fontsize=13, fontweight="bold")
     plt.xlabel("Number of Training Samples (Aggregated)")
     plt.ylabel("AUC-ROC Score")
+    plt.ylim(0.6, 1)
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.legend(loc="lower right")
     plt.tight_layout()
