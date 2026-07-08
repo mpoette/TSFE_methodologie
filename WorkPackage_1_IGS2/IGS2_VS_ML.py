@@ -62,6 +62,7 @@ def _():
     import optuna
     import pandas as pd
     import polars as pl
+    import polars.selectors as cs
     import seaborn as sns
     import tsfel
     from sklearn.metrics import (
@@ -89,6 +90,9 @@ def _():
     import utilitaries.preprocessing_utils as ui
     import utilitaries.path_utils as path_utils
     import utilitaries.show_fig_utils as sfu
+    import utilitaries.training_utils as training
+    import utilitaries.evaluate_utils as evaluate
+    import utilitaries.shared_ui as spl
     from utilitaries.models.inceptionTimeModified import (
         evaluate_on_test,
         load_model_from_checkpoint,
@@ -103,44 +107,32 @@ def _():
     )
     pl.Config.set_tbl_cols(-1)
     return (
-        CalibratedClassifierCV,
-        Counter,
-        FrozenEstimator,
-        GridSearchCV,
         LogisticRegression,
         Parallel,
         Path,
         StratifiedGroupKFold,
         classification_report,
         create_merged_dataset,
+        cs,
         delayed,
-        evaluate_lstm_on_test,
-        evaluate_on_test,
+        evaluate,
         extract,
         extract_feat,
         joblib,
         json,
-        load_lstm_from_checkpoint,
-        load_model_from_checkpoint,
         mo,
         mo_utils,
         np,
         os,
         path_utils,
-        pd,
         pl,
         plt,
-        predict_proba,
-        predict_proba_lstm,
         preproc,
-        roc_auc_score,
-        roc_curve,
         seed,
         sfu,
-        sys,
+        spl,
         torch,
-        train_inception_time,
-        train_lstm_model,
+        training,
     )
 
 
@@ -153,98 +145,56 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    transparent = mo.ui.dropdown(options = {"Oui" : True, "Non" : False},
-                                value = "Non",
-                                label = "Rendre les figures transparentes")
-    return (transparent,)
+def _(mo, spl):
+    uid = mo.ui.dictionary(spl.create_pipeline_widgets())
+    return (uid,)
 
 
 @app.cell
-def _(plt, transparent):
-    if not transparent.value:
-        plt.rcParams["figure.facecolor"] = "white"
-        plt.rcParams['axes.facecolor'] = "white"
-        plt.rcParams['savefig.facecolor'] = "white"
-    return
-
-
-@app.cell
-def _(mo, mo_utils):
-    cleaning = mo.ui.dropdown(
-        options=mo_utils.CLEAN,
-        value = "Enlever Surveillance Continue",
-        label = "Nettoyage des patients en SC",
-    )
-    return (cleaning,)
-
-
-@app.cell
-def _(mo, mo_utils):
-    mode = mo.ui.dropdown(
-        options=mo_utils.MODES,
-        value="24h début réanimation sans remplissage",
-        label="Mode de fenêtrage",
-    )
-    return (mode,)
-
-
-@app.cell
-def _(mo):
-    type_donnees = mo.ui.dropdown(
-        options = {"modèle" : "modèle", "score" : "score"},
-        value = "modèle",
-        label = "Type de données affichées pour les figures (score ou modèle)"
-    )
-    return (type_donnees,)
-
-
-@app.cell
-def _(mo, mo_utils, type_donnees):
-    if type_donnees.value == "modèle":
-        models = mo.ui.dropdown(
-        options=mo_utils.MODELS,
-        value="InceptionTimeModified",
-        label="Modèle utilisé",
-        )
-        value_models = "InceptionTimeModified"
-    else:
-        models = mo.ui.dropdown(
-        options=mo_utils.SCORE,
-        value="IGS2",
-        label="Score utilisé",
-        )
+def _(spl, uid):
+    # 1. Gestion des widgets dynamiques dépendants
+    models = spl.get_model_dropdown(uid["type_donnees"].value)
     return (models,)
 
 
 @app.cell
-def _(mo, mo_utils):
-    modex = mo.ui.dropdown(
-        options = list(mo_utils.FEAT.keys()),
-        value = "Mode IGS2",
-        label = "Choix des features gardées",
+def _(models, spl, uid):
+    calibration, calibration_mode = spl.get_calibration_widgets(models.value)
+    save_figure = uid["save_figure"]
+    config_mode = uid["mode"].value
+    config_models = models.value
+    config_cleaning = uid["cleaning"].value
+    config_y = uid["y_dd"].value
+    config_keep_pop = uid["keep_pop"].value
+    config_balance = uid["balance"].value
+    config_transparent = uid["transparent"].value
+    config_boruta = uid["boruta_filter"].value
+    modex = uid["modex"]
+    type_donnees = uid["type_donnees"]
+    return (
+        calibration,
+        calibration_mode,
+        config_balance,
+        config_boruta,
+        config_cleaning,
+        config_keep_pop,
+        config_mode,
+        config_models,
+        config_transparent,
+        config_y,
+        modex,
+        save_figure,
+        type_donnees,
     )
-    return (modex,)
 
 
 @app.cell
-def _(mo, mo_utils):
-    balance = mo.ui.dropdown(
-        options = mo_utils.BALANCE,
-        value = "Aucune Méthode",
-        label = "Méthode pour équilibrer les charges"
-    )
-    return (balance,)
-
-
-@app.cell
-def _(mo, mo_utils):
-    y_dd =  mo.ui.dropdown(
-        options=mo_utils.Y,
-        value="Survie à 28 jours",
-        label="Cible (y) à prédire",
-    )
-    return (y_dd,)
+def _(config_transparent, plt):
+    if not config_transparent:
+        plt.rcParams["figure.facecolor"] = "white"
+        plt.rcParams['axes.facecolor'] = "white"
+        plt.rcParams['savefig.facecolor'] = "white"
+    return
 
 
 @app.cell
@@ -274,112 +224,21 @@ def _(mo):
 @app.cell
 def _(mo):
     run_optuna = mo.ui.run_button(
-        label=f"Lancer la recherche d'hyperparamètres du modèle"
+        label=f"Lancer la recherche d'hyperparamètres"
     )
     return (run_optuna,)
 
 
 @app.cell
-def _(mo):
-    save_figure = mo.ui.dropdown(options = {"Oui" : True, "Non" : False},
-                                value = "Oui",
-                                label = "Sauvegarder les figures")
-    return (save_figure,)
-
-
-@app.cell
-def _(config_models, mo):
-    if config_models.models_type == "calibrated":
-        bool_calib_str = "Non"
-        calib_mode_str = "Platt"
-    else:
-        bool_calib_str = "Oui"
-        calib_mode_str = "Temperature Scaling"
-    calibration = mo.ui.dropdown(options = {"Oui" : True, "Non" : False},
-                                value = bool_calib_str,
-                                label = "Activer la calibration du modèle")
-
-
-    calibration_mode = mo.ui.dropdown(options = {"Platt" : "_platt", "Temperature Scaling" : "_temperature_scaling"},
-                                value = calib_mode_str,
-                                label = "Choisir la méthode de calibration")
-    return calibration, calibration_mode
-
-
-@app.cell
-def _(mo):
-    boruta_filter = mo.ui.dropdown(options = {"Oui" : True, "Non" : False},
-                                value = "Oui",
-                                label = "Filtre Boruta")
-    return (boruta_filter,)
-
-
-@app.cell
-def _(mo, mo_utils):
-    keep_pop = mo.ui.dropdown(
-        options = mo_utils.POPULATION,
-        value = "Tout",
-        label = "Type de patients que l'on veut garder (ICU_DP filter)")
-    return (keep_pop,)
-
-
-@app.cell
-def _(boruta_filter, calibration, calibration_mode, config_models, mo):
-    if config_models.extraction_type == "TSFEL" :
-        extract_tsfel = mo.ui.dropdown(
-            options = {"Oui" : True, "Non" : False},
-            value = "Non",
-            label = "Extraire les données TSFEL"
-        )
-        class_weight_choice = mo.ui.dropdown(options = {"balanced" : "_balanced", "balanced_subsample" : "_balanced_subsample"},
-                                value = "balanced",
-                                label = "class_weight")
-
-        ui_tsfel = mo.vstack([extract_tsfel, boruta_filter, calibration, calibration_mode, class_weight_choice])
-        if config_models.models_type == "calibrated":
-            ui_tsfel = mo.vstack([extract_tsfel, boruta_filter, class_weight_choice])
-    else :
-        class_weight_choice = mo.ui.dropdown(options = {"" : ""},
-                                value = "")
-        extract_tsfel = None
-        ui_tsfel = mo.md("")
+def _(calibration, calibration_mode, config_boruta, config_models, spl):
+    ui_tsfel, extract_tsfel, class_weight_choice = spl.get_tsfel_ui_components(
+        extraction_type=config_models.extraction_type,
+        models_type=config_models.models_type,
+        boruta_filter=config_boruta,
+        calibration=calibration,
+        calibration_mode=calibration_mode
+    )
     return class_weight_choice, extract_tsfel, ui_tsfel
-
-
-@app.cell
-def _(mode):
-    config_mode = mode.value
-    return (config_mode,)
-
-
-@app.cell
-def _(models):
-    config_models = models.value
-    return (config_models,)
-
-
-@app.cell
-def _(cleaning):
-    config_cleaning = cleaning.value
-    return (config_cleaning,)
-
-
-@app.cell
-def _(y_dd):
-    config_y = y_dd.value
-    return (config_y,)
-
-
-@app.cell
-def _(keep_pop):
-    config_keep_pop = keep_pop.value
-    return (config_keep_pop,)
-
-
-@app.cell
-def _(balance):
-    config_balance = balance.value
-    return (config_balance,)
 
 
 @app.cell(hide_code=True)
@@ -469,24 +328,6 @@ def _(df_merged, pl):
     return (df_merged_1,)
 
 
-@app.cell
-def _(df_merged_1):
-    df_merged_1.columns
-    return
-
-
-@app.cell
-def _(df_merged_1):
-    df_merged_1["hosp_admissionMode"].describe()
-    return
-
-
-@app.cell
-def _(df_merged_1):
-    df_merged_1["icu_mode_entree"].describe()
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -496,21 +337,9 @@ def _(mo):
 
 
 @app.cell
-def _(cleaning, keep_pop, mo, mo_utils):
-    mo.vstack([
-        mo.md(mo_utils.config_dropdown_color),
-        keep_pop,
-        cleaning,
-        mo.md(mo_utils.config_end)])
-    return
-
-
-@app.cell
 def _(df_merged_1, extract, pl):
     df_clean = extract.prepare_data(df_merged_1, hour_offset = 0, random = False, max_hour = 6, strict_mode = True, target_col = "isDeceased_lt_28d", show_fig = True)
 
-
-    # TODO : feature engineering à mettre à la bonne place
     df_clean = df_clean.with_columns(
         (pl.col("is_ventilated").fill_null(pl.lit(False))).alias("is_ventilated"),
         (pl.col("is_prone").fill_null(pl.lit(False))).alias("is_prone"),
@@ -526,36 +355,8 @@ def _(df_merged_1, extract, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    TODO : vérifier le nombre de données qu'on filtre ici !
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
     ### Filtrage du dataset/Prétraitement
     """)
-    return
-
-
-@app.cell
-def _(df_clean, pl):
-    feat = "score_glasgow"
-
-    # On compte le nombre de NULL par patient
-    df_check_nulls = (
-        df_clean
-        .group_by("encounterId")
-        .agg(
-            # .is_null().sum() compte le nombre de True (donc le nombre de nulls)
-            pl.col(feat).is_null().sum().alias("nb_nulls_en_24h")
-        )
-        # Optionnel : on ne garde que les patients qui ont AU MOINS un null
-        .filter(pl.col("nb_nulls_en_24h") > 0)
-    )
-
-    df_check_nulls["nb_nulls_en_24h"].value_counts()
     return
 
 
@@ -591,6 +392,12 @@ def _(df_clean, pl, target_col):
 
 
 @app.cell
+def _():
+    commonly_used = ["score_glasgow", "is_conscious", "heart_rate", "creat", "is_cvvhf", "is_hdi", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "urine_rate", "pas", "pam", "pad", "bili_tot", "leucocytes", "admission_type", "fr", "ph", "sodium", "potassium", "num_plq", "blood_urea", "nad_dose_poids", "dobu_dose_poids", "hemoglobine", "tp", "spo2", "hco3", "glyc_cap"]
+    return (commonly_used,)
+
+
+@app.cell
 def _(df_clean_keep, mo):
     custom_features = mo.ui.multiselect(
         options=df_clean_keep.columns,
@@ -601,9 +408,17 @@ def _(df_clean_keep, mo):
 
 
 @app.cell
-def _(custom_features, df_clean_keep, icu_useful, json, mo, mo_utils, modex):
-    import polars.selectors as cs
-
+def _(
+    commonly_used,
+    cs,
+    custom_features,
+    df_clean_keep,
+    icu_useful,
+    json,
+    mo,
+    mo_utils,
+    modex,
+):
     with open ("../../Preprocessing_pipeline/preprocessing-pipelines/json/dynamic_features.json", "r") as file:
         json_feat = json.load(file)
 
@@ -618,11 +433,11 @@ def _(custom_features, df_clean_keep, icu_useful, json, mo, mo_utils, modex):
 
     elif modex.value == "Mode Commonly Used Without pmsi":
         keep_feats = df_clean_keep.select(
-            ["score_glasgow", "is_conscious", "heart_rate", "creat", "is_cvvhf", "is_hdi", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "urine_rate", "pas", "pam", "pad", "bili_tot", "leucocytes", "admission_type", "fr", "ph", "sodium", "potassium", "num_plq", "blood_urea", "nad_dose_poids", "dobu_dose_poids", "hemoglobine", "tp", "spo2", "hco3", "glyc_cap"],
+            commonly_used,
         ).columns
     elif modex.value == "Mode Commonly Used":
         keep_feats = df_clean_keep.select(
-            ["score_glasgow", "is_conscious", "heart_rate", "creat", "is_cvvhf", "is_hdi", "pao2", "is_ventilated", "fio2_corr", "age", "temp", "urine_rate", "pas", "pam", "pad", "bili_tot", "leucocytes", "admission_type", "fr", "ph", "sodium", "potassium", "num_plq", "blood_urea", "nad_dose_poids", "dobu_dose_poids", "hemoglobine", "tp", "spo2", "hco3", "glyc_cap", ],
+            commonly_used,
             *icu_useful,
             cs.starts_with("hx_")
         ).columns
@@ -647,7 +462,7 @@ def _(custom_features, df_clean_keep, icu_useful, json, mo, mo_utils, modex):
         mo.md(f"**Soit en Français (dynamic feature only):** \n{str_keep_feats}"),
         mo.md(mo_utils.config_end)
     ])
-    return cs, keep_feats, str_keep_feats
+    return keep_feats, str_keep_feats
 
 
 @app.cell
@@ -743,21 +558,6 @@ def _(config_models, cs, df_clean_2, keep_features, modex, pl, target_col):
     return X_init, df_clean_3, final_features, y_init
 
 
-@app.cell
-def _(keep_features):
-    print(keep_features)
-    return
-
-
-@app.cell
-def _(balance, mo, mo_utils):
-    mo.vstack([
-        mo.md(mo_utils.config_dropdown_color),
-        balance,
-        mo.md(mo_utils.config_end)])
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -845,12 +645,6 @@ def _(
 
 
 @app.cell
-def _(X):
-    X.describe()
-    return
-
-
-@app.cell
 def _(X, df_clean, pl, type_donnees):
     if type_donnees.value == "score":
         df_clean_saps2 = (
@@ -871,12 +665,6 @@ def _(X, df_clean, pl, type_donnees):
     return saps2_pred, saps2_true
 
 
-@app.cell
-def _(df_clean_3):
-    df_clean_3.describe()
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -890,158 +678,67 @@ def _(mo):
 def _(
     StratifiedGroupKFold,
     X,
-    boruta_filter,
     config_balance,
+    config_boruta,
     config_models,
     exp,
     expected_length,
     extract,
-    extract_feat,
     final_features,
     groups,
     np,
-    os,
-    patient_col,
-    pl,
     preproc,
     seed,
     target_col,
-    time_col,
     train_init_df,
     train_init_tsfel,
     y,
 ):
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
 
-    # On stocke les données de tous les folds
-    folds_X_train = []
-    folds_X_test = []
-    folds_y_train = []
-    folds_y_test = []
+    # Initialisation des conteneurs
+    folds_X_train, folds_X_test = [], []
+    folds_y_train, folds_y_test = [], []
     folds_groups = []
 
-    for fold_idx, (train_idx, test_idx) in enumerate (sgkf.split(X=X, y=y, groups = groups)):
-        print(f"\n─────────────────── Traitement du Fold {fold_idx + 1}/5 ───────────────────")
+    pipeline_config = {
+        "patient_col": extract.ID_COL,
+        "time_col": extract.TIME_COL,
+        "target_col": target_col,
+        "boruta_filter": config_boruta,
+        "balance_method": config_balance.balance_method,
+        "expected_length": expected_length,
+        "final_features": final_features,
+        "exp": exp
+    }
 
-        # Récupération des IDs patients correspondants au split de ce fold
-        if config_models.extraction_type == "TSFEL" :
-            train_patients = X[train_idx].select(patient_col).unique()
-            test_patients = X[test_idx].select(patient_col).unique()
-            # On filtre notre gros DataFrame train pré-calculé pour ce fold
-            train_fold_tsfel = train_init_tsfel.join(train_patients, on=patient_col, how="inner").sort(patient_col)
-            test_fold_tsfel = train_init_tsfel.join(test_patients, on=patient_col, how="inner").sort(patient_col)
-            # Filtrage corrélation/variance
-            train_clean, test_clean, keepVariableList_1 = extract_feat.filtrage_corr_var(train_fold_tsfel, test_fold_tsfel, patient_col, target_col)
-            if boruta_filter.value:
-                # Construction du nom de fichier unique intégrant le Fold et la Graine (seed)
-                filename_train_boruta = exp.get_tsfel_boruta("train", fold_idx)
-                filename_test_boruta = exp.get_tsfel_boruta("test", fold_idx)
+    if "train_init_df" in locals() and train_init_df is not None:
+        pipeline_config["train_init"] = train_init_df
+    else:
+        pipeline_config["train_init"] = train_init_tsfel
 
-                if os.path.exists(filename_train_boruta) and os.path.exists(filename_test_boruta):
-                    print(f"Lecture des fichiers Boruta existants pour le fold {fold_idx} (Graine {seed}).")
-                    train_clean = pl.read_parquet(filename_train_boruta)
-                    test_clean = pl.read_parquet(filename_test_boruta)
-                else:
-                    train_clean, test_clean, keepVariableList_2 = extract_feat.filtrage_boruta(train_clean, test_clean, patient_col, target_col, max_iter = 100, seed = seed)
+    # Exécution de la Cross-Validation
+    for fold_idxx, (train_idx, test_idx) in enumerate(sgkf.split(X=X, y=y, groups=groups)):
+        print(f"\n─────────────────── Traitement du Fold {fold_idxx + 1}/5 ───────────────────")
 
-                    train_clean.write_parquet(filename_train_boruta)
-                    test_clean.write_parquet(filename_test_boruta)
-                    print(f"Save de Boruta pour le fold {fold_idx} (Graine {seed}).")
 
-                    parent_folder2 = filename_train_boruta.parent
-                    np.save(parent_folder2 / f"keepVariableList_1_fold_{fold_idx}.npy", keepVariableList_1)
-
-                    np.save(parent_folder2 / f"keepVariableList_2_fold_{fold_idx}.npy", keepVariableList_2)
-            # Tri au cas-où
-            train_clean = train_clean.sort(patient_col)
-            test_clean = test_clean.sort(patient_col)
-
-            # Equilibrage
-            train_clean = preproc.equilibrer_dataset_tabulaire(train_clean, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-            # Test d'intégrité
-            assert train_clean.height == train_clean[extract.ID_COL].n_unique(), f"Erreur d'alignement Train TSFEL Fold {fold_idx}"
-            assert test_clean.height == test_clean[extract.ID_COL].n_unique(), f"Erreur d'alignement Test TSFEL Fold {fold_idx}"
-
-            y_train_fold = train_clean[target_col].to_numpy()
-            y_test_fold = test_clean[target_col].to_numpy()
-            groups_fold = train_clean[patient_col].to_numpy()
-            train_clean = train_clean.select(pl.exclude(patient_col, target_col))
-            test_clean = test_clean.select(pl.exclude(patient_col, target_col))
-
-            folds_groups.append(groups_fold)
-
-            # Scaling final
-            X_train_fold, X_test_fold = preproc.scaling(train_clean, test_clean)
-
-        elif config_models.extraction_type == "time" :
-            train_df = train_init_df[train_idx].sort([patient_col, time_col])
-            test_df = train_init_df[test_idx].sort([patient_col, time_col])
-
-            # Gestion exclusive de l'équilibrage homemade (avec polars)
-            if config_balance.balance_method in ["downsampling_homemade", ""]:
-                train_df = preproc.equilibrer_dataset_tabulaire(train_df, extract.ID_COL, target_col, method = config_balance.balance_method, seed = seed)
-
-            # On prépare le jeu d'entraînement
-
-            # Scaling
-            (train_df, test_df) = preproc.scaling(train_df, test_df)
-
-            # Transformation en 3D Array
-            (X_train_fold, y_train_fold) = preproc.build_sequences(train_df, patient_col, target_col, expected_length, final_features)  # grouper en fonction d'un individu
-            (X_test_fold, y_test_fold) = preproc.build_sequences(test_df, patient_col, target_col, expected_length, final_features)
-
-            patients_time_fold = train_df[patient_col].unique().sort().to_numpy()
-
-            # Gestion de l'équilibrage avec imblearn (avec un 3D Array directement)
-            if config_balance.balance_method not in ["downsampling_homemade", ""]:
-                # On applatit le 3D Array en 2D Array
-                n_samples, n_timesteps, n_feats = X_train_fold.shape
-                X_train_fold_2d = X_train_fold.reshape(n_samples, n_timesteps * n_feats)
-
-                # On applique la méthode d'équilibrage imblearn
-                if config_balance.balance_method == "downsampling_50-50":
-                    from imblearn.under_sampling import RandomUnderSampler
-                    rs = RandomUnderSampler(random_state=seed)
-                elif config_balance.balance_method == "upsampling_50-50":
-                    from imblearn.over_sampling import RandomOverSampler
-                    rs = RandomOverSampler(random_state=seed)
-                else:
-                    raise ValueError("Cet équilibrage n'a pas encore été implémenté")
-
-                indices_arr = np.arange(n_samples).reshape(-1, 1)
-                indices_resampled, y_train_fold = rs.fit_resample(indices_arr, y_train_fold)
-                indices_resampled = indices_resampled.flatten()
-                X_train_fold = X_train_fold_2d[indices_resampled].reshape(-1, n_timesteps, n_feats)
-                groups_fold = patients_time_fold[indices_resampled]
-            else:
-                groups_fold = patients_time_fold
-
-            # TODO : rajouter une gestion des NaN (appel à fonction de utils.py)
-
-            # TODO : externaliser la gestion des NaN
-            # On enlève les NaN après extraction de features
-            total_nan = np.isnan(X_train_fold).sum()
-            # Compte les NaN pour chaque feature
-            nan_par_feature = np.isnan(X_train_fold).sum(axis=(0, 1))
-            # for i, feat_name in enumerate(final_features):
-                # print(f"Feature '{feat_name}' : {nan_par_feature[i]} NaN")
-            print(f"Nombre total de valeurs NaN : {total_nan}")
-
-            X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
-            X_test_fold = np.nan_to_num(X_test_fold, nan = 0.0)
-            np.save(exp.get_time_path(mode = "train", fold_idx = fold_idx), X_train_fold)
-            np.save(exp.get_time_path(mode = "test", fold_idx = fold_idx), X_test_fold)
-            folds_groups.append(groups_fold)
+        if config_models.extraction_type == "TSFEL":
+            X_tr, X_te, y_tr, y_te, grp = preproc.process_tsfel_fold(fold_idxx, train_idx, test_idx, X, y, groups, seed, **pipeline_config)
+        elif config_models.extraction_type == "time":
+            X_tr, X_te, y_tr, y_te, grp = preproc.process_time_fold(fold_idxx, train_idx, test_idx, seed, **pipeline_config)
         else:
-            raise ValueError("Modèle inexistant/Pas implémenté")
-        # On accumule les données nettoyées du fold en cours
-        folds_X_train.append(X_train_fold)
-        folds_X_test.append(X_test_fold)
-        folds_y_train.append(y_train_fold)
-        folds_y_test.append(y_test_fold)
+            raise ValueError(f"Type d'extraction inconnu ou non implémenté : {config_models.extraction_type}")
+
+        # Accumulation des données nettoyées du fold
+        folds_X_train.append(X_tr)
+        folds_X_test.append(X_te)
+        folds_y_train.append(y_tr)
+        folds_y_test.append(y_te)
+        folds_groups.append(grp)
+
+    # Sauvegarde globale finale
     np.save(exp.get_var_path(), final_features)
-    print("Les 5 folds ont été calculé avec succès !")
+    print("Les 5 folds ont été calculés avec succès !")
     print(folds_groups)
     return (
         folds_X_test,
@@ -1227,84 +924,26 @@ def _(DEFAULT_PARAMS, config_models, exp, json):
     # Récupération du dossier de sortie de l'expérience et définition du fichier JSON
     output_direc = exp.get_output_path(model_name)
     HYPERPARAMS_FILE = output_direc / "best_hyperparameters.json"
-
+    config_optuna = False
     if HYPERPARAMS_FILE.exists():
         with open(HYPERPARAMS_FILE, "r") as fileh:
             all_configs = json.load(fileh)
-    
+
         if model_name in all_configs:
             print(f"[LOAD] Configuration Optuna trouvée dans {HYPERPARAMS_FILE} pour {model_name} !")
             parameters = all_configs[model_name]
+            config_optuna = True
         else:
             print(f"[LOAD] Aucune config pour {model_name} dans ce fichier. Valeurs PAR DÉFAUT.")
             parameters = DEFAULT_PARAMS.get(model_name, {})
+            config_optuna = False
     else:
         print(f"[WARNING] Aucun fichier d'hyperparamètres trouvé à : {HYPERPARAMS_FILE}. Valeurs PAR DÉFAUT.")
         parameters = DEFAULT_PARAMS.get(model_name, {})
+        config_optuna = False
 
     print(f"--> Paramètres appliqués : {parameters}\n")
-    return HYPERPARAMS_FILE, parameters
-
-
-@app.cell
-def _(np, torch):
-    class TemperatureScaledEstimator:
-        """
-        Encapsule un modèle Scikit-Learn/XGBoost et un TemperatureCalibrator PyTorch.
-        Version blindée contre le NotFittedError de Scikit-Learn.
-        """
-        def __init__(self, estimator, calibrator):
-            self.estimator = estimator
-            self.calibrator = calibrator
-            self.calibrator.eval() # Toujours en mode eval pour l'inférence
-
-            # Copie des classes
-            if hasattr(estimator, 'classes_'):
-                self.classes_ = estimator.classes_
-            else:
-                self.classes_ = np.array([0, 1])
-
-        def __getattr__(self, name):
-            if name.startswith('_'):
-                raise AttributeError(f"Attribut privé ou magique '{name}' non géré par le wrapper.")
-
-            if 'estimator' not in self.__dict__:
-                raise AttributeError("L'estimateur de base n'est pas encore initialisé.")
-
-            return getattr(self.estimator, name)
-
-        def predict_proba(self, X):
-            # 1. Récupérer les probabilités brutes (on s'assure d'appeler le vrai sous-modèle)
-            probas = self.estimator.predict_proba(X)
-
-            # Clip pour éviter les log(0) fatals
-            eps = 1e-7
-            probas = np.clip(probas, eps, 1 - eps)
-
-            # 2. Extraire la proba de la classe positive et convertir en logits
-            p1 = probas[:, 1]
-            logits = np.log(p1 / (1 - p1))
-
-            # 3. Appliquer la température via le calibrateur
-            logits_tensor = torch.tensor(logits, dtype=torch.float32)
-            with torch.no_grad():
-                calibrated_logits = self.calibrator(logits_tensor).cpu().numpy()
-
-            # 4. Reconvertir en probabilités via la fonction sigmoïde
-            calib_p1 = 1 / (1 + np.exp(-calibrated_logits))
-            calib_p0 = 1 - calib_p1
-
-            return np.vstack([calib_p0, calib_p1]).T
-
-        def predict(self, X):
-            return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
-        def score(self, X, y):
-            predictions = self.predict(X)
-            y_array = np.asarray(y)
-            return np.mean(predictions == y_array)
-
-    return (TemperatureScaledEstimator,)
+    return HYPERPARAMS_FILE, config_optuna, parameters
 
 
 @app.cell
@@ -1336,149 +975,26 @@ def _(config_models, folds_X_train, mo, run):
 
 @app.cell
 def _(
-    CalibratedClassifierCV,
-    FrozenEstimator,
-    GridSearchCV,
-    LogisticRegression,
     StratifiedGroupKFold,
-    TemperatureScaledEstimator,
-    np,
-    pl,
-    predict_proba,
-    predict_proba_lstm,
-    roc_auc_score,
-    torch,
-    train_inception_time,
-    train_lstm_model,
-):
-    def get_learning_curve_chunk(X_train, y_train, groups, p, is_dl_model, seed):
-        """Découpe les données pour un palier donné (%)."""
-        total_samples = X_train.shape[0] if hasattr(X_train, "shape") else len(X_train)
-        size_chunk = int(p * total_samples)
-    
-        if is_dl_model:
-            indices = np.arange(total_samples)
-            np.random.default_rng(seed=seed).shuffle(indices)
-            selected = indices[:size_chunk]
-            return X_train[selected], np.asarray(y_train)[selected], None
-        else:
-            unique_patients = np.unique(groups)
-            np.random.default_rng(seed=seed).shuffle(unique_patients)
-            n_patients = int(p * len(unique_patients))
-            selected = unique_patients[:n_patients]
-        
-            mask = np.isin(groups, selected)
-            X_chunk = X_train.filter(pl.Series(mask)) if hasattr(X_train, "filter") else X_train[mask]
-        
-            X_chunk_np = X_chunk.to_numpy() if hasattr(X_chunk, "to_numpy") else np.asarray(X_chunk)
-            return X_chunk_np, np.asarray(y_train)[mask], mask
-
-
-    def fit_model_by_name(model_name, X_train, y_train, X_val, y_val, seed, class_weight, parameters, is_final_palier, save_path=None, lasso_args=None):
-        """Entraîne le modèle sélectionné et retourne le modèle ainsi que ses scores ROC-AUC (Train, Val)."""
-    
-        if model_name == "InceptionTimeModified":
-            model, T, _, _ = train_inception_time(X_train, y_train, X_val=X_val, y_val=y_val, save_best_path=save_path, seed=seed, **parameters)
-            return model, roc_auc_score(y_train, predict_proba(model, X_train, T=T)), roc_auc_score(y_val, predict_proba(model, X_val, T=T))
-        
-        elif model_name == "LstmTimeModified":
-            model, T, _, _ = train_lstm_model(X_train, y_train, X_val=X_val, y_val=y_val, save_best_path=save_path, seed=seed, **parameters)
-            return model, roc_auc_score(y_train, predict_proba_lstm(model, X_train, T=T)), roc_auc_score(y_val, predict_proba_lstm(model, X_val, T=T))
-
-        # --- Modèles de Machine Learning (TSFEL) ---
-        elif model_name == "RandomForest TSFEL":
-            from sklearn.ensemble import RandomForestClassifier
-            clf = RandomForestClassifier(class_weight=class_weight, random_state=seed, n_jobs=-1, **parameters)
-    
-        elif model_name == "RandomForest Imbalanced TSFEL":
-            from imblearn.ensemble import BalancedRandomForestClassifier
-            clf = BalancedRandomForestClassifier(class_weight=class_weight, random_state=seed, n_jobs=-1, **parameters)
-        
-        elif model_name == "XGBoost TSFEL":
-            from xgboost import XGBClassifier
-            ratio = np.sum(y_train == 0) / np.sum(y_train == 1) if np.sum(y_train == 1) > 0 else 1.0
-            clf = XGBClassifier(scale_pos_weight=ratio, random_state=seed, eval_metric="logloss", missing=np.nan, n_jobs=-1, **parameters)
-        
-        elif model_name == "SVC TSFEL":
-            from sklearn.svm import SVC
-            clf = SVC(kernel="rbf", random_state=seed, class_weight=class_weight, probability=True, **parameters)
-        
-        elif model_name == "Logistic Regression Lasso TSFEL":
-            if is_final_palier and lasso_args:
-                if hasattr(lasso_args['X_raw'], "write_parquet"): lasso_args['X_raw'].write_parquet(lasso_args['file_X'])
-                else: pl.DataFrame(X_train).write_parquet(lasso_args['file_X'])
-                np.save(lasso_args['file_y'], lasso_args['y_raw'])
-            
-            inner_cv = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
-        
-            # Pour la régression logistique, on passe les paramètres (comme max_iter) au solver de base
-            lr_args = {"l1_ratio": 1.0, "solver": "saga", "max_iter": 10000, "random_state": seed}
-            lr = LogisticRegression(**lr_args)
-            lasso_cv = GridSearchCV(estimator=lr, param_grid={'C': np.logspace(-4, 4, 10)}, cv=inner_cv, scoring='roc_auc', n_jobs=-1)
-        
-            lasso_cv.fit(X_train, y_train, groups=lasso_args['groups_mask'])
-            clf = lasso_cv.best_estimator_ if is_final_palier else lasso_cv
-        
-        else:
-            raise ValueError(f"Modèle inconnu : {model_name}")
-
-        # Fit standard et calcul du score pour le ML classique
-        clf.fit(X_train, y_train if "XGB" not in model_name else y_train.astype(int))
-        train_score = roc_auc_score(y_train, clf.predict_proba(X_train)[:, 1])
-        val_score = roc_auc_score(y_val, clf.predict_proba(X_val)[:, 1])
-        return clf, train_score, val_score
-
-
-    def apply_model_calibration(model, X_calib, y_calib, method_calib, seed):
-        """Applique Platt Scaling ou Temperature Scaling sur un modèle de base."""
-        # Formatage des sets de calibration
-        if "XGB" in type(model).__name__ or hasattr(X_calib, "to_numpy"):
-            X_calib = X_calib.to_numpy() if hasattr(X_calib, "to_numpy") else np.asarray(X_calib)
-            y_calib = np.asarray(y_calib).astype(int)
-
-        if method_calib == "_platt":
-            frozen_model = FrozenEstimator(model)
-            calibrated_clf = CalibratedClassifierCV(estimator=frozen_model, method="sigmoid")
-            calibrated_clf.fit(X_calib, y_calib)
-            return calibrated_clf
-
-        elif method_calib == "_temperature_scaling":
-            from utilitaries.models.inceptionTimeModified import TemperatureCalibrator
-            probas = np.clip(model.predict_proba(X_calib)[:, 1], 1e-7, 1 - 1e-7)
-            logits = np.log(probas / (1 - probas))
-        
-            calibrator = TemperatureCalibrator(init_T=1.0)
-            calibrator.fit(torch.tensor(logits, dtype=torch.float32), torch.tensor(y_calib, dtype=torch.float32), max_iter=200)
-            return TemperatureScaledEstimator(model, calibrator)
-        
-        raise ValueError(f"Calibration {method_calib} non gérée.")
-
-    return apply_model_calibration, fit_model_by_name, get_learning_curve_chunk
-
-
-@app.cell
-def _(
-    StratifiedGroupKFold,
-    apply_model_calibration,
     calibration,
     calibration_mode,
     class_weight_choice,
     config_models,
+    config_optuna,
     exp,
     extension,
-    fit_model_by_name,
     folds_X_test,
     folds_X_train,
     folds_groups,
     folds_y_test,
     folds_y_train,
-    get_learning_curve_chunk,
     is_dl_model,
     joblib,
     np,
     os,
     parameters,
     seed,
+    training,
 ):
     folds_X_fit_exact = []
     folds_y_fit_exact = []
@@ -1501,7 +1017,7 @@ def _(
         groups_fold_2 = folds_groups[fold_idx_2]
 
         # Génération d'un chemin STRICT et DÉTERMINISTE
-        model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension)
+        model_path_fold = exp.get_model_path(config_models.models_name, fold_idx_2, extension, config_optuna = config_optuna)
         file_X_exact = exp.get_lasso_path("X", fold_idx_2, "parquet")
         file_y_exact = exp.get_lasso_path("y", fold_idx_2, "npy")
 
@@ -1546,7 +1062,7 @@ def _(
             is_final_palier = (p == 1.0)
 
             # Extraction propre du chunk via la fonction isolée (Renvoie tes tableaux numpy d'origine)
-            X_chunk_np, y_chunk_np, mask_chunk = get_learning_curve_chunk(
+            X_chunk_np, y_chunk_np, mask_chunk = training.get_learning_curve_chunk(
                 X_train_final_fold, y_train_final, groups_final_fold, p, is_dl_model, seed
             )
 
@@ -1573,7 +1089,7 @@ def _(
             } if config_models.models_name == "Logistic Regression Lasso TSFEL" else None
 
             # Entraînement délégué à la fonction Usine (Factory)
-            final_model_to_save, train_auc, val_auc = fit_model_by_name(
+            final_model_to_save, train_auc, val_auc = training.fit_model_by_name(
                 model_name=config_models.models_name,
                 X_train=X_chunk_np,
                 y_train=y_chunk_np,
@@ -1595,10 +1111,10 @@ def _(
             if is_final_palier and not is_dl_model and final_model_to_save is not None:
                 if calibration.value:
                     print(f"    [INFO] Application de la calibration {calibration_mode.value} sur le jeu held-out...")
-                    final_model_to_save = apply_model_calibration(
+                    final_model_to_save = training.apply_model_calibration(
                         final_model_to_save, X_calib, y_calib, calibration_mode.value, seed
                     )
-            
+
                 joblib.dump(final_model_to_save, model_path_fold)
                 print(f"--> Modèle final enregistré à : {model_path_fold}")
 
@@ -1610,23 +1126,18 @@ def _(
 
 
 @app.cell
-def _():
-    return
-
-
-@app.cell
 def _(
     config_models,
+    config_transparent,
     output_dir,
     saps2_pred,
     saps2_true,
     save_figure,
     sfu,
-    transparent,
     type_donnees,
 ):
     if type_donnees.value == "score":
-        auc_final_score, fpr_score, tpr_score, th_score, brier_score_score, best_f1_score, best_t_score, y_pred_score, mcc_score, non_overlap_area_score, asymetric_incertitude_score, mean_risk_diff_score, mean_p1_score = sfu.plot_all_figs(saps2_pred, saps2_true, config_models, False, save_figure.value, output_dir, transparent.value)
+        auc_final_score, fpr_score, tpr_score, th_score, brier_score_score, best_f1_score, best_t_score, y_pred_score, mcc_score, non_overlap_area_score, asymetric_incertitude_score, mean_risk_diff_score, mean_p1_score = sfu.plot_all_figs(saps2_pred, saps2_true, config_models, False, save_figure.value, output_dir, config_transparent)
     return (
         asymetric_incertitude_score,
         auc_final_score,
@@ -1649,8 +1160,8 @@ def _(mo):
 
 
 @app.cell
-def _(config_models, exp):
-    output_dir = exp.get_output_path(config_models.models_name)
+def _(config_models, config_optuna, exp):
+    output_dir = exp.get_output_path(config_models.models_name, config_optuna = config_optuna)
     print("Dossier de sortie prêt :", output_dir)
     return (output_dir,)
 
@@ -1665,297 +1176,116 @@ def _(mo):
 
 @app.cell
 def _(
-    calibration,
-    calibration_mode,
-    classification_report,
     config_models,
-    evaluate_lstm_on_test,
-    evaluate_on_test,
-    exp,
-    extension,
-    folds_X_test,
-    folds_X_train,
-    folds_y_test,
-    folds_y_train,
-    joblib,
-    load_lstm_from_checkpoint,
-    load_model_from_checkpoint,
-    np,
-    output_dir,
-    pl,
-    predict_proba,
-    predict_proba_lstm,
-    save_figure,
-    sfu,
-    transparent,
-):
-    all_test_scores = []
-    all_train_scores = []
-    all_auc_scores = []
-    all_brier_scores = []
-
-    all_y_true_report = []  
-    all_y_pred_report = []  
-
-    all_y_test_global = []      
-    all_probas_uncalib = []     
-    all_probas_calib = []       
-
-
-    for fold_idx_bis in range(5):
-        print(f"\n─────────────────── Évaluation du Fold {fold_idx_bis + 1}/5 ───────────────────")
-        X_train = folds_X_train[fold_idx_bis]
-        X_test = folds_X_test[fold_idx_bis]
-        y_train = folds_y_train[fold_idx_bis]
-        y_test = folds_y_test[fold_idx_bis]
-
-        loaded_model = exp.get_model_path(config_models.models_name, fold_idx_bis, extension)
-        print("Modèle chargé :", loaded_model)
-
-        if config_models.models_name == "InceptionTimeModified":
-            X_train_final = X_train
-            X_test_final = X_test
-
-            (auc, brier, T_1) = evaluate_on_test(X_test_final, y_test, loaded_model)
-            (model_1, _, T_1) = load_model_from_checkpoint(loaded_model)
-
-            probas_fold = predict_proba(model_1, X_test_final, T = T_1)
-
-            all_auc_scores.append(auc)
-            all_brier_scores.append(brier)
-            all_y_test_global.extend(y_test)
-            all_probas_uncalib.extend(probas_fold)
-            all_probas_calib.extend(probas_fold)
-
-        elif config_models.models_name == "LstmTimeModified":
-            X_train_final = X_train
-            X_test_final = X_test
-            print(f"\n[DEBUG EVAL - Fold {fold_idx_bis + 1}] Shape de X_test_final: {X_test_final.shape}")
-            (auc, brier, T_1) = evaluate_lstm_on_test(X_test_final, y_test, loaded_model)
-            (model_1, _, T_1) = load_lstm_from_checkpoint(loaded_model)
-            probas_fold = predict_proba_lstm(model_1, X_test_final, T = T_1)
-
-            all_auc_scores.append(auc)
-            all_brier_scores.append(brier)
-            all_y_test_global.extend(y_test)
-            all_probas_uncalib.extend(probas_fold)
-            all_probas_calib.extend(probas_fold)
-
-        elif config_models.extraction_type == "TSFEL":
-            clf = joblib.load(loaded_model)
-
-            # --- NOUVEAU : On extrait le modèle racine pour inspecter ses features ---
-            def get_root_estimator(estimator_to_unwrap):
-                # 1. Si c'est Platt (CalibratedClassifierCV), le vrai modèle fitté est TOUJOURS ici
-                if hasattr(estimator_to_unwrap, "calibrated_classifiers_"):
-                    return get_root_estimator(estimator_to_unwrap.calibrated_classifiers_[0].estimator)
-
-                # 2. Si c'est FrozenEstimator (scikit-learn >= 1.6), on extrait son sous-modèle
-                elif estimator_to_unwrap.__class__.__name__ == "FrozenEstimator":
-                    return get_root_estimator(estimator_to_unwrap.estimator)
-
-                # 3. Si c'est notre TemperatureScaledEstimator
-                elif hasattr(estimator_to_unwrap, "calibrator"):
-                    return get_root_estimator(estimator_to_unwrap.estimator)
-
-                # 4. Modèle racine trouvé
-                else:
-                    return estimator_to_unwrap
-
-            root_model = get_root_estimator(clf)
-
-            expected_features = None
-            if hasattr(root_model, "feature_names_in_"):
-                expected_features = list(root_model.feature_names_in_)
-            elif hasattr(root_model, "get_booster"):
-                expected_features = root_model.get_booster().feature_names
-
-            # On garde le format DataFrame si des features sont attendues
-            if expected_features is not None:
-                if expected_features and expected_features[0].startswith('f') and expected_features[0][1:].isdigit():
-                    print("XGBoost utilise des indices génériques. Utilisation des matrices brutes.")
-                    X_train_final = X_train.to_numpy()
-                    X_test_final = X_test.to_numpy()
-                else:
-                    missing_cols = [c for c in expected_features if c not in X_train.columns]
-                    if missing_cols:
-                        print(f"Ajout de {len(missing_cols)} colonnes manquantes (0.0)")
-                        padding_expr = [pl.lit(0.0).alias(c) for c in missing_cols]
-                        X_train_final = X_train.with_columns(padding_expr).select(expected_features)
-                        X_test_final = X_test.with_columns(padding_expr).select(expected_features)
-                    else:
-                        X_train_final = X_train.select(expected_features)
-                        X_test_final = X_test.select(expected_features)
-
-                    if "XGB" in type(root_model).__name__:
-                        X_train_final = X_train_final.to_pandas()
-                        X_test_final = X_test_final.to_pandas()
-            else:
-                # Si vraiment aucune feature n'est trouvée, on passe en NumPy
-                print("Aucun nom de feature trouvé dans le modèle racine. Passage en matrices NumPy brutes.")
-                X_train_final = X_train.to_numpy()
-                X_test_final = X_test.to_numpy()
-
-            # Le reste de ton code s'exécute sans toucher à rien d'autre...
-            y_pred_nb_train = clf.predict(X_train_final)
-            y_pred_nb_test = clf.predict(X_test_final)
-
-            train_score = clf.score(X_train_final, y_train)
-            test_score = clf.score(X_test_final, y_test)
-
-            all_test_scores.append(test_score)
-            all_train_scores.append(train_score)
-            all_y_true_report.extend(y_test)
-            all_y_pred_report.extend(y_pred_nb_test)
-
-            prob_uncalib_fold = None
-            prob_calib_fold = None
-            X_test_final_numpy = X_test_final.to_numpy() if hasattr(X_test_final, "to_numpy") else X_test_final
-
-            if calibration.value:
-                print("    [INFO] Objet de calibration détecté sur le disque.")
-                prob_calib_fold = clf.predict_proba(X_test_final)[:, 1]
-
-                # Utilisation de notre fonction récursive propre
-                root_model = get_root_estimator(clf)
-
-                if "XGB" in type(root_model).__name__:
-                    prob_uncalib_fold = root_model.predict_proba(X_test_final_numpy)[:, 1]
-                else:
-                    prob_uncalib_fold = root_model.predict_proba(X_test_final)[:, 1]
-            else:
-                print("    [INFO] Modèle brut détecté (non calibré sur le disque).")
-                prob_fold_brut = clf.predict_proba(X_test_final)[:, 1]
-                prob_uncalib_fold = prob_fold_brut
-                prob_calib_fold = prob_fold_brut
-
-            all_probas_uncalib.extend(prob_uncalib_fold)
-            all_probas_calib.extend(prob_calib_fold)
-            all_y_test_global.extend(y_test)
-            print(f"Le score (Accuracy) sur le fold {fold_idx_bis + 1} est : {test_score:.4f}")
-    print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
-
-    all_y_test_global = np.array(all_y_test_global)
-    all_probas_uncalib = np.array(all_probas_uncalib)
-    all_probas_calib = np.array(all_probas_calib)
-
-    print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
-
-    if config_models.extraction_type == "TSFEL":
-        mean_acc = np.mean(all_test_scores)
-        std_acc = np.std(all_test_scores)
-        print(f"Score moyen (Accuracy) : {mean_acc:.4f} (± {std_acc:.4f})")
-        print("\nRapport de classification cumulé (sur l'ensemble des 5 folds mis en commun) :")
-        print(classification_report(all_y_true_report, all_y_pred_report, target_names=["Alive", "Deceased"], zero_division=0))
-    else:
-        mean_auc = np.mean(all_auc_scores)
-        std_auc = np.std(all_auc_scores)
-        mean_brier = np.mean(all_brier_scores)
-        std_brier = np.std(all_brier_scores)
-        print(f"AUC moyenne  : {mean_auc:.4f} (± {std_auc:.4f})")
-        print(f"Brier moyenne : {mean_brier:.4f} (± {std_brier:.4f})")
-    print("="*79)
-
-    print("\nGénération de la courbe de calibration poolée...")
-    print(f"DEBUG SIZES -> y_true: {len(all_y_test_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}")
-    sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_test_global, config_models.models_name, config_models.extraction_type, calibration.value, save_figure.value, output_dir, transparent.value, calibration_mode.value)
-
-    probas = all_probas_calib
-    y_test = all_y_test_global
-    return probas, y_test
-
-
-@app.cell
-def _(
-    config_models,
+    config_transparent,
     lc_sample_sizes,
     lc_train_scores,
     lc_val_scores,
     output_dir,
     save_figure,
     sfu,
-    transparent,
 ):
-    sfu.plot_collected_learning_curve(lc_sample_sizes, lc_train_scores, lc_val_scores, config_models.models_name, savefig = save_figure.value, folder = output_dir, transparent = transparent.value)
+    sfu.plot_collected_learning_curve(lc_sample_sizes, lc_train_scores, lc_val_scores, config_models.models_name, savefig = save_figure.value, folder = output_dir, transparent = config_transparent)
     return
 
 
 @app.cell
-def _(Counter, config_models, exp, extension, joblib, np, pl, seed):
-    if config_models.models_name == "Logistic Regression Lasso TSFEL":
+def _(
+    calibration,
+    calibration_mode,
+    classification_report,
+    config_models,
+    config_optuna,
+    config_transparent,
+    evaluate,
+    exp,
+    extension,
+    folds_X_test,
+    folds_X_train,
+    folds_y_test,
+    folds_y_train,
+    np,
+    output_dir,
+    save_figure,
+    sfu,
+):
+    # Initialisation des listes de scores
+    all_test_scores, all_train_scores = [], []
+    all_auc_scores, all_brier_scores = [], []
+    all_y_true_report, all_y_pred_report = [], []
+    all_y_test_global, all_probas_uncalib, all_probas_calib = [], [], []
 
-        print("Extraction des variables sélectionnées par le Lasso...")
+    # Boucle d'évaluation sur les 5 folds
+    for fold_idx in range(5):
+        print(f"\n─────────────────── Évaluation du Fold {fold_idx + 1}/5 ───────────────────")
 
-        variables_par_fold = {}
-        toutes_les_variables_gardees = []
+        X_train, X_test = folds_X_train[fold_idx], folds_X_test[fold_idx]
+        y_train, y_test = folds_y_train[fold_idx], folds_y_test[fold_idx]
 
-        for fold_idx_test in range(5):
-            # 1. Charger le fichier X pour récupérer le nom d'origine des colonnes
-            file_X = exp.get_lasso_path("X", fold_idx_test, "parquet")
-            df_X = pl.read_parquet(file_X)
-            features_names = df_X.columns
+        loaded_model = exp.get_model_path(config_models.models_name, fold_idx, extension, config_optuna = config_optuna)
+        print("Modèle chargé :", loaded_model)
 
-            # 2. Charger le modèle entraîné de ce fold
-            model_path = exp.get_model_path("Logistic Regression Lasso TSFEL", fold_idx_test, extension)
-            model_L1 = joblib.load(model_path)
+        # Dispatcher vers le bon pipeline de calcul
+        if config_models.models_name == "InceptionTimeModified":
+            res = evaluate.evaluate_inception_fold(X_test, y_test, loaded_model)
+            all_auc_scores.append(res["auc"])
+            all_brier_scores.append(res["brier"])
 
-            # 3. Récupérer les coefficients finaux (au niveau du C optimal)
-            coefficients = model_L1.coef_[0]
+        elif config_models.models_name == "LstmTimeModified":
+            res = evaluate.evaluate_lstm_fold(fold_idx, X_test, y_test, loaded_model)
+            all_auc_scores.append(res["auc"])
+            all_brier_scores.append(res["brier"])
 
-            # 4. Filtrer les variables dont le coefficient n'est pas nul
-            features_gardees = [
-                (name, coef) for name, coef in zip(features_names, coefficients) if coef != 0.0
-            ]
+        elif config_models.extraction_type == "TSFEL":
+            res = evaluate.evaluate_tsfel_fold(fold_idx, X_train, X_test, y_train, y_test, loaded_model, calibration.value)
+            all_test_scores.append(res["test_score"])
+            all_train_scores.append(res["train_score"])
+            all_y_true_report.extend(res["y_test"])
+            all_y_pred_report.extend(res["y_pred_test"])
+        else:
+            raise ValueError(f"Modèle ou type d'extraction non pris en compte : {config_models.models_name}")
 
-            # Tri par valeur absolue du coefficient
-            features_gardees_triees = sorted(features_gardees, key=lambda x: abs(x[1]), reverse=True)
+        # Données communes collectées par tous les modèles
+        all_y_test_global.extend(res["y_test"])
+        all_probas_uncalib.extend(res["probas_uncalib"])
+        all_probas_calib.extend(res["probas_calib"])
 
-            variables_par_fold[fold_idx_test] = features_gardees_triees
-            toutes_les_variables_gardees.extend([name for name, _ in features_gardees_triees])
 
-            # Affichage pour ce fold
-            print(f"\n--- FOLD {fold_idx_test + 1} : {len(features_gardees_triees)} variables conservées sur {len(features_names)} ---")
-            for i, (name, coef) in enumerate(features_gardees_triees[:10]): 
-                print(f"  {i+1}. [{coef:+.4f}] -> {name}")
-            if len(features_gardees_triees) > 10:
-                print(f"  ... et {len(features_gardees_triees) - 10} autres variables.")
+    # ──────────────────────────────────────────────────────────────────────────────
+    # BILAN GLOBAL DE LA CROSS-VALIDATION
+    # ──────────────────────────────────────────────────────────────────────────────
+    print("\n" + "="*20 + " BILAN GLOBAL DE LA CROSS-VALIDATION " + "="*20)
 
-        print("\n" + "═"*50)
-        print("CONSTRUCTION DU DATAFRAME DE CONSENSUS (POLARS)")
-        print("═"*50)
+    all_y_test_global = np.array(all_y_test_global)
+    all_probas_uncalib = np.array(all_probas_uncalib)
+    all_probas_calib = np.array(all_probas_calib)
 
-        compteur_occurrences = Counter(toutes_les_variables_gardees)
+    if config_models.extraction_type == "TSFEL":
+        mean_acc = np.mean(all_test_scores)
+        std_acc = np.std(all_test_scores)
+        print(f"Score moyen (Accuracy) : {mean_acc:.4f} (± {std_acc:.4f})")
+        print("\nRapport de classification cumulé (sur l'ensemble des 5 folds) :")
+        print(classification_report(all_y_true_report, all_y_pred_report, target_names=["Alive", "Deceased"], zero_division=0))
+    else:
+        mean_auc, std_auc = np.mean(all_auc_scores), np.std(all_auc_scores)
+        mean_brier, std_brier = np.mean(all_brier_scores), np.std(all_brier_scores)
+        print(f"AUC moyenne   : {mean_auc:.4f} (± {std_auc:.4f})")
+        print(f"Brier moyenne : {mean_brier:.4f} (± {std_brier:.4f})")
+    print("="*79)
 
-        # Préparation des données pour le DataFrame
-        data_rows = []
-        for name, count in compteur_occurrences.items():
-            # Extrait les coefficients à travers les 5 folds
-            coefs_across_folds = [dict(variables_par_fold[f]).get(name, 0.0) for f in range(5)]
-            mean_coef = np.mean(coefs_across_folds)
+    print("\nGénération de la courbe de calibration poolée...")
+    print(f"DEBUG SIZES -> y_true: {len(all_y_test_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}")
 
-            data_rows.append({
-                "feature_name": name,
-                "folds_presence_count": count,
-                "mean_coefficient": mean_coef,
-                "is_pure_consensus": 1 if count == 5 else 0
-            })
+    sfu.calibration_curve_homemade(
+        all_probas_uncalib, all_probas_calib, all_y_test_global, 
+        config_models.models_name, config_models.extraction_type, 
+        calibration.value, save_figure.value, output_dir, 
+        config_transparent, calibration_mode.value
+    )
 
-        # Création du DataFrame Polars
-        df_consensus = pl.DataFrame(data_rows).sort(
-            ["is_pure_consensus", "mean_coefficient"], 
-            descending=[True, True]
-        )
-
-        # Sauvegarde
-        input_save_dir = exp.get_lasso_path("X", 0, "parquet").parent.parent
-        file_output_path = input_save_dir / f"lasso_features_consensus_seed_{seed}.parquet"
-
-        df_consensus.write_parquet(file_output_path)
-
-        print(f"\n✨ Succès ! Le consensus Polars a été sauvegardé dans tes inputs :")
-        print(f"   --> {file_output_path}")
-        print(f"   --> Nombre de variables robustes (5/5 folds) : {df_consensus.filter(pl.col('is_pure_consensus') == 1).height}")
-    return
+    probas = all_probas_calib
+    y_test = all_y_test_global
+    return probas, y_test
 
 
 @app.cell(hide_code=True)
@@ -1981,6 +1311,7 @@ def _(
     Parallel,
     Path,
     config_models,
+    config_transparent,
     delayed,
     exp,
     extension,
@@ -1993,7 +1324,6 @@ def _(
     run_lasso,
     save_figure,
     seed,
-    transparent,
 ):
     mo.stop(not run_lasso.value, "Clique pour lancer")
     print("Lasso Path lancé")
@@ -2053,7 +1383,7 @@ def _(
 
             if save_figure.value:
                 filename = f"L1_Log_path_fold_{fold_idx_L1 + 1}.png"
-                plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches="tight", transparent=transparent.value)
+                plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches="tight", transparent=config_transparent)
             plt.show()
     return
 
@@ -2069,14 +1399,14 @@ def _(config_models, mo):
 @app.cell
 def _(
     config_models,
+    config_transparent,
     output_dir,
     probas,
     save_figure,
     sfu,
-    transparent,
     y_test,
 ):
-    auc_final, fpr, tpr, thresholds_roc = sfu.roc_curve_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
+    auc_final, fpr, tpr, thresholds_roc = sfu.roc_curve_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, config_transparent)
     return (auc_final,)
 
 
@@ -2091,14 +1421,14 @@ def _(config_models, mo):
 @app.cell
 def _(
     config_models,
+    config_transparent,
     output_dir,
     probas,
     save_figure,
     sfu,
-    transparent,
     y_test,
 ):
-    non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1 = sfu.kde_plot_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
+    non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1 = sfu.kde_plot_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, config_transparent)
     return asymetric_incertitude, mean_p1, mean_risk_diff, non_overlap_area
 
 
@@ -2113,14 +1443,14 @@ def _(config_models, mo):
 @app.cell
 def _(
     config_models,
+    config_transparent,
     output_dir,
     probas,
     save_figure,
     sfu,
-    transparent,
     y_test,
 ):
-    best_f1, best_t = sfu.f1_score_evolution(probas, y_test, config_models.models_name, save_figure.value, output_dir, transparent.value)
+    best_f1, best_t = sfu.f1_score_evolution(probas, y_test, config_models.models_name, save_figure.value, output_dir, config_transparent)
     return best_f1, best_t
 
 
@@ -2136,14 +1466,14 @@ def _(config_models, mo):
 def _(
     best_t,
     config_models,
+    config_transparent,
     output_dir,
     probas,
     save_figure,
     sfu,
-    transparent,
     y_test,
 ):
-    y_pred, mcc = sfu.confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, save_figure.value, output_dir, transparent.value)
+    y_pred, mcc = sfu.confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, save_figure.value, output_dir, config_transparent)
     return mcc, y_pred
 
 
@@ -2156,8 +1486,8 @@ def _(config_models, mo):
 
 
 @app.cell
-def _(output_dir, probas, save_figure, sfu, transparent, y_test):
-    global_brier = sfu.brier_evolution(probas, y_test, save_figure.value, output_dir, transparent=transparent.value, )
+def _(config_transparent, output_dir, probas, save_figure, sfu, y_test):
+    global_brier = sfu.brier_evolution(probas, y_test, save_figure.value, output_dir, transparent=config_transparent, )
     return (global_brier,)
 
 
@@ -2241,24 +1571,34 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
-def _(config_models, exp, joblib, np, patient_col, pl, sfu, target_col, torch):
+@app.cell
+def _(
+    config_models,
+    config_optuna,
+    exp,
+    joblib,
+    np,
+    patient_col,
+    pl,
+    sfu,
+    target_col,
+    torch,
+):
     show_shap = {}
     model_name_shap = config_models.models_name
 
     for f_idx in range(5):
-        output_dir_shap = exp.get_output_path(model_name_shap) / f"fold_{f_idx}"
+        output_dir_shap = exp.get_output_path(model_name_shap, config_optuna = config_optuna) / f"fold_{f_idx}"
         output_dir_shap.mkdir(parents = True, exist_ok = True)
         if config_models.extraction_type == "TSFEL":
             X_train_fold_shap = exp.get_tsfel_boruta("train", f_idx)
             keepVariableList_shap = X_train_fold_shap.parent / f"keepVariableList_2_fold_{f_idx}.npy"
-            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".joblib",  "",)
+            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".joblib",  "", config_optuna = config_optuna)
             clf_shap = joblib.load(loaded_model_shap)
-
             sfu.mesureImportance_tsfel(clf_shap, pl.read_parquet(X_train_fold_shap).select(pl.exclude(patient_col, target_col)), np.load(keepVariableList_shap), top_n=20, class_labels=["Survivors", "Deaths"], savefig = True, transparent = False, folder = output_dir_shap)
 
         else:
-            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".pt",  "",)
+            loaded_model_shap = exp.get_model_path(model_name_shap, f_idx, ".pt",  "", config_optuna = config_optuna)
             checkpoint = torch.load(loaded_model_shap, weights_only = False)
             if config_models.models_name == "InceptionTimeModified":
                 from utilitaries.models.inceptionTimeModified import InceptionModel
@@ -2322,82 +1662,8 @@ def _(mo, run_test):
 
 
 @app.cell
-def _(Path, pd, plt, roc_auc_score, roc_curve):
-    from tabulate import tabulate
-    def générer_rapport_comparatif(configurations, y_true_base = None, save_dir=None, table_format='fancy_grid', saps2_pred = None, saps2_true = None):
-        """
-        Génère un tableau comparatif et une courbe ROC unique à partir de scores et 
-        de prédictions déjà calculés.
-
-        y_true_base : tableau des vraies étiquettes 
-        configurations : dictionnaire contenant les scores, prédictions et couleurs pour chaque modèle
-        """
-        results = {}
-
-        # Configuration de la figure ROC
-        plt.figure(figsize=(8, 8))
-        for name, config in configurations:
-            # Extraction des vecteurs précalculés
-            probas = config['probas']
-            if y_true_base is None:
-                y_true = config['y_true']
-            else:
-                y_true = y_true_base
-
-            # Calcul des métriques
-            f1 = config['f1_score']
-            mcc = config['mcc']
-            auc = config['auc']
-            brier = config ['brier']
-
-            # Stockage pour le tableau
-            results[name] = {
-                'F1-Score': f1,
-                'MCC': mcc,
-                'AUC': auc,
-                "brier" : brier
-            }
-
-            # Ajout à la courbe ROC collective
-            fpr, tpr, _ = roc_curve(y_true, probas)
-            color = config.get('color', None)
-            plt.plot(fpr, tpr, label=f'{name} (AUC = {auc:.3f})', color=color, lw=2)
-
-        # 1. Génération du tableau avec tabulate
-        df_results = pd.DataFrame(results).T
-        print("\n=== PERFORMANCE COMPARISON TABLE ===")
-        print(tabulate(df_results, headers='keys', tablefmt=table_format, floatfmt=".3f"))
-        # Calcul de l'AUC de IGS2 : 
-        if saps2_pred is not None and saps2_true is not None:
-            fpr_saps2, tpr_saps2, _ = roc_curve(saps2_true, saps2_pred)
-            auc_saps2 = roc_auc_score(saps2_true, saps2_pred)
-            name_saps2 = "IGS II Score"
-            plt.plot(fpr_saps2, tpr_saps2, label=f'{name_saps2} (AUC = {auc_saps2:.3f})', lw=2, linestyle='-.')
-        # 2. Finalisation de la courbe ROC
-        plt.plot([0, 1], [0, 1], linestyle='--', label='Chance', color='gray')
-        plt.xlabel('False Positive Rate (FPR)')
-        plt.ylabel('True Positive Rate (TPR)')
-        plt.title('ROC Curves Comparison')
-        plt.legend(loc='lower right')
-        plt.grid(True, linestyle=':', alpha=0.6)
-
-        # Sauvegarde automatique des artefacts
-        if save_dir:
-            output_path = Path(save_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
-
-            # Sauvegarde de l'image
-            plt.savefig(output_path / "collective_roc_curve.png", dpi=300, bbox_inches="tight")
-
-            # Sauvegarde du tableau au format LaTeX booktabs pour Overleaf
-            with open(output_path / "results_table.tex", "w") as f:
-                f.write(tabulate(df_results, headers='keys', tablefmt='latex_booktabs', floatfmt=".3f"))
-
-        plt.show()
-
-        return df_results
-
-    return (générer_rapport_comparatif,)
+def _():
+    return
 
 
 @app.cell
@@ -2522,87 +1788,23 @@ def _(mo):
 
 @app.cell
 def _(
-    balance,
-    cleaning,
     custom_features,
     keep_feats,
-    keep_pop,
     mo,
-    mo_utils,
-    mode,
     models,
-    modex,
     run,
     run_optuna,
-    save_figure,
     seed,
+    spl,
     str_keep_feats,
-    sys,
-    transparent,
-    type_donnees,
     ui_tsfel,
-    y_dd,
+    uid,
 ):
-    # 1. On définit les éléments communs du haut
-    # Remplacement des tirets par mo.hr() pour de vraies lignes de séparation HTML propres
-    sidebar_items = [
-        mo.md(mo_utils.config_sidebar),
-        mo.md(f"<U>Seed utilisée pour l'ensemble du code : **{seed}**</U>"),
-        mo.md(f"Version de python : {sys.version}"),
-        mo.md("-----"),
-        type_donnees,
-        mo.md("-----"),
-        mode,
-        mo.md("-----"),
-        models,
-    ]
-
-    # 2. On ajoute les éléments spécifiques selon la condition
-    if type_donnees.value == "modèle":
-        sidebar_items.extend([
-            balance,
-            ui_tsfel,
-            cleaning,
-            y_dd,
-            keep_pop,
-            modex,
-            custom_features if modex.value == "Mode Custom" else mo.md("*(features fixe)*"),
-            mo.md(f"**Features gardées :** `{keep_feats}`"),
-            mo.md(f"**Soit en Français (dynamic feature only):** \n{str_keep_feats}"),
-        ])
-    else:
-        sidebar_items.extend([
-            y_dd,
-            keep_pop,
-        ])
-
-    # 3. On ajoute les éléments communs du bas
-    sidebar_items.extend([
-        save_figure,
-        transparent,
-        mo.md("-----"),
-    ])
-
-    if type_donnees.value == "modèle":
-        sidebar_items.extend([
-            run_optuna,
-            mo.md("-----"),
-            run,
-        ])
-
-    sidebar_items.extend([
-        mo.md(mo_utils.config_end)
-    ])
-
+    sidebar_items = spl.render_sidebar(uid, models, ui_tsfel, keep_feats, str_keep_feats, run, run_optuna, seed, custom_features)
     mo.sidebar(
         mo.vstack(sidebar_items), 
         width="550px"
     )
-    return
-
-
-@app.cell
-def _():
     return
 
 

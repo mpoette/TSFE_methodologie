@@ -27,10 +27,9 @@ def make_objective_svc_stage1(
         kernel = trial.suggest_categorical("kernel", ["rbf", "linear", "poly"])
         
         params = {
-            # Paramètre de régularisation : crucial en échelle logarithmique
             "C": trial.suggest_float("C", 1e-3, 1e3, log=True),
             "kernel": kernel,
-            "probability": fixed_params.get("probability", True), # Souvent requis pour certaines métriques (ex: AUC)
+            "probability": fixed_params.get("probability", True), # obligatoire pour évaluation
             "class_weight": trial.suggest_categorical("class_weight", ["balanced", None]),
             "random_state": fixed_params.get("random_state", 42),
         }

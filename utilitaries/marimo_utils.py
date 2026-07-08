@@ -24,14 +24,7 @@ class ConfigFenetrage:
     mode : str
 
 MODES = {
-    # "24h début réanimation avec remplissage": ConfigFenetrage(
-    #     name = "24h_debut_rea_fill",
-    #     hour_offset = 0,
-    #     random = False,
-    #     max_hour = 12,
-    #     strict_mode = False,
-    #     used_distribution = "uniform",
-    # ),
+
     "24h début réanimation sans remplissage": ConfigFenetrage(
         name = "24h_debut_rea_no-fill",
         hour_offset = 0,
@@ -41,14 +34,6 @@ MODES = {
         used_distribution = "uniform", # pas utilisé
         mode = "windows"
     ),
-    # "24h fin réanimation avec remplissage" : ConfigFenetrage(
-    #     name = "24h_fin_rea-fill",
-    #     hour_offset = -1,
-    #     max_hour = 12,
-    #     strict_mode = False,
-    #     random = False,
-    #     used_distribution = "uniform", # pas utilisé
-    # ),
      "24h fin réanimation sans remplissage" : ConfigFenetrage(
         name = "24h_fin_rea_no-fill",
         hour_offset = -1,
@@ -58,38 +43,6 @@ MODES = {
         used_distribution = "uniform", # pas utilisé
         mode = "windows"
      ),
-    # "24h aléatoire 'real' avec remplissage": ConfigFenetrage(
-    #     name = "24h_alea_real_fill",
-    #     hour_offset = 0, # pas utilisé en pratique
-    #     random = True,
-    #     max_hour = 12,
-    #     strict_mode = False,
-    #     used_distribution = "real",
-    # ),
-    # "24h aléatoire 'real' sans remplissage": ConfigFenetrage(
-    #     name = "24h_alea_real_no-fill",
-    #     hour_offset = 0,
-    #     random = True,
-    #     max_hour = 12,
-    #     strict_mode = True,
-    #     used_distribution = "real",
-    # ),
-    # "24h aléatoire 'flexible' sans remplissage": ConfigFenetrage(
-    #     name = "24h_alea_flex_no-fill",
-    #     hour_offset = 0,
-    #     random = True,
-    #     max_hour = 12, # osef on l'utilise pas
-    #     strict_mode = True,
-    #     used_distribution = "flexible",
-    # ),
-    # "24h aléatoire 'flexible' avec remplissage": ConfigFenetrage(
-    #     name = "24h_alea_flex_no-fill",
-    #     hour_offset = 0,
-    #     random = True,
-    #     max_hour = 12, # osef on l'utilise pas
-    #     strict_mode = False,
-    #     used_distribution = "flexible",
-    # ),
      "24h aléatoire 'lomax' prio 24h sans remplissage" : ConfigFenetrage(
         name = "24h_alea_lomax_prio24h_no-fill",
         hour_offset = 0, # pas utilisé
@@ -191,14 +144,6 @@ MODELS = {
         extraction_type = "TSFEL",
         models_type = "imbalanced"
     ),
-    # "RandomForest tsFresh" : ConfigModels(
-    #     models_name = "RandomForest tsFresh",
-    #     extraction_type = "tsFresh"
-    # ),
-    # "XGBoost tsFresh" : ConfigModels(
-    #     models_name = "XGBoost tsFresh",
-    #     extraction_type = "tsFresh"
-    # )
 }
 
 @dataclass(frozen=True)

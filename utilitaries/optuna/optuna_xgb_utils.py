@@ -10,6 +10,83 @@ def _to_numpy(X):
         return X.to_numpy()
     return np.asarray(X)
 
+def make_objective_xgb_stage1_anti_overfit(
+    X_train,
+    y_train,
+    metric_name="balanced_accuracy",
+    fixed_params=None,
+):
+    fixed_params = fixed_params or {}
+
+    X_train = _to_numpy(X_train)
+    y_train = np.asarray(y_train)
+
+    def objective(trial):
+        # Configuration des hyperparamètres blindée contre le surapprentissage
+        params = {
+            # 1. On plafonne les arbres mais on ralentit drastiquement le pas
+            "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=100),
+            
+            # CRUCIAL : On force un apprentissage lent (max 0.05 au lieu de 0.3)
+            # Ça évite que le learning_rate cannibalise toute l'étude Optuna
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 5e-2, log=True),
+            
+            # 2. On restreint sévèrement la structure des arbres
+            # Des "weak learners" purs (profondeur 2 à 5 max)
+            "max_depth": trial.suggest_int("max_depth", 2, 5),
+            
+            # On force le modèle à avoir une assise solide par feuille (anti-longue traîne)
+            "min_child_weight": trial.suggest_int("min_child_weight", 10, 80),
+            
+            # Gain minimal requis pour couper un nœud (pénalité sur la complexité)
+            "gamma": trial.suggest_float("gamma", 1e-3, 5.0, log=True),
+            
+            # 3. Sous-échantillonnage drastique pour perturber la mémorisation
+            # Chaque arbre ne voit qu'une fraction des lignes et des colonnes TSFEL
+            "subsample": trial.suggest_float("subsample", 0.4, 0.7, step=0.1),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 0.7, step=0.1),
+            
+            # 4. Régularisation L1 (Lasso) et L2 (Ridge) sur les poids des feuilles
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-1, 20.0, log=True),
+            
+            # Paramètres fixes indispensables
+            "random_state": fixed_params.get("random_state", 42),
+            "n_jobs": fixed_params.get("n_jobs", -1),
+            "eval_metric": "logloss",
+        }
+
+        clf = XGBClassifier(**params)
+
+        cv = StratifiedKFold(
+            n_splits=fixed_params.get("n_splits", 5),
+            shuffle=True,
+            random_state=fixed_params.get("random_state", 42),
+        )
+
+        try:
+            scores = cross_val_score(
+                clf,
+                X_train,
+                y_train,
+                cv=cv,
+                scoring=metric_name,
+                n_jobs=fixed_params.get("cv_n_jobs", 1),
+            )
+
+            score = np.mean(scores)
+
+            if not np.isfinite(score):
+                raise FloatingPointError("Score non fini.")
+
+            return score
+
+        except FloatingPointError:
+            raise optuna.TrialPruned("FloatingPointError détecté.")
+        except Exception as e:
+            raise optuna.TrialPruned(f"Trial échoué: {e}")
+
+    return objective
 
 def make_objective_xgb_stage1(
     X_train,
@@ -28,25 +105,26 @@ def make_objective_xgb_stage1(
             # Nombre d'arbres
             "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
             
-            # Profondeur : JAMAIS de None ou 0 en boosting. On cherche généralement bas (3 à 10)
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            # On baisse le plafond de profondeur (8 au lieu de 10)
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
             
-            # Taux d'apprentissage (learning rate / eta) - Crucial en log=True
+            # Empêche de diviser le nœud pour des broutilles
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+            
+            # Gain minimal requis pour faire un split
+            "gamma": trial.suggest_float("gamma", 1e-8, 1.0, log=True),
+            
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 3e-1, log=True),
             
-            # Sous-échantillonnage pour éviter l'overfitting (équivalent du bootstrap)
             "subsample": trial.suggest_float("subsample", 0.5, 1.0, step=0.1),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0, step=0.1),
             
-            # Régularisation (L1 et L2)
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
             
-            # Gestion du déséquilibre des classes (remplace class_weight)
-            # scale_pos_weight est utile en binaire. Si tu es en multiclasse, on gère autrement.
             "random_state": fixed_params.get("random_state", 42),
             "n_jobs": fixed_params.get("n_jobs", -1),
-            "eval_metric": "logloss", # Évite les warnings XGBoost
+            "eval_metric": "logloss",
         }
 
         clf = XGBClassifier(**params)
@@ -103,7 +181,7 @@ def run_xgb_stage1_search(
         load_if_exists=True,
     )
 
-    objective = make_objective_xgb_stage1(
+    objective = make_objective_xgb_stage1_anti_overfit(
         X_train=X_train,
         y_train=y_train,
         metric_name=metric_name,

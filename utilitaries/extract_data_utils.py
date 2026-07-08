@@ -26,8 +26,6 @@ def extract_data_survie(file_path):
         # Je corrige ici le mauvais stockage de ecmo_type en str et non en bool
         pl.col("ecmo_all").str.to_lowercase().str.strip_chars().eq("true").alias("ecmo_all"),
     ])
- 
-    print("Plan de chargement des données dynamiques préparé (Lazy).")
     return df
 
 

@@ -83,7 +83,7 @@ def resample_icu_stays(df: pl.DataFrame, target_length: int, features: list[str]
         grille_cible.select(colonnes_ordre)
     ], how="vertical").sort(["encounterId", "t_norm", "est_origine"], descending=[False, False, True])
 
-    # 6. Interpolation via Group_by + Explode (Game changer pour la RAM)
+    # 6. Interpolation via Group_by + Explode
     expressions_interp = []
     if num_features:
         expressions_interp.extend([

@@ -22,6 +22,8 @@ from sklearn.metrics import (
 import utilitaries.features_extraction_utils as feu
 from pathlib import Path
 
+import utilitaries.evaluate_utils as evaluate
+
 def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global, 
                              model_name, extraction_type, calibration, save_figure, 
                              output_dir, transparent, calibration_mode = "Platt"):
@@ -44,7 +46,6 @@ def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global,
     plt.legend(loc="lower right")
     plt.grid(True)
 
-    # Sauvegarde propre de l'image
     if save_figure:
         plt.savefig(output_dir / Path("calibration_curve"), dpi=300, bbox_inches="tight", transparent=transparent)
 
@@ -52,7 +53,8 @@ def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global,
     
 def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     (fpr, tpr, thresholds) = roc_curve(y_test, probas)
-    # là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle elle est calculée par rapport à 20% des données de train (validation) alors que là c'est par rapport à test.
+    # là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle 
+    # elle est calculée par rapport à 20% des données de train (validation) alors que là c'est par rapport à test.
     auc_final = roc_auc_score(y_test, probas)
     plt.figure(figsize=(6, 6))
     plt.plot(fpr, tpr, label=f'ROC {model_name} (AUC = {auc_final:.3f})')
@@ -149,6 +151,7 @@ def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
     # score global de brier
     global_brier = brier_score_loss(df_brier["y"], df_brier["pred"])
     print("Brier score: ",global_brier)
+
     # bins fixes de risque
     df_brier_fixed = (
         df_brier.with_columns(
@@ -203,7 +206,6 @@ def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
     fixed_pd = df_brier_fixed.to_pandas()
     dec_pd = df_brier_dec.to_pandas()
 
-    # Pour avoir 2 plots au même endroit, on utilise twinx
     fig, ax1 = plt.subplots(figsize=(7, 5))
 
     ax1.bar(fixed_pd["x"], fixed_pd["n"], width=0.08, alpha=0.3)
@@ -335,13 +337,10 @@ def plot_all_figs(probas, y_test, config_models, calibration, save_figure, outpu
     return auc_final, fpr, tpr, th, brier_score, best_f1, best_t, y_pred, mcc, non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1
 
 
-def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder = "", savefig = True, transparent = True, seed = 42):
+def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder="", savefig=True, transparent=True, seed=42):
     """
     Analyse et visualise l'importance des features (MDI, SHAP) pour n'importe quel 
-    ensemble de features TSFEL (ex: après filtrage Boruta).
-    
-    X_train : numpy.ndarray ou pandas.DataFrame (les features déjà filtrées)
-    varnames : liste ou array des noms de ces features
+    ensemble de features TSFEL.
     """
     np.random.seed(seed)
     if isinstance(X_train, pl.DataFrame):
@@ -350,36 +349,45 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     if isinstance(X_train, pd.DataFrame):
         X_arr = X_train.values
     else:
-        X_arr = np.asarray(X_train) # Conserve le format 3D pour InceptionTime
+        X_arr = np.asarray(X_train) 
         
     varnames = list(varnames)
-    
-    # On ajuste top_n si on a moins de features que prévu
     k = int(min(top_n, len(varnames)))
-    # Si c'est un GridSearchCV / RandomizedSearchCV, on prend le meilleur modèle
+    
     if hasattr(model, 'best_estimator_'):
         model = model.best_estimator_
+    shap_model = evaluate.get_root_estimator(model)
     # ----- 1) Importances "forêt" -----
     importances = None
-    # Gestion des modèles calibrés pour récupérer l'importance des features
     if hasattr(model, 'feature_importances_'):
         importances = model.feature_importances_
     elif hasattr(model, 'calibrated_classifiers_'):
-        # On fait la moyenne des importances de tous les sous-modèles de la calibration
         importances = np.mean([
             clf.estimator.feature_importances_ 
             for clf in model.calibrated_classifiers_
         ], axis=0)
+    elif hasattr(shap_model, 'feature_importances_'): # Sécurité supplémentaire si le wrapper masquait l'attribut
+        importances = shap_model.feature_importances_
     else:
-        print("⚠️ Ce modèle ne supporte pas 'feature_importances_'.")
-        print("   -> Saut de l'étape MDI, passage direct à l'analyse SHAP.")
+        print("⚠️ Ce modèle ne supporte pas 'feature_importances_'. Passage au SHAP.")
+
     if importances is not None:
         sorted_idx = np.argsort(importances)[::-1]
         sorted_varnames = np.array(varnames)[sorted_idx]
         sorted_importances = importances[sorted_idx]
+
+        # === AJOUT : Agrégation des MDI individuelles ===
+        if len(sorted_importances) > k:
+            autres_importance = np.sum(sorted_importances[k:])
+            plot_importances = np.append(sorted_importances[:k], autres_importance)
+            plot_varnames = np.append(sorted_varnames[:k], f"Others Features (N={len(sorted_varnames[:k])})")
+        else:
+            plot_importances = sorted_importances
+            plot_varnames = sorted_varnames
+
         plt.figure(figsize=(12, 4))
-        plt.bar(range(k), sorted_importances[:k])
-        plt.xticks(range(k), sorted_varnames[:k], rotation=90)
+        plt.bar(range(len(plot_importances)), plot_importances)
+        plt.xticks(range(len(plot_varnames)), plot_varnames, rotation=90)
         plt.ylabel("Importance (forest)")
         plt.tight_layout()
         if savefig:
@@ -394,13 +402,23 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
             'Feature_Globale': racines_varnames,
             'Importance': importances
         })
-        # On additionne les importances des sous-features appartenant à la même feature globale
+        
         df_mdi_agg = df_mdi.groupby('Feature_Globale').sum().sort_values(by='Importance', ascending=False)
         k_agg = int(min(top_n, len(df_mdi_agg)))
+
+        # === AJOUT : Agrégation des MDI globales ===
+        if len(df_mdi_agg) > k_agg:
+            autres_mdi_agg = df_mdi_agg.iloc[k_agg:].sum()
+            df_plot_mdi_agg = pd.concat([
+                df_mdi_agg.head(k_agg),
+                pd.DataFrame([autres_mdi_agg], index=["Autres Features Globales"])
+            ])
+        else:
+            df_plot_mdi_agg = df_mdi_agg
         
         plt.figure(figsize=(12, 4))
-        plt.bar(range(k_agg), df_mdi_agg['Importance'].head(k_agg))
-        plt.xticks(range(k_agg), df_mdi_agg.index[:k_agg], rotation=90)
+        plt.bar(range(len(df_plot_mdi_agg)), df_plot_mdi_agg['Importance'])
+        plt.xticks(range(len(df_plot_mdi_agg)), df_plot_mdi_agg.index, rotation=90)
         plt.ylabel("Cumulative Global Importance (forest)")
         plt.title("Top Global Feature Importance (MDI)")
         plt.tight_layout()
@@ -411,19 +429,13 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     else:
         suffixes = feu.generer_suffixes_tsfel()
         racines_varnames = [feu.extraire_racine(name, suffixes) for name in varnames]
-    # ----- 2) SHAP -----
-    X_pure_numpy = np.array(X_arr, dtype = np.float32)
-    shap_model = model
-    # On autorise le multicoeur
-    if hasattr(model, 'n_jobs'):
-        model.n_jobs = -1
 
-    if hasattr(model, 'calibrated_classifiers_'):
-        # On prend le premier estimateur de la calibration (ils partagent la même structure)
-        shap_model = model.calibrated_classifiers_[0].estimator
-    
-    if shap_model.__class__.__name__ == "FrozenEstimator" and hasattr(shap_model, "estimator"):
-        shap_model = shap_model.estimator
+    # ----- 2) SHAP -----
+    X_pure_numpy = np.array(X_arr, dtype=np.float32)
+
+    if hasattr(shap_model, 'n_jobs'):
+        shap_model.n_jobs = -1
+        
     if isinstance(shap_model, XGBClassifier):
         explainer = shap.TreeExplainer(shap_model)
     else:
@@ -431,9 +443,9 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
             explainer = shap.Explainer(shap_model)
         except Exception:
             explainer = shap.TreeExplainer(shap_model)
+            
     shap_values = explainer.shap_values(X_pure_numpy)
 
-    # Gestion de la structure des shap_values selon la version de SHAP / type de modèle
     if isinstance(shap_values, list):
         shap_arr = np.stack(shap_values, axis=-1)
     elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
@@ -441,45 +453,47 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 2:
         shap_arr = shap_values[:, :, None]
     else:
-        raise ValueError(f"Format SHAP inattendu: type={type(shap_values)}, shape={getattr(shap_values, 'shape', None)}")
+        raise ValueError(f"Format SHAP inattendu: type={type(shap_values)}")
 
     n_samples, n_features, n_classes = shap_arr.shape
 
-    # ----- 3) Agrégations SHAP -----
+    # ----- 3) Agrégations SHAP individuelles -----
     mean_abs_by_class = np.abs(shap_arr).mean(axis=0)  # (n_features, n_classes)
     feature_sum = mean_abs_by_class.sum(axis=1)
     
-    # On ajuste le top index au nombre réel de features disponibles
     top_idx = np.argsort(feature_sum)[::-1][:min(k, n_features)]
-    plot_data = mean_abs_by_class[top_idx]
-    plot_labels = [varnames[i] for i in top_idx]
+    
+    # === AJOUT : Agrégation des SHAP individuels ===
+    if n_features > k:
+        other_idx = np.argsort(feature_sum)[::-1][k:]
+        others_shap = mean_abs_by_class[other_idx].sum(axis=0) # Somme par classe
+        plot_data = np.vstack([mean_abs_by_class[top_idx], others_shap])
+        plot_labels = [varnames[i] for i in top_idx] + ["Autres Features"]
+    else:
+        plot_data = mean_abs_by_class[top_idx]
+        plot_labels = [varnames[i] for i in top_idx]
 
-    # Noms de classes dynamiques
     if class_labels is not None:
         class_names = list(class_labels)
     else:
-        # Si pas de labels, on génère par défaut ["0", "1"] basés sur la vraie logique binaire
-        # et non pas sur la dimension technique de shap_arr (n_classes)
         class_names = ["0", "1"] if (shap_arr.ndim == 3 or (shap_arr.ndim == 2 and "XGB" in str(type(shap_model)))) else [str(i) for i in range(n_classes)]
 
-    # Si XGBoost nous donne une seule matrice, elle correspond TOUJOURS à la classe positive (la dernière)
     if n_classes == 1 and len(class_names) > 1:
-        # On force la liste des noms à ne contenir que la classe d'intérêt (Deaths)
         class_names = [class_names[-1]]
 
-    # ----- 4) Barres empilées -----
+    # ----- 4) Barres empilées SHAP -----
     fig, ax = plt.subplots(figsize=(16, 8))
-    left = np.zeros(len(top_idx))
+    left = np.zeros(len(plot_labels))
     for c_id in range(n_classes):
         ax.barh(
-            y=np.arange(len(top_idx)),
+            y=np.arange(len(plot_labels)),
             width=plot_data[:, c_id],
             left=left,
             label=class_names[c_id]
         )
         left += plot_data[:, c_id]
         
-    ax.set_yticks(np.arange(len(top_idx)))
+    ax.set_yticks(np.arange(len(plot_labels)))
     ax.set_yticklabels(plot_labels)
     ax.invert_yaxis()
     ax.set_xlabel("mean(|SHAP value|) (average impact per class)")
@@ -511,35 +525,41 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
     unique_classes = np.unique(y_pred)
     X_by_class = {cls: X_arr[y_pred == cls] for cls in unique_classes}
     
-    # ----- 7) Importance globale agrégée
+    # ----- 7) Importance globale agrégée SHAP -----
     df_shap_dict = {'Feature_Globale': racines_varnames}
     for c_id in range(n_classes):
         df_shap_dict[f'SHAP_class_{c_id}'] = mean_abs_by_class[:, c_id]
     
-    # Fusionner et grouper par feature globale en sommant
     df_shap_agg = pd.DataFrame(df_shap_dict).groupby('Feature_Globale').sum()
-    
-    # Calcul de la somme toutes classes confondues pour trier le Top N global
     df_shap_agg['Total_Impact'] = df_shap_agg.sum(axis=1)
     df_shap_agg = df_shap_agg.sort_values(by='Total_Impact', ascending=False).drop(columns=['Total_Impact'])
     
     k_shap_agg = int(min(top_n, len(df_shap_agg)))
-    df_shap_plot = df_shap_agg.head(k_shap_agg)
     
-    # Graphique SHAP agrégé
+    # === AJOUT : Agrégation des SHAP globaux ===
+    if len(df_shap_agg) > k_shap_agg:
+        autres_shap_agg = df_shap_agg.iloc[k_shap_agg:].sum()
+        df_shap_plot = pd.concat([
+            df_shap_agg.head(k_shap_agg),
+            pd.DataFrame([autres_shap_agg], index=["Autres Features Globales"])
+        ])
+    else:
+        df_shap_plot = df_shap_agg
+    
+    # Graphique SHAP agrégé global
     fig, ax = plt.subplots(figsize=(16, 8))
-    left_agg = np.zeros(k_shap_agg)
+    left_agg = np.zeros(len(df_shap_plot))
     
     for c_id in range(n_classes):
         ax.barh(
-            y=np.arange(k_shap_agg),
+            y=np.arange(len(df_shap_plot)),
             width=df_shap_plot[f'SHAP_class_{c_id}'].values,
             left=left_agg,
             label=class_names[c_id]
         )
         left_agg += df_shap_plot[f'SHAP_class_{c_id}'].values
         
-    ax.set_yticks(np.arange(k_shap_agg))
+    ax.set_yticks(np.arange(len(df_shap_plot)))
     ax.set_yticklabels(df_shap_plot.index)
     ax.invert_yaxis()
     ax.set_xlabel("Cumulative mean(|SHAP value|) (average impact per class)")
@@ -551,56 +571,12 @@ def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None
         plt.savefig(f"{folder}/global_shap_importance.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    # =====================================================================
-    # BLOC : GENERATION DU GRAPHIQUE SHAP SUMMARY PLOT (ROSE/BLEU) CUMULÉ
-    # =====================================================================
-
-    # 1. Extraction des racines uniques via les suffixes TSFEL
-    suffixes = feu.generer_suffixes_tsfel()
-    racines_varnames = [feu.extraire_racine(name, suffixes) for name in varnames]
-
-    # 2. Agrégation de la matrice X par racine (en transposant pour éviter les warnings Pandas)
-    # On prend la moyenne des sous-features pour conserver une notion de valeur "Basse" ou "Haute"
-    df_X = pd.DataFrame(X_arr, columns=varnames)
-    X_global_df = df_X.T.groupby(racines_varnames).mean().T
-
-    # Liste finale des variables fusionnées (triées automatiquement par le groupby)
-    liste_racines = list(X_global_df.columns)
-    X_global_arr = X_global_df.values
-
-    # 3. Agrégation des Shapley Values pour la classe de ton choix (ex: classe 0)
-    target_class_idx = n_classes - 1
-    actual_class_name = class_names[-1]
-    shap_classe_pure = shap_arr[..., target_class_idx] # Forme (n_samples, n_features)
-
-    # Initialisation de la matrice SHAP globale : (n_samples, n_racines)
-    shap_global_arr = np.zeros((n_samples, len(liste_racines)), dtype=np.float32)
-
-    # Remplissage par la somme des contributions SHAP de chaque sous-feature
-    for idx, racine in enumerate(liste_racines):
-        indices_sous_features = [i for i, r in enumerate(racines_varnames) if r == racine]
-        shap_global_arr[:, idx] = shap_classe_pure[:, indices_sous_features].sum(axis=1)
-
-    # 4. Affichage du graphique SHAP Summary Plot (Bleu / Rose) fusionné
-    plt.figure(figsize=(10, 6))
-    shap.summary_plot(
-        shap_global_arr, 
-        X_global_arr, 
-        feature_names=liste_racines, 
-        show=False
-    )
-    plt.title(f"SHAP Value Impact (Global Fused) - {actual_class_name}")
-    plt.tight_layout()
-
-    if savefig:
-        plt.savefig(f"{folder}/global_fused_shap_summary_{actual_class_name}.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/global_fused_shap_summary_{actual_class_name}.png", dpi=300, bbox_inches="tight")
-    plt.show()
+    # On retourne les tops originaux purs (sans la catégorie "Autres")
     return {
         "X_by_class": X_by_class,
-        "top_feat": plot_labels,
-        "top_global_feat_mdi" : list(df_mdi_agg.index[:k_agg]),
-        "top_global_feat_shap" : list(df_shap_plot.index)
+        "top_feat": [varnames[i] for i in top_idx],
+        "top_global_feat_mdi" : list(df_mdi_agg.index[:k_agg]) if importances is not None else [],
+        "top_global_feat_shap" : list(df_shap_agg.index[:k_shap_agg])
     }
 
 def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **paths):

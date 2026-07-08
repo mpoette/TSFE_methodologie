@@ -1,12 +1,10 @@
 import optuna
 import numpy as np
 
-# ─── LA CONSTANTE COMMUNE À TOUT LE PROJET ───
 OPTUNA_STORAGE = "sqlite:///optuna.db"
 
 
 def get_params(study_name, default_params, storage=OPTUNA_STORAGE):
-    # On met OPTUNA_STORAGE par défaut ici aussi !
     params = default_params.copy()
     use_defaults = True
 

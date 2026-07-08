@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 import re
 from joblib import Parallel, delayed
 
-
 import warnings
 # Monkey patch pour contourner les erreurs d'histogramme
 import tsfel.feature_extraction.features as tsfel_feats
@@ -35,23 +34,23 @@ def _process_single_patient(g, cfg, feature_cols, patient_col, target_col):
             category=RuntimeWarning,
         )
 
-    patient_id = g[patient_col][0]
-    X_pl = g.select(feature_cols)
-    
-    # Conversion Pandas obligatoire pour TSFEL
-    X_pd = X_pl.to_pandas()
-    X_pd = X_pd.apply(pd.to_numeric, errors="coerce")
+        patient_id = g[patient_col][0]
+        X_pl = g.select(feature_cols)
+        
+        # Conversion Pandas obligatoire pour TSFEL
+        X_pd = X_pl.to_pandas()
+        X_pd = X_pd.apply(pd.to_numeric, errors="coerce")
 
-    # Extraction locale
-    feats_pd = tsfel.time_series_features_extractor(cfg, X_pd, fs=1, verbose=0)
-    
-    # Post-processing et typage
-    feats_pd[target_col] = g[target_col][-1]
-    feats_pd[patient_col] = patient_id
-    cols_to_cast = [c for c in feats_pd.columns if c not in [patient_col, target_col]]
-    feats_pd[cols_to_cast] = feats_pd[cols_to_cast].astype(float)
-    
-    return pl.from_pandas(feats_pd)
+        # Extraction locale
+        feats_pd = tsfel.time_series_features_extractor(cfg, X_pd, fs=1, verbose=0)
+        
+        # Post-processing et typage
+        feats_pd[target_col] = g[target_col][-1]
+        feats_pd[patient_col] = patient_id
+        cols_to_cast = [c for c in feats_pd.columns if c not in [patient_col, target_col]]
+        feats_pd[cols_to_cast] = feats_pd[cols_to_cast].astype(float)
+        
+        return pl.from_pandas(feats_pd)
 
 
 def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_col):
@@ -66,13 +65,11 @@ def extract_tsfel_per_patient(df, patient_col, time_col, feature_cols, target_co
         cfg = tsfel.get_features_by_domain()
         cfg.pop("spectral", None)  # On retire le domaine spectral obsolète ici
         
-        # 2. Découpage en groupes par patient (Polars fait ça très vite)
+        # 2. Découpage en groupes par patient
         groups = df.partition_by(patient_col, maintain_order=True)
 
         print(f"Lancement du calcul parallèle sur {len(groups)} patients...")
         
-        # n_jobs=-1 utilise TOUS les coeurs du serveur
-        # require='sharedmem' évite de copier tout le dataframe en mémoire pour chaque cœur (gain de RAM)
         results = Parallel(n_jobs=-1)(
             delayed(_process_single_patient)(g, cfg, feature_cols, patient_col, target_col)
             for g in tqdm(groups, desc="Extraction TSFEL parallèle", unit="patient")
@@ -93,6 +90,7 @@ def filtrage_corr_var(Dataset_train, Dataset_test, patient_col, target_col):
     test_meta = Dataset_test.select(intruder).to_pandas().reset_index(drop=True)
 
     train_X = Dataset_train.drop(intruder).to_pandas()
+
     # On s'assure que l'ordre est toujours le même
     train_X = train_X.reindex(sorted(train_X.columns), axis=1)
     test_X = Dataset_test.drop(intruder).to_pandas()

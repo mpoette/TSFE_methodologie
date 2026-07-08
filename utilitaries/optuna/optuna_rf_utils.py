@@ -28,8 +28,7 @@ def make_objective_rf_stage1(
 
     def objective(trial):
         # 1. Remplacement du categorical par un int ordonné (0 correspond à None)
-        max_depth_val = trial.suggest_int("max_depth", 0, 32)
-        real_max_depth = None if max_depth_val == 0 else max_depth_val
+        real_max_depth = trial.suggest_int("max_depth", 3, 12)
 
         # 2. Enregistrement de la vraie valeur pour les analyses
         trial.set_user_attr("actual_max_depth", real_max_depth)
@@ -37,9 +36,9 @@ def make_objective_rf_stage1(
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
             "max_depth": real_max_depth,
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 40),
             "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 20),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "bootstrap": trial.suggest_categorical("bootstrap", [True, False]),
             "class_weight": trial.suggest_categorical(
                 "class_weight",
@@ -91,8 +90,8 @@ def run_rf_stage1_search(
     metric_name="balanced_accuracy",
     fixed_params=None,
 ):
+    # useless sauf pour erreurs
     sampler = optuna.samplers.TPESampler(seed=42)
-    # Note : Le pruner n'élaguera rien en cours de CV sans implémentation manuelle (ex: boucle CV Custom)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=8)
 
     study = optuna.create_study(

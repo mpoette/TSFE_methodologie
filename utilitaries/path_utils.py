@@ -29,15 +29,18 @@ class Experiment:
         """Identifiant lié à la stratégie de features (Modex, Population, Split)."""
         return f"{self._get_data_slug(config_mode)}_{self.modex}{self.str_pop}_seed_{self.seed}{self.stratify_mode}"
 
-    def _get_model_slug(self, class_weight=None, config_mode=None):
+    def _get_model_slug(self, class_weight=None, config_mode=None, config_optuna = False):
         """Identifiant complet incluant la modélisation (équilibrage, poids, calibration)."""
         w = class_weight if class_weight is not None else self.class_weight
-        return (
+        res = (
             f"{self._get_data_slug(config_mode)}_"
             f"{self.str_balance_method}{self.modex}"
             f"{w}{self.str_pop}_seed_{self.seed}"
             f"{self.stratify_mode}{self.calibrated_mode}"
         )
+        if config_optuna:
+            res += "_optuna"
+        return res
 
     # ─── ANCIENS NOMS (Pour rétrocompatibilité si besoin) ───
 
@@ -45,31 +48,31 @@ class Experiment:
     def dirname(self):
         return self._get_model_slug()
     
-    def shortdirname(self, class_weight="", config_mode=""):
+    def shortdirname(self, class_weight="", config_mode="", config_optuna = False):
         # Si une chaîne vide est passée, on force à None pour utiliser la valeur par défaut de self
         w = class_weight if class_weight != "" else None
         cfg = config_mode if config_mode != "" else None
-        return self._get_model_slug(class_weight=w, config_mode=cfg)
+        return self._get_model_slug(class_weight=w, config_mode=cfg, config_optuna = config_optuna)
 
     # ─── ACCÈS AUX CHEMINS (INPUTS / OUTPUTS / MODELS) ───
 
-    def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight="", config_mode=""):
-        path = Path("models") / model_name / self.shortdirname(class_weight, config_mode)
+    def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight="", config_mode="", config_optuna=False):
+        path = Path("models") / model_name / self.shortdirname(class_weight, config_mode, config_optuna)
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}{extension}"
     
-    def get_output_path(self, model_name, class_weight="", config_mode=""):
-        path = Path("outputs") / model_name / self.shortdirname(class_weight, config_mode)
+    def get_output_path(self, model_name, class_weight="", config_mode="", config_optuna=False):
+        path = Path("outputs") / model_name / self.shortdirname(class_weight, config_mode, config_optuna)
         path.mkdir(parents=True, exist_ok=True)
         return path
     
-    def load_model(self, model_name, class_weight="", name_file = "all_res.joblib", config_mode=""):
-        file_path = self.get_output_path(model_name, class_weight, config_mode) / name_file
+    def load_model(self, model_name, class_weight="", name_file = "all_res.joblib", config_mode="", config_optuna=False):
+        file_path = self.get_output_path(model_name, class_weight, config_mode, config_optuna) / name_file
         if not file_path.exists():
             raise FileNotFoundError(f"Fichier introuvable : {file_path}")
         return model_name, joblib.load(file_path)
 
-    # ─── DOSSIER INPUTS : Découplé des paramètres de modélisation ! ───
+    # ─── DOSSIER INPUTS : Découplé des paramètres de modélisation ───
 
     def get_tsfel_parquet_path(self):
         path = Path("inputs") 
@@ -78,7 +81,7 @@ class Experiment:
     
     def get_tsfel_boruta(self, mode, fold_idx, config_mode=""):
         cfg = config_mode if config_mode != "" else None
-        # Boruta ne dépend que des features et de la pop, pas de la calibration ni du rééquilibrage !
+        # Boruta ne dépend que des features et de la pop, pas de la calibration ni du rééquilibrage
         path = Path("inputs") / f"tsfel_{mode}_{self._get_feature_slug(config_mode=cfg)}"
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}.parquet"

@@ -29,8 +29,8 @@ def make_objective_lstm_stage1(
         fc_units_key = trial.suggest_categorical("fc_units", FC_UNITS_KEYS)
 
         # 1. Extraction des exposants pour les puissances de 2
-        hidden_size_exp = trial.suggest_int("hidden_size_exp", 5, 8)  # 2^5=32 à 2^8=256
-        batch_size_exp = trial.suggest_int("batch_size_exp", 4, 7)    # 2^4=16 à 2^7=128
+        hidden_size_exp = trial.suggest_int("hidden_size_exp", 5, 8)  
+        batch_size_exp = trial.suggest_int("batch_size_exp", 4, 7) 
         
         # 2. Calcul des vraies valeurs numériques
         real_hidden_size = 2 ** hidden_size_exp
