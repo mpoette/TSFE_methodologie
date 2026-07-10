@@ -18,7 +18,13 @@ from sklearn.metrics import (
     roc_curve, 
     roc_auc_score,
     f1_score,
+    precision_recall_curve,
+    auc
     )
+
+from sklearn.linear_model import LogisticRegression
+from scipy.interpolate import UnivariateSpline
+
 import utilitaries.features_extraction_utils as feu
 from pathlib import Path
 
@@ -50,7 +56,105 @@ def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global,
         plt.savefig(output_dir / Path("calibration_curve"), dpi=300, bbox_inches="tight", transparent=transparent)
 
     plt.show()
+
+def get_calibration_stats(probas, y_test):
+    """Calcule proprement les statistiques de calibration individuelles."""
+    eps = 1e-7
+    probas_clipped = np.clip(probas, eps, 1 - eps)
+    logits = np.log(probas_clipped / (1 - probas_clipped)).reshape(-1, 1)
     
+    lr = LogisticRegression(penalty=None, solver='lbfgs')
+    lr.fit(logits, y_test)
+    
+    # Spline plus rigide (s=len(nodes)) pour lisser sans ondulations folles
+    sort_idx = np.argsort(probas)
+    probas_sorted = probas[sort_idx]
+    y_sorted = y_test[sort_idx]
+    
+    counts, bins = np.histogram(probas_sorted, bins=30)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    valid = counts > 0
+    bin_centers = bin_centers[valid]
+    
+    obs_rates = []
+    for i in range(len(bins)-1):
+        mask = (probas_sorted >= bins[i]) & (probas_sorted < bins[i+1])
+        obs_rates.append(y_sorted[mask].mean() if mask.sum() > 0 else 0.0)
+    obs_rates = np.array(obs_rates)[valid]
+    
+    spline = UnivariateSpline(bin_centers, obs_rates, w=counts[valid], s=len(bin_centers))
+    smooth_obs = np.clip(spline(probas_sorted), 0, 1)
+    
+    # Métriques
+    errors = np.abs(smooth_obs - probas_sorted)
+    return {
+        "intercept": lr.intercept_[0],
+        "slope": lr.coef_[0][0],
+        "brier": brier_score_loss(y_test, probas),
+        "ici": np.mean(errors),
+        "e90": np.percentile(errors, 90),
+        "x": probas_sorted,
+        "y": smooth_obs
+    }
+
+def calibration_curve_advanced(probas_uncalib, probas_calib, y_test_global, 
+                               model_name, extraction_type, calibration, save_figure, 
+                               output_dir, transparent, calibration_mode="Platt"):
+    """
+    Fonction de calibration de niveau congrès. Affiche l'histogramme de densité,
+    la courbe avant (rouge) et après calibration (bleu) avec toutes les métriques avancées.
+    """
+    fig, ax1 = plt.subplots(figsize=(9, 7))
+    
+    # 1. Histogramme global en arrière-plan
+    ax1.hist(probas_uncalib, bins=40, alpha=0.1, color="grey", density=False)
+    ax1.set_xlabel("Predicted Probability / Risk")
+    ax1.set_ylabel("Number of Patients (Density)")
+    
+    ax2 = ax1.twinx()
+    ax2.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect calibration")
+    
+    # 2. Calcul et tracé du modèle brut (Uncalibrated)
+    stats_raw = get_root_stats = get_calibration_stats(probas_uncalib, y_test_global)
+    ax2.plot(stats_raw["x"], stats_raw["y"], color="red", linewidth=2, 
+             label=f"Before Calib (Brier: {stats_raw['brier']:.3f})")
+    
+    text_str = (
+        f"[Raw Model]\n"
+        f"Intercept: {stats_raw['intercept']:.2f}\n"
+        f"Slope: {stats_raw['slope']:.2f}\n"
+        f"E90: {stats_raw['e90']:.2f}\n"
+    )
+    
+    # 3. Calcul et tracé du modèle calibré (si applicable)
+    if extraction_type == "TSFEL" and calibration:
+        stats_calib = get_calibration_stats(probas_calib, y_test_global)
+        ax2.plot(stats_calib["x"], stats_calib["y"], color="blue", linewidth=2, 
+                 label=f"After {calibration_mode} (Brier: {stats_calib['brier']:.3f})")
+        
+        text_str += (
+            f"\n[Calibrated]\n"
+            f"Intercept: {stats_calib['intercept']:.2f}\n"
+            f"Slope: {stats_calib['slope']:.2f}\n"
+            f"E90: {stats_calib['e90']:.2f}"
+        )
+    
+    # Affichage de la boîte de texte des métriques
+    props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+    ax2.text(0.05, 0.95, text_str, transform=ax2.transAxes, fontsize=9,
+             verticalalignment='top', bbox=props)
+    
+    ax2.set_ylabel("Observed Proportion / Mortality Rate")
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(0, 1)
+    ax2.legend(loc="lower right")
+    plt.title(f"Advanced Calibration Assessment\nModel: {model_name}")
+    plt.tight_layout()
+    
+    if save_figure:
+        plt.savefig(Path(output_dir) / "advanced_calibration_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
+    plt.show()
+
 def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     (fpr, tpr, thresholds) = roc_curve(y_test, probas)
     # là si l'AUC est différente entre le modèle LSTM et ici c'est parce que pour le modèle 
@@ -70,6 +174,49 @@ def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
         plt.savefig(output_dir / Path("roc_curve"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return auc_final, fpr, tpr, thresholds
+
+def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
+    """
+    Génère la courbe Précision-Rappel (PRC) et calcule l'AUPRC.
+    Idéal pour les jeux de données déséquilibrés.
+    """
+    # 1. Calcul des points de la courbe
+    # Note : scikit-learn retourne les thresholds par ordre croissant, 
+    # et ajoute une valeur de précision à 1.0 et de rappel à 0.0 à la fin sans threshold associé.
+    precision, recall, thresholds = precision_recall_curve(y_test, probas)
+    
+    # 2. Calcul de l'AUPRC (Aire sous la courbe Precision-Recall) via la méthode des trapèzes (auc)
+    auprc_final = auc(recall, precision)
+    
+    # 3. Calcul de la ligne de base (Baseline / Chance)
+    # Contrairement à la ROC où la chance vaut toujours 0.5, pour la PRC,
+    # la chance dépend uniquement de la proportion de la classe positive dans le dataset.
+    baseline = sum(y_test) / len(y_test)
+    
+    # 4. Construction graphique
+    plt.figure(figsize=(6, 6))
+    plt.plot(recall, precision, label=f'PRC {model_name} (AUPRC = {auprc_final:.3f})', color='blue', linewidth=2)
+    
+    # Ligne de base horizontale (Hasard)
+    plt.axhline(y=baseline, linestyle='--', color='green', label=f'Chance (Ratio Positifs = {baseline:.3f})')
+
+    plt.xlabel('Recall (True Positive Rate / Sensitivity)')
+    plt.ylabel('Precision (Positive Predictive Value)')
+    plt.title(f'Precision-Recall Curve for model {model_name}')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05]) # 1.05 pour respirer un peu en haut
+    plt.legend(loc='lower left') # Souvent en bas à gauche pour les PRC car la courbe chute vers la droite
+    plt.grid(True)
+    
+    if save_figure:
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path / "prc_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(path / "prc_curve.pdf", bbox_inches="tight", transparent=transparent)
+        
+    plt.show()
+    
+    return auprc_final, precision, recall, thresholds
 
 def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     plt.figure()
@@ -306,6 +453,7 @@ def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, tran
     print(f'The best F1 score of{best_f1: .2f} is reached at threshold{best_t: .2f}')
     return best_f1, best_t
 
+
 def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, output_dir, transparent):
     y_pred = (probas >= best_t).astype(int)
     mcc = matthews_corrcoef(y_test, y_pred)
@@ -336,6 +484,81 @@ def plot_all_figs(probas, y_test, config_models, calibration, save_figure, outpu
     y_pred, mcc = confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, **cfg)
     return auc_final, fpr, tpr, th, brier_score, best_f1, best_t, y_pred, mcc, non_overlap_area, asymetric_incertitude, mean_risk_diff, mean_p1
 
+def plot_decision_curve_analysis(probas, y_test, model_name, save_figure, output_dir, transparent):
+    """
+    Calcule et affiche la courbe de Bénéfice Net (Decision Curve Analysis).
+    Compare le modèle aux stratégies 'Traiter tout le monde' et 'Ne traiter personne'.
+    """
+    y_test = np.asarray(y_test)
+    probas = np.asarray(probas)
+    n = len(y_test)
+    
+    # Nombre total de vrais positifs (décès) et vrais négatifs (survivants)
+    total_pos = np.sum(y_test == 1)
+    total_neg = np.sum(y_test == 0)
+    
+    # Grille de seuils de probabilité p (de 1% à 99%)
+    thresholds = np.linspace(0.01, 0.99, 100)
+    
+    net_benefit_model = []
+    net_benefit_all = []
+    
+    for p in thresholds:
+        # Poids mathématique du dommage (ratio p / (1 - p))
+        weight = p / (1 - p)
+        
+        # 1. Stratégie basée sur le modèle
+        y_pred = (probas >= p).astype(int)
+        tp = np.sum((y_pred == 1) & (y_test == 1))
+        fp = np.sum((y_pred == 1) & (y_test == 0))
+        nb_model = (tp / n) - (fp / n) * weight
+        net_benefit_model.append(nb_model)
+        
+        # 2. Stratégie "Traiter tout le monde" (Tout le monde est considéré positif)
+        nb_all = (total_pos / n) - (total_neg / n) * weight
+        net_benefit_all.append(nb_all)
+        
+    # 3. Stratégie "Ne traiter personne" -> Le bénéfice net est structurellement égal à 0
+    net_benefit_none = np.zeros_like(thresholds)
+    
+    # --- Construction Graphique ---
+    plt.figure(figsize=(8, 6))
+    
+    # Courbe du modèle
+    plt.plot(thresholds, net_benefit_model, color="blue", linewidth=2.5, 
+             label=f"Modèle : {model_name}")
+    
+    # Courbe "Traiter tout le monde"
+    plt.plot(thresholds, net_benefit_all, color="red", linestyle="--", linewidth=1.5, 
+             label="Stratégie : Considérer tout le monde Positif")
+    
+    # Courbe "Ne traiter personne"
+    plt.plot(thresholds, net_benefit_none, color="black", linestyle="-", alpha=0.6, linewidth=1.5, 
+             label="Stratégie : Considérer tout le monde Négatif")
+    
+    # Ajustement des axes pour la pertinence clinique
+    plt.xlim(0.0, 1.0)
+    
+    # On cadre l'axe Y pour éviter que l'effondrement du bénéfice dans les négatifs n'écrase le graphique
+    max_visible_nb = max(max(net_benefit_model), total_pos / n)
+    plt.ylim(-0.05, max_visible_nb + 0.05)
+    
+    plt.xlabel("Seuil de probabilité critique (p)", fontsize=10)
+    plt.ylabel("Bénéfice Net (Net Benefit)", fontsize=10)
+    plt.title(f"Decision Curve Analysis (DCA)\nModel: {model_name}", fontsize=12, fontweight='bold')
+    plt.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="none")
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    
+    if save_figure:
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path / "decision_curve_analysis.png", dpi=300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(path / "decision_curve_analysis.pdf", bbox_inches="tight", transparent=transparent)
+        
+    plt.show()
+    
+    return thresholds, net_benefit_model, net_benefit_all
 
 def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder="", savefig=True, transparent=True, seed=42):
     """

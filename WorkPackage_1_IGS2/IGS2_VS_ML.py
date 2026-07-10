@@ -7,14 +7,6 @@ app = marimo.App()
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Work Package 1 : Prédiction de la survie à J28 en réanimation : Comparaison avec IGS2
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
     ## Importation des bibliothèques
     """)
     return
@@ -136,6 +128,21 @@ def _():
     )
 
 
+@app.cell
+def _(torch):
+    # 1. Vérifier si le GPU (CUDA) est disponible
+    cuda_dispo = torch.cuda.is_available()
+    print(f"Est-ce que CUDA est disponible ? {cuda_dispo}")
+
+    # 2. Voir sur quel appareil PyTorch est configuré par défaut
+    appareil_actuel = torch.cuda.current_device() if cuda_dispo else "CPU"
+    print(f"Appareil actuellement utilisé : {appareil_actuel}")
+
+    if cuda_dispo:
+        print(f"Nom du GPU : {torch.cuda.get_device_name(0)}")
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -158,8 +165,7 @@ def _(spl, uid):
 
 
 @app.cell
-def _(models, spl, uid):
-    calibration, calibration_mode = spl.get_calibration_widgets(models.value)
+def _(models, uid):
     save_figure = uid["save_figure"]
     config_mode = uid["mode"].value
     config_models = models.value
@@ -168,12 +174,13 @@ def _(models, spl, uid):
     config_keep_pop = uid["keep_pop"].value
     config_balance = uid["balance"].value
     config_transparent = uid["transparent"].value
-    config_boruta = uid["boruta_filter"].value
+    boruta_filter = uid["boruta_filter"]
+    config_boruta = boruta_filter.value
+    use_optuna = uid["use_optuna"]
     modex = uid["modex"]
     type_donnees = uid["type_donnees"]
     return (
-        calibration,
-        calibration_mode,
+        boruta_filter,
         config_balance,
         config_boruta,
         config_cleaning,
@@ -185,7 +192,14 @@ def _(models, spl, uid):
         modex,
         save_figure,
         type_donnees,
+        use_optuna,
     )
+
+
+@app.cell
+def _(config_balance, models, spl):
+    calibration, calibration_mode = spl.get_calibration_widgets(models.value, config_balance.balance_method)
+    return calibration, calibration_mode
 
 
 @app.cell
@@ -230,13 +244,13 @@ def _(mo):
 
 
 @app.cell
-def _(calibration, calibration_mode, config_boruta, config_models, spl):
+def _(boruta_filter, calibration, calibration_mode, config_models, spl):
     ui_tsfel, extract_tsfel, class_weight_choice = spl.get_tsfel_ui_components(
         extraction_type=config_models.extraction_type,
         models_type=config_models.models_type,
-        boruta_filter=config_boruta,
+        boruta_filter=boruta_filter,
         calibration=calibration,
-        calibration_mode=calibration_mode
+        calibration_mode=calibration_mode,  
     )
     return class_weight_choice, extract_tsfel, ui_tsfel
 
@@ -700,7 +714,7 @@ def _(
     folds_X_train, folds_X_test = [], []
     folds_y_train, folds_y_test = [], []
     folds_groups = []
-
+    folds_sampling_stats = []
     pipeline_config = {
         "patient_col": extract.ID_COL,
         "time_col": extract.TIME_COL,
@@ -723,9 +737,9 @@ def _(
 
 
         if config_models.extraction_type == "TSFEL":
-            X_tr, X_te, y_tr, y_te, grp = preproc.process_tsfel_fold(fold_idxx, train_idx, test_idx, X, y, groups, seed, **pipeline_config)
+            X_tr, X_te, y_tr, y_te, grp, stats = preproc.process_tsfel_fold(fold_idxx, train_idx, test_idx, X, y, groups, seed, **pipeline_config)
         elif config_models.extraction_type == "time":
-            X_tr, X_te, y_tr, y_te, grp = preproc.process_time_fold(fold_idxx, train_idx, test_idx, seed, **pipeline_config)
+            X_tr, X_te, y_tr, y_te, grp, stats = preproc.process_time_fold(fold_idxx, train_idx, test_idx, seed, **pipeline_config)
         else:
             raise ValueError(f"Type d'extraction inconnu ou non implémenté : {config_models.extraction_type}")
 
@@ -735,6 +749,7 @@ def _(
         folds_y_train.append(y_tr)
         folds_y_test.append(y_te)
         folds_groups.append(grp)
+        folds_sampling_stats.append(stats)
 
     # Sauvegarde globale finale
     np.save(exp.get_var_path(), final_features)
@@ -744,6 +759,7 @@ def _(
         folds_X_test,
         folds_X_train,
         folds_groups,
+        folds_sampling_stats,
         folds_y_test,
         folds_y_train,
     )
@@ -776,7 +792,7 @@ def _(config_cleaning, config_models, config_y, mo, mo_utils):
 
 
 @app.cell
-def _(config_balance, config_keep_pop, config_models):
+def _(class_weight_choice, config_balance, config_keep_pop, config_models):
     # on créé un nom unique de modèle
     str_pop = ""
     if config_keep_pop.keep_population != "all_diseases":
@@ -805,13 +821,15 @@ def _(config_balance, config_keep_pop, config_models):
             "n_estimators": 200,
             "max_depth": 12,          # Évite le surapprentissage par rapport à un max_depth infini
             "min_samples_split": 5,
-            "min_samples_leaf": 2
+            "min_samples_leaf": 2,
+            "class_weight" : class_weight_choice.value[1:]
         },
         "RandomForest Imbalanced TSFEL": {
             "n_estimators": 200,
             "max_depth": 12,
             "min_samples_split": 5,
-            "min_samples_leaf": 2
+            "min_samples_leaf": 2,
+            "class_weight" : class_weight_choice.value[1:]
         },
         "XGBoost TSFEL": {
             "n_estimators": 300,
@@ -823,7 +841,8 @@ def _(config_balance, config_keep_pop, config_models):
         "SVC TSFEL": {
             "C": 1.0,                 # Paramètre de régularisation standard
             "gamma": "scale",
-            "kernel": "rbf"
+            "kernel": "rbf",
+            "class_weight" : class_weight_choice.value[1:]
         }
     }
     return DEFAULT_PARAMS, extension, str_balance_method, str_pop
@@ -844,6 +863,16 @@ def _(mo, mo_utils, run_optuna):
         run_optuna,
         mo.md(mo_utils.config_end)])
     return
+
+
+@app.cell
+def _(config_models, exp):
+    # --- CHARGEMENT DES PARAMÈTRES VIA EXPERIMENT ---
+    model_name = config_models.models_name
+    # Récupération du dossier de sortie de l'expérience et définition du fichier JSON
+    output_direc = exp.get_output_path(model_name)
+    HYPERPARAMS_FILE = output_direc / "best_hyperparameters.json"
+    return HYPERPARAMS_FILE, model_name
 
 
 @app.cell
@@ -899,6 +928,10 @@ def _(
         study = run_xgb_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
         saved_configs[config_models.models_name] = study.best_params
 
+    elif config_models.models_name == "SVC TSFEL":
+        from utilitaries.optuna.optuna_svc_utils import run_svc_stage1_search
+        study = run_svc_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+        saved_configs[config_models.models_name] = study.best_params
     elif config_models.models_name == "RandomForest TSFEL":
         from utilitaries.optuna.optuna_rf_utils import run_rf_stage1_search
         study = run_rf_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
@@ -906,7 +939,6 @@ def _(
         if bp.get("max_depth") == 0:
             bp["max_depth"] = None
         saved_configs[config_models.models_name] = bp
-
     # 3. Écriture sur le disque dans le fichier DYNAMIQUE
     with open(HYPERPARAMS_FILE, "w") as fil:
         json.dump(saved_configs, fil, indent=4)
@@ -916,16 +948,33 @@ def _(
 
 
 @app.cell
-def _(DEFAULT_PARAMS, config_models, exp, json):
-    # --- CHARGEMENT DES PARAMÈTRES VIA EXPERIMENT ---
-    model_name = config_models.models_name
-    parameters = {}
+def _(mo, mo_utils, run):
+    mo.vstack([
+        mo.md(mo_utils.config_run_button),
+        run,
+        mo.md(mo_utils.config_end)])
+    return
 
-    # Récupération du dossier de sortie de l'expérience et définition du fichier JSON
-    output_direc = exp.get_output_path(model_name)
-    HYPERPARAMS_FILE = output_direc / "best_hyperparameters.json"
+
+@app.cell
+def _(
+    DEFAULT_PARAMS,
+    HYPERPARAMS_FILE,
+    config_models,
+    folds_X_train,
+    json,
+    mo,
+    model_name,
+    run,
+    use_optuna,
+):
+    mo.stop(not run.value, "Clique pour lancer")
+    print("Entraînement lancé")
+
+    parameters = {}
     config_optuna = False
-    if HYPERPARAMS_FILE.exists():
+
+    if use_optuna.value and HYPERPARAMS_FILE.exists():
         with open(HYPERPARAMS_FILE, "r") as fileh:
             all_configs = json.load(fileh)
 
@@ -943,22 +992,6 @@ def _(DEFAULT_PARAMS, config_models, exp, json):
         config_optuna = False
 
     print(f"--> Paramètres appliqués : {parameters}\n")
-    return HYPERPARAMS_FILE, config_optuna, parameters
-
-
-@app.cell
-def _(mo, mo_utils, run):
-    mo.vstack([
-        mo.md(mo_utils.config_run_button),
-        run,
-        mo.md(mo_utils.config_end)])
-    return
-
-
-@app.cell
-def _(config_models, folds_X_train, mo, run):
-    mo.stop(not run.value, "Clique pour lancer")
-    print("Entraînement lancé")
 
     if len(folds_X_train) == 0:
         raise ValueError("Les listes de folds sont vides")
@@ -970,7 +1003,13 @@ def _(config_models, folds_X_train, mo, run):
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice 3D [patients, temps, features], mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'time' ?")
     elif not is_dl_model and n_dims != 2:
         raise ValueError(f"Mismatch : Le modèle {config_models.models_name} attend une matrice tabulaire 2D, mais X_train a {n_dims} dimension(s). As-tu configuré le pipeline en mode 'TSFEL' ?")
-    return (is_dl_model,)
+    return config_optuna, is_dl_model, parameters
+
+
+@app.cell
+def _(parameters):
+    parameters
+    return
 
 
 @app.cell
@@ -978,7 +1017,7 @@ def _(
     StratifiedGroupKFold,
     calibration,
     calibration_mode,
-    class_weight_choice,
+    config_balance,
     config_models,
     config_optuna,
     exp,
@@ -986,6 +1025,7 @@ def _(
     folds_X_test,
     folds_X_train,
     folds_groups,
+    folds_sampling_stats,
     folds_y_test,
     folds_y_train,
     is_dl_model,
@@ -1032,24 +1072,36 @@ def _(
         X_calib, y_calib = None, None
 
         if calibration.value:
-            print(f"    [INFO] Calibration activée. Séparation du fold via StratifiedGroupKFold...")
+            if config_balance.balance_method != "":
+                print(f"    [INFO] Calibration Prior (analytique). Utilisation de 100% du fold pour l'entraînement...")
 
-            # Initialisation du splitter interne (identique pour ML et DL)
-            skf_calib = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
+                # Le modèle de base utilise TOUT le fold
+                X_train_final_fold = X_train_fold_2
+                y_train_final = y_train_fold_2
+                groups_final_fold = groups_fold_2
 
-            # Le split fonctionne nativement sur le 3D comme sur le 2D
-            train_idx_calib, calib_idx = next(skf_calib.split(X_train_fold_2, y_train_fold_2, groups=groups_fold_2))
+                # Pas besoin de jeu held-out pour une formule mathématique
+                X_calib = None
+                y_calib = None
+            else:
+                print(f"    [INFO] Calibration activée ({calibration_mode.value}) Séparation du fold via StratifiedGroupKFold...")
 
-            # Sous-jeu pour l'entraînement du modèle de base
-            X_train_final_fold = X_train_fold_2[train_idx_calib]
-            y_train_final = y_train_fold_2[train_idx_calib]
-            groups_final_fold = np.asarray(groups_fold_2)[train_idx_calib]
+                # Initialisation du splitter interne (identique pour ML et DL)
+                skf_calib = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
 
-            # Sous-jeu "held-out" pour la calibration
-            X_calib = X_train_fold_2[calib_idx]
-            y_calib = y_train_fold_2[calib_idx]
+                # Le split fonctionne nativement sur le 3D comme sur le 2D
+                train_idx_calib, calib_idx = next(skf_calib.split(X_train_fold_2, y_train_fold_2, groups=groups_fold_2))
 
-            print(f"    [DEBUG] Shapes - Train Base: {X_train_final_fold.shape}, Calib: {X_calib.shape}")
+                # Sous-jeu pour l'entraînement du modèle de base
+                X_train_final_fold = X_train_fold_2[train_idx_calib]
+                y_train_final = y_train_fold_2[train_idx_calib]
+                groups_final_fold = np.asarray(groups_fold_2)[train_idx_calib]
+
+                # Sous-jeu "held-out" pour la calibration
+                X_calib = X_train_fold_2[calib_idx]
+                y_calib = y_train_fold_2[calib_idx]
+
+                print(f"    [DEBUG] Shapes - Train Base: {X_train_final_fold.shape}, Calib: {X_calib.shape}")
 
         print(f"    [LEARNING CURVE] Lancement de la boucle de paliers unifiée...")
 
@@ -1088,6 +1140,19 @@ def _(
                 'file_y': file_y_exact
             } if config_models.models_name == "Logistic Regression Lasso TSFEL" else None
 
+            FC_UNITS_MAP = {
+                "none": None,
+                "64": (64,),
+                "128": (128,),
+                "256": (256,),
+                "128_64": (128, 64),
+                "256_128": (256, 128),
+            }
+
+            #On convertit la chaîne "fc_units" en sa vraie valeur attendue par PyTorch
+            if "fc_units" in parameters and isinstance(parameters["fc_units"], str):
+                parameters["fc_units"] = FC_UNITS_MAP[parameters["fc_units"]]
+
             # Entraînement délégué à la fonction Usine (Factory)
             final_model_to_save, train_auc, val_auc = training.fit_model_by_name(
                 model_name=config_models.models_name,
@@ -1096,24 +1161,33 @@ def _(
                 X_val=X_val_np,
                 y_val=y_val_np,
                 seed=seed,
-                class_weight=class_weight_choice.value[1:],
-                parameters=parameters,
                 is_final_palier=is_final_palier,
                 save_path=current_save_path,
-                lasso_args=lasso_args
+                lasso_args=lasso_args,
+                **parameters
             )
 
             # Stockage dans tes matrices d'origine
             lc_train_scores[fold_idx_2, p_idx] = train_auc
             lc_val_scores[fold_idx_2, p_idx] = val_auc
-
             # Sauvegarde et calibration au dernier palier
             if is_final_palier and not is_dl_model and final_model_to_save is not None:
                 if calibration.value:
-                    print(f"    [INFO] Application de la calibration {calibration_mode.value} sur le jeu held-out...")
-                    final_model_to_save = training.apply_model_calibration(
-                        final_model_to_save, X_calib, y_calib, calibration_mode.value, seed
-                    )
+                    if config_balance.balance_method != "":
+                        statsX = folds_sampling_stats[fold_idx_2]
+                        top = statsX["n_malades_avant"] * statsX["n_sains_apres"]
+                        bottom = statsX["n_sains_avant"] * statsX["n_malades_apres"]
+                        if bottom > 0 and top > 0:
+                            beta = top / bottom
+                            final_model_to_save = training.apply_prior_calibration(final_model_to_save, beta)
+                            print(f"    [DEBUG] Prior Calibration OK (beta = {beta:.4f})")
+                        else:
+                            print(f"    [WARNING] Impossible de calculer beta, classe manquante.")
+                    else:
+                        print(f"    [INFO] Application de la calibration {calibration_mode.value} sur le jeu held-out...")
+                        final_model_to_save = training.apply_model_calibration(
+                            final_model_to_save, X_calib, y_calib, calibration_mode.value, seed
+                        )
 
                 joblib.dump(final_model_to_save, model_path_fold)
                 print(f"--> Modèle final enregistré à : {model_path_fold}")
@@ -1283,6 +1357,20 @@ def _(
         config_transparent, calibration_mode.value
     )
 
+    sfu.calibration_curve_homemade(
+        all_probas_uncalib, all_probas_calib, all_y_test_global, 
+        config_models.models_name, config_models.extraction_type, 
+        calibration.value, save_figure.value, output_dir, 
+        config_transparent, calibration_mode.value
+    )
+
+    sfu.calibration_curve_advanced(
+        all_probas_uncalib, all_probas_calib, all_y_test_global, 
+        config_models.models_name, config_models.extraction_type, 
+        calibration.value, save_figure.value, output_dir, 
+        config_transparent, calibration_mode.value
+    )
+
     probas = all_probas_calib
     y_test = all_y_test_global
     return probas, y_test
@@ -1408,6 +1496,20 @@ def _(
 ):
     auc_final, fpr, tpr, thresholds_roc = sfu.roc_curve_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, config_transparent)
     return (auc_final,)
+
+
+@app.cell
+def _(
+    config_models,
+    config_transparent,
+    output_dir,
+    probas,
+    save_figure,
+    sfu,
+    y_test,
+):
+    auprc_final, precision, recall, thresholds = sfu.prc_curve_homemade(probas, y_test, config_models.models_name, save_figure.value, output_dir, config_transparent)
+    return
 
 
 @app.cell(hide_code=True)
@@ -1571,7 +1673,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(
     config_models,
     config_optuna,

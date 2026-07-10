@@ -164,10 +164,22 @@ def equilibrer_dataset_tabulaire(df: pl.DataFrame, id_col: str, target_col: str,
     """
     Équilibre un DataFrame Polars. 
     """
+    
+    # On compte les effectifs avant sampling
+    n_sains_avant = df.filter(pl.col(target_col) == 0).height
+    n_malades_avant = df.filter(pl.col(target_col) == 1).height
+
     if method == "":
-        return df  # On ne fait rien ici (soit pas d'équilibrage, soit géré par méthode custom)
+        return df, None  # On ne fait rien ici (soit pas d'équilibrage, soit géré par méthode custom)
     elif method == "downsampling_homemade":
-        return downsample_train_patients(df, patient_col = id_col, seed = seed)
+        df_balanced = downsample_train_patients(df, patient_col = id_col, seed = seed)
+        stats = {
+            "n_sains_avant": n_sains_avant,
+            "n_malades_avant": n_malades_avant,
+            "n_sains_apres": df_balanced.filter(pl.col(target_col) == 0).height,
+            "n_malades_apres": df_balanced.filter(pl.col(target_col) == 1).height
+        }
+        return df_balanced, stats
 
     # Séparation en Pandas pour imblearn
     X_p = df.select(pl.all().exclude(target_col)).to_pandas()
@@ -185,8 +197,16 @@ def equilibrer_dataset_tabulaire(df: pl.DataFrame, id_col: str, target_col: str,
     X_res, y_res = rs.fit_resample(X_p, y_p)
     
     # Reconstruction immédiate en Polars
-    df_balanced = pl.from_pandas(X_res)
-    return df_balanced.with_columns(pl.Series(target_col, y_res))
+    df_balanced = pl.from_pandas(X_res).with_columns(pl.Series(target_col, y_res))
+
+    # Effectifs après sampling
+    stats = {
+        "n_sains_avant": n_sains_avant,
+        "n_malades_avant": n_malades_avant,
+        "n_sains_apres": np.sum(y_res == 0),
+        "n_malades_apres": np.sum(y_res == 1)
+    }
+    return df_balanced, stats
 
 def process_tsfel_fold(fold_idx, train_idx, test_idx, X, y, groups, seed, **kwargs):
     """Pipeline de traitement pour l'extraction TSFEL sur un fold."""
@@ -235,13 +255,15 @@ def process_tsfel_fold(fold_idx, train_idx, test_idx, X, y, groups, seed, **kwar
     # Tri et équilibrage
     train_clean = train_clean.sort(patient_col)
     test_clean = test_clean.sort(patient_col)
-    train_clean = equilibrer_dataset_tabulaire(
+    train_clean, stats = equilibrer_dataset_tabulaire(
         train_clean, patient_col, target_col, method=balance_method, seed=seed
     )
-
-    # Tests d'intégrité
-    assert train_clean.height == train_clean[patient_col].n_unique(), f"Erreur d'alignement Train TSFEL Fold {fold_idx}"
-    assert test_clean.height == test_clean[patient_col].n_unique(), f"Erreur d'alignement Test TSFEL Fold {fold_idx}"
+    
+    # Si on fait de l'upsampling, on duplique des patients dans tous les cas ^^'
+    if balance_method !="upsampling_50-50":
+        # Tests d'intégrité
+        assert train_clean.height == train_clean[patient_col].n_unique(), f"Erreur d'alignement Train TSFEL Fold {fold_idx}"
+        assert test_clean.height == test_clean[patient_col].n_unique(), f"Erreur d'alignement Test TSFEL Fold {fold_idx}"
 
     y_train_fold = train_clean[target_col].to_numpy()
     y_test_fold = test_clean[target_col].to_numpy()
@@ -253,7 +275,7 @@ def process_tsfel_fold(fold_idx, train_idx, test_idx, X, y, groups, seed, **kwar
     # Scaling final
     X_train_fold, X_test_fold = scaling(train_clean, test_clean)
 
-    return X_train_fold, X_test_fold, y_train_fold, y_test_fold, groups_fold
+    return X_train_fold, X_test_fold, y_train_fold, y_test_fold, groups_fold, stats
 
 def process_time_fold(fold_idx, train_idx, test_idx, seed, **kwargs):
     """Pipeline de traitement pour l'extraction temporelle (3D) sur un fold."""
@@ -273,7 +295,7 @@ def process_time_fold(fold_idx, train_idx, test_idx, seed, **kwargs):
 
     # Équilibrage fait maison (Polars)
     if balance_method in ["downsampling_homemade", ""]:
-        train_df = equilibrer_dataset_tabulaire(
+        train_df, _ = equilibrer_dataset_tabulaire(
             train_df, patient_col, target_col, method=balance_method, seed=seed
         )
 
@@ -286,6 +308,9 @@ def process_time_fold(fold_idx, train_idx, test_idx, seed, **kwargs):
 
     # Équilibrage Imblearn (sur tableau 3D aplati en 2D)
     if balance_method not in ["downsampling_homemade", ""]:
+        n_sains_avant = int(np.sum(y_train_fold == 0))
+        n_malades_avant = int(np.sum(y_train_fold == 1))
+
         n_samples, n_timesteps, n_feats = X_train_fold.shape
         X_train_fold_2d = X_train_fold.reshape(n_samples, n_timesteps * n_feats)
 
@@ -304,7 +329,15 @@ def process_time_fold(fold_idx, train_idx, test_idx, seed, **kwargs):
         
         X_train_fold = X_train_fold_2d[indices_resampled].reshape(-1, n_timesteps, n_feats)
         groups_fold = patients_time_fold[indices_resampled]
+
+        stats = {
+            "n_sains_avant": n_sains_avant,
+            "n_malades_avant": n_malades_avant,
+            "n_sains_apres": int(np.sum(y_train_fold == 0)),
+            "n_malades_apres": int(np.sum(y_train_fold == 1))
+        }
     else:
+        stats = None
         groups_fold = patients_time_fold
 
     # Gestion des NaN
@@ -317,4 +350,4 @@ def process_time_fold(fold_idx, train_idx, test_idx, seed, **kwargs):
     np.save(exp.get_time_path(mode="train", fold_idx=fold_idx), X_train_fold)
     np.save(exp.get_time_path(mode="test", fold_idx=fold_idx), X_test_fold)
     
-    return X_train_fold, X_test_fold, y_train_fold, y_test_fold, groups_fold
+    return X_train_fold, X_test_fold, y_train_fold, y_test_fold, groups_fold, stats

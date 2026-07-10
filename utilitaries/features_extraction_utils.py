@@ -120,6 +120,38 @@ def filtrage_corr_var(Dataset_train, Dataset_test, patient_col, target_col):
 
     return pl.from_pandas(train_final), pl.from_pandas(test_final), list(variableList)
 
+# def filtrage_boruta(Dataset_train, Dataset_test, patient_col, target_col, max_iter=100, seed = 42):
+#     # 1. Séparation propre des features (X) et nettoyage des Inf/NaN en Polars
+#     # (On remplace les valeurs infinies par du Null, puis on remplit par la médiane du Train)
+#     # On fait ça parce que TSFEL pour générer des valeurs infinies ou des null
+#     features_to_keep = sorted([c for c in Dataset_train.columns if c not in [patient_col, target_col]])
+#     X_train_pl = Dataset_train.select(features_to_keep).with_columns(pl.all().replace([np.inf, -np.inf], None))
+#     X_train_clean = X_train_pl.with_columns(pl.all().fill_null(pl.all().median()))
+#     X_test_pl = Dataset_test.select(features_to_keep).with_columns(pl.all().replace([np.inf, -np.inf], None))
+#     medians_dict = X_train_pl.median().to_dicts()[0]
+#     X_test_clean = X_test_pl.with_columns([pl.col(col).fill_null(medians_dict[col]) for col in X_test_pl.columns])
+
+#     # 2. Entraînement de Boruta sur les tableaux NumPy sous-jacents
+#     # On fixe la profondeur maximale de la forêt pour éviter l'overfeating
+#     rf = RandomForestClassifier(n_jobs=-1, max_depth=5, class_weight='balanced', random_state=seed)
+#     # alpha : 1 - pvalues => pvalue à 0.95 ce qui est raisonable
+#     # perc : dans un 1V1, il faut que la feature gagne dans 100% du temps si perc = 100. 
+#     feat_selector = BorutaPy(rf, n_estimators='auto', verbose = 2, alpha = 0.05, perc = 100, max_iter=max_iter, random_state=seed)
+    
+#     feat_selector.fit(X_train_clean.to_numpy(), Dataset_train[target_col].to_numpy())
+
+#     # 3. Extraction des variables validées
+#     variableList = [col for col, keep in zip(X_train_clean.columns, feat_selector.support_) if keep]
+
+#     # 4. Reconstruction des datasets finaux
+#     intruders = [patient_col, target_col]
+#     train_final = Dataset_train.select(intruders).with_columns(X_train_clean.select(variableList))
+#     test_final = Dataset_test.select(intruders).with_columns(X_test_clean.select(variableList))
+
+#     print(f"Boruta terminé : {len(variableList)} variables conservées.")
+#     return train_final, test_final, variableList
+
+
 def filtrage_boruta(Dataset_train, Dataset_test, patient_col, target_col, max_iter=100, seed = 42):
     # 1. Séparation propre des features (X) et nettoyage des Inf/NaN en Polars
     # (On remplace les valeurs infinies par du Null, puis on remplit par la médiane du Train)
@@ -131,12 +163,26 @@ def filtrage_boruta(Dataset_train, Dataset_test, patient_col, target_col, max_it
     medians_dict = X_train_pl.median().to_dicts()[0]
     X_test_clean = X_test_pl.with_columns([pl.col(col).fill_null(medians_dict[col]) for col in X_test_pl.columns])
 
-    # 2. Entraînement de Boruta sur les tableaux NumPy sous-jacents
-    # On fixe la profondeur maximale de la forêt pour éviter l'overfeating
-    rf = RandomForestClassifier(n_jobs=-1, max_depth=5, class_weight='balanced', random_state=seed)
-    # alpha : 1 - pvalues => pvalue à 0.95 ce qui est raisonable
-    # perc : dans un 1V1, il faut que la feature gagne dans 100% du temps si perc = 100. 
-    feat_selector = BorutaPy(rf, n_estimators='auto', verbose = 2, alpha = 0.05, perc = 100, max_iter=max_iter, random_state=seed)
+    # 2. Entraînement de Boruta avec une forêt capable de voir le signal
+    # On monte la profondeur à 8 ou 10 pour capter les interactions de features TSFEL
+    rf = RandomForestClassifier(
+        n_jobs=-1, 
+        max_depth=8,  # <-- Augmenté pour un jugement plus précis
+        class_weight='balanced', 
+        random_state=seed
+    )
+    
+    # alpha = 0.05 (rejette si proba de décision chanceuse < 5%)
+    # perc = 90 : exige d'être meilleure que 90% des shadow features (excellent compromis)
+    feat_selector = BorutaPy(
+        rf, 
+        n_estimators='auto', 
+        verbose=2, 
+        alpha=0.05, 
+        perc=90,      # <-- Abaissé pour être plus robuste et moins binaire
+        max_iter=max_iter, 
+        random_state=seed
+    )
     
     feat_selector.fit(X_train_clean.to_numpy(), Dataset_train[target_col].to_numpy())
 

@@ -43,6 +43,24 @@ MODES = {
         used_distribution = "uniform", # pas utilisé
         mode = "windows"
      ),
+     "resampling aléatoire 'lomax' prio 24h sans remplissage" : ConfigFenetrage(
+         name = "resampling_x_points_alea_lomax_prio_24h_no-fill",
+         hour_offset = 0, # pas utilsé
+         max_hour = 6,
+         strict_mode = True,
+         random = True, 
+         used_distribution = "lomax", # pas utilsé
+         mode = "resampling"
+     ),
+     "resampling aléatoire 'lomax' prio 50-50 sans remplissage" : ConfigFenetrage(
+         name = "resampling_x_points_alea_lomax_prio50-50_no-fill",
+         hour_offset = 0, # pas utilsé
+         max_hour = 6,
+         strict_mode = True,
+         random = True, 
+         used_distribution = "lomax", # pas utilsé
+         mode = "resampling"
+     ),
      "24h aléatoire 'lomax' prio 24h sans remplissage" : ConfigFenetrage(
         name = "24h_alea_lomax_prio24h_no-fill",
         hour_offset = 0, # pas utilisé
@@ -53,7 +71,7 @@ MODES = {
         mode = "windows"
      ),
      "24h aléatoire 'lomax' prio 50-50 sans remplissage" : ConfigFenetrage(
-        name = "24h_alea_lomax_prio24h_no-fill",
+        name = "24h_alea_lomax_prio50-50_no-fill",
         hour_offset = 0, # pas utilisé
         max_hour = 6,
         strict_mode = True,
@@ -64,7 +82,7 @@ MODES = {
      "resampling X points" : ConfigFenetrage(
         name = "resampling_x_points",
         hour_offset = 0, # pas utilisé
-        max_hour = 6, # pas utilisé (je crois)
+        max_hour = 6,
         strict_mode = True, # pas utilisé
         random = False, # pas utilisé
         used_distribution = "lomax", # pas utilisé
@@ -109,11 +127,11 @@ class ConfigModels:
     extraction_type : str
     models_type : str
 MODELS = {
-    "InceptionTimeModified" : ConfigModels(
-        models_name = "InceptionTimeModified",
-        extraction_type = "time",
-        models_type = "Normal"
-    ),
+    # "InceptionTimeModified" : ConfigModels(
+    #     models_name = "InceptionTimeModified",
+    #     extraction_type = "time",
+    #     models_type = "Normal"
+    # ),
     "LstmTimeModified" : ConfigModels(
         models_name = "LstmTimeModified",
         extraction_type = "time",
