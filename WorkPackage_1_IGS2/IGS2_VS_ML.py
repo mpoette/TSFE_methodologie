@@ -80,6 +80,8 @@ def _():
     import utilitaries.optuna.optuna_utils as optuna_utils
     import utilitaries.preprocessing_utils as preproc
     import utilitaries.preprocessing_utils as ui
+    import utilitaries.timestamp_sampling_utils as tsu
+    import utilitaries.resampling_utils as resampling
     import utilitaries.path_utils as path_utils
     import utilitaries.show_fig_utils as sfu
     import utilitaries.training_utils as training
@@ -159,7 +161,7 @@ def _(mo, spl):
 
 @app.cell
 def _(spl, uid):
-    # 1. Gestion des widgets dynamiques dépendants
+    # 1. Gestion des widgets dynamiques dépendabalance_methodnts
     models = spl.get_model_dropdown(uid["type_donnees"].value)
     return (models,)
 
@@ -1673,7 +1675,7 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
+@app.cell
 def _(
     config_models,
     config_optuna,

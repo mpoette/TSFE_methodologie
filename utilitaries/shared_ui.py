@@ -44,15 +44,15 @@ def get_calibration_widgets(models_value, balance_value):
         options_calib = {"Oui (Forcé par le resampling)": True}
         bool_calib = "Oui (Forcé par le resampling)"
         
-        options_mode = {"Prior": "_prior"}
+        options_mode = {"Prior": "prior"}
         calib_mode = "Prior"
         
     else:
         # AUTRES CAS : L'option Prior est totalement EXCLUE du dictionnaire
         options_calib = {"Oui": True, "Non": False}
         options_mode = {
-            "Platt": "_platt", 
-            "Temperature Scaling": "_temperature_scaling"
+            "Platt": "platt", 
+            "Temperature Scaling": "temperature_scaling"
         }
         
         # Logique des valeurs par défaut classiques
@@ -90,7 +90,7 @@ def get_tsfel_ui_components(extraction_type, models_type, boruta_filter, calibra
             label="Extraire les données TSFEL"
         )
         class_weight_choice = mo.ui.dropdown(
-            options={"balanced": "_balanced", "balanced_subsample": "_balanced_subsample"},
+            options={"balanced": "balanced", "balanced_subsample": "balanced_subsample"},
             value="balanced",
             label="class_weight"
         )

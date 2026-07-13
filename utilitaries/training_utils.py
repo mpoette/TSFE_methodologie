@@ -206,13 +206,13 @@ def apply_model_calibration(model, X_calib, y_calib, method_calib, seed):
         X_calib = X_calib.to_numpy() if hasattr(X_calib, "to_numpy") else np.asarray(X_calib)
         y_calib = np.asarray(y_calib).astype(int)
 
-    if method_calib == "_platt":
+    if method_calib == "platt":
         frozen_model = FrozenEstimator(model)
         calibrated_clf = CalibratedClassifierCV(estimator=frozen_model, method="sigmoid")
         calibrated_clf.fit(X_calib, y_calib)
         return calibrated_clf
 
-    elif method_calib == "_temperature_scaling":
+    elif method_calib == "temperature_scaling":
         from utilitaries.models.inceptionTimeModified import TemperatureCalibrator
         probas = np.clip(model.predict_proba(X_calib)[:, 1], 1e-7, 1 - 1e-7)
         logits = np.log(probas / (1 - probas))

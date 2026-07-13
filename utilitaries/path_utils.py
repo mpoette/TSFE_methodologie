@@ -29,40 +29,68 @@ class Experiment:
         """Identifiant lié à la stratégie de features (Modex, Population, Split)."""
         return f"{self._get_data_slug(config_mode)}_{self.modex}{self.str_pop}_seed_{self.seed}{self.stratify_mode}"
 
-    def _get_model_slug(self, class_weight=None, config_mode=None, config_optuna = False):
-        """Identifiant complet incluant la modélisation (équilibrage, poids, calibration)."""
+    def _get_run_slug(self, class_weight=None, config_optuna=False):
+        """Génère le sous-dossier final de manière propre sans double underscore."""
         w = class_weight if class_weight is not None else self.class_weight
-        res = (
-            f"{self._get_data_slug(config_mode)}_"
-            f"{self.str_balance_method}{self.modex}"
-            f"{w}{self.str_pop}_seed_{self.seed}"
-            f"{self.stratify_mode}{self.calibrated_mode}"
-        )
+        
+        # On collecte tous les morceaux non vides dans une liste
+        components = []
+        
+        if self.str_balance_method and self.str_balance_method != "Aucune Méthode":
+            components.append(self.str_balance_method)
+            
+        if w:
+            components.append(w)
+            
+        if self.str_pop and self.str_pop != "Tout":
+            components.append(self.str_pop)
+            
+        components.append(f"seed_{self.seed}")
+        
+        if self.stratify_mode:
+            # .lstrip("_") retire un éventuel underscore au début pour éviter les doublons
+            components.append(self.stratify_mode.lstrip("_"))
+            
+        if self.calibrated_mode:
+            components.append(self.calibrated_mode.lstrip("_"))
+            
         if config_optuna:
-            res += "_optuna"
-        return res
+            components.append("optuna")
+            
+        # On assemble proprement le tout avec un UNIQUE underscore comme séparateur
+        return "_".join(components)
 
-    # ─── ANCIENS NOMS (Pour rétrocompatibilité si besoin) ───
+    def _get_model_slug(self, class_weight=None, config_mode=None, config_optuna=False):
+        """Rétrocompatibilité au cas où."""
+        w = class_weight if class_weight is not None else self.class_weight
+        return f"{self._get_data_slug(config_mode)}_{self.modex}_{self._get_run_slug(w, config_optuna)}"
 
-    @property
-    def dirname(self):
-        return self._get_model_slug()
-    
-    def shortdirname(self, class_weight="", config_mode="", config_optuna = False):
-        # Si une chaîne vide est passée, on force à None pour utiliser la valeur par défaut de self
-        w = class_weight if class_weight != "" else None
-        cfg = config_mode if config_mode != "" else None
-        return self._get_model_slug(class_weight=w, config_mode=cfg, config_optuna = config_optuna)
-
-    # ─── ACCÈS AUX CHEMINS (INPUTS / OUTPUTS / MODELS) ───
+    # ─── ACCÈS AUX CHEMINS NESTÉS (MODELS / OUTPUTS) ───
 
     def get_model_path(self, model_name, fold_idx, extension=".joblib", class_weight="", config_mode="", config_optuna=False):
-        path = Path("models") / model_name / self.shortdirname(class_weight, config_mode, config_optuna)
+        """Chemin : models / Cible / Fenêtrage / Mode_Features / Modèle / Paramètres"""
+        target = self.target_name
+        mode = config_mode if config_mode != "" else self.config_mode
+        w = class_weight if class_weight != "" else None
+        
+        # On remplace les espaces par des underscores pour le nom du dossier (ex: "Mode_IGS2")
+        feature_mode_dir = self.modex.replace(" ", "_")
+        
+        path = (Path("models") / target / mode / feature_mode_dir / 
+                model_name / self._get_run_slug(class_weight=w, config_optuna=config_optuna))
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}{extension}"
     
     def get_output_path(self, model_name, class_weight="", config_mode="", config_optuna=False):
-        path = Path("outputs") / model_name / self.shortdirname(class_weight, config_mode, config_optuna)
+        """Chemin : outputs / Cible / Fenêtrage / Mode_Features / Modèle / Paramètres"""
+        target = self.target_name
+        mode = config_mode if config_mode != "" else self.config_mode
+        w = class_weight if class_weight != "" else None
+        
+        feature_mode_dir = self.modex.replace(" ", "_")
+        
+        path = (Path("outputs") / target / mode / feature_mode_dir / 
+                model_name / self._get_run_slug(class_weight=w, config_optuna=config_optuna))
         path.mkdir(parents=True, exist_ok=True)
         return path
     
@@ -72,7 +100,7 @@ class Experiment:
             raise FileNotFoundError(f"Fichier introuvable : {file_path}")
         return model_name, joblib.load(file_path)
 
-    # ─── DOSSIER INPUTS : Découplé des paramètres de modélisation ───
+    # ─── DOSSIER INPUTS : Préservé à plat pour ne pas casser tes caches existants ───
 
     def get_tsfel_parquet_path(self):
         path = Path("inputs") 
@@ -81,7 +109,6 @@ class Experiment:
     
     def get_tsfel_boruta(self, mode, fold_idx, config_mode=""):
         cfg = config_mode if config_mode != "" else None
-        # Boruta ne dépend que des features et de la pop, pas de la calibration ni du rééquilibrage
         path = Path("inputs") / f"tsfel_{mode}_{self._get_feature_slug(config_mode=cfg)}"
         path.mkdir(parents=True, exist_ok=True)
         return path / f"fold_{fold_idx}.parquet"
@@ -107,5 +134,4 @@ class Experiment:
     def get_resampling_path(self, target_length, class_weight=""):
         path = Path("inputs")
         path.mkdir(parents=True, exist_ok=True)
-        # Utilise le slug minimal de la donnée de base
         return path / f"resampling_{target_length}_{self._get_data_slug()}.parquet"

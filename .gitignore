@@ -1,15 +1,53 @@
-*.code-workspace
-Datasets/
+# # Fichiers de configuration et environnement
+*.env
+*.ini
+*.cfg
+*.toml
+*.yaml
+*.yml
+*.clinerules
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Cache Python
 __pycache__/
-*.pyc
-*.pt
-*.db
-*/outputs/
+*.py[cod]
+*$py.class
+
+# Dossiers de sortie et modèles
+*/outputs*/**
+*/models*/**
+!/utilitaries/models/**  # Pour garder les modèles dans utilitaries
+
+# Dossiers spécifiques à ignorer
 */.ipynb_checkpoints/
-*/models/
-!utilitaries/models
 **/__marimo__/
-*/maybe useful/
+Test */
+*/brouillon*
+*/Comparaison*/**
+*/old*/
+maybe\ useful/
+brouillon*
+
+# Fichiers de données
 *.parquet
 *.npy
-!/static/
+*.db
+*.sqlite
+*.db3
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.ipynb
+
+# Autres
+*.code-workspace
+*.pt
+.DS_Store
