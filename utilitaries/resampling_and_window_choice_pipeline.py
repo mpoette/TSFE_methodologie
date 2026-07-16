@@ -1,37 +1,55 @@
+import json
 from pathlib import Path
 from typing import Any
 
-import json
 import polars as pl
 
 import utilitaries.extract_data_utils as extract
 import utilitaries.resampling_utils as resampling
 import utilitaries.timestamp_sampling_utils as tsu
+import utilitaries.marimo_utils as config_dataclass
 
 def _compute_median_target_length(
     df: pl.DataFrame,
     patient_col: str = "encounterId",
     time_col: str = "delta_hour",
 ) -> int:
-    """
-    Calcule la médiane du dernier delta_hour par séjour.
+    """Compute the median number of time points per ICU stay.
 
-    Comme delta_hour commence à 1 et qu'il existe exactement une mesure
-    par heure, max(delta_hour) correspond au nombre de points du séjour.
-    """
+    The function calculates the maximum value of ``time_col`` for each
+    patient stay, then returns the rounded median of these values.
 
+    This assumes that ``time_col`` starts at 1 and that exactly one
+    observation is available per hour. Under this assumption, the maximum
+    time value corresponds to the number of observations in the stay.
+
+    Args:
+        df:
+            Input DataFrame containing the patient identifier and time columns.
+        patient_col:
+            Name of the patient or stay identifier column.
+        time_col:
+            Name of the elapsed-time column.
+
+    Returns:
+        The rounded median number of time points per stay.
+
+    Raises:
+        ValueError:
+            If a required column is missing, the median cannot be computed,
+            or the resulting target length is lower than 1.
+    """
     required_columns = {patient_col, time_col}
     missing_columns = required_columns - set(df.columns)
 
     if missing_columns:
         raise ValueError(
-            "Colonnes manquantes pour calculer target_length : "
+            "Missing columns required to compute target length: "
             f"{sorted(missing_columns)}"
         )
 
     target_length = (
-        df
-        .group_by(patient_col)
+        df.group_by(patient_col)
         .agg(
             pl.col(time_col)
             .max()
@@ -45,85 +63,144 @@ def _compute_median_target_length(
 
     if target_length is None:
         raise ValueError(
-            "Impossible de calculer target_length."
+            "Unable to compute the target length."
         )
 
     target_length = int(round(target_length))
 
     if target_length < 1:
         raise ValueError(
-            f"target_length invalide : {target_length}"
+            f"Invalid target length: {target_length}"
         )
 
     return target_length
 
 
-def _load_json(path: str | Path) -> dict:
-    """Charge un fichier JSON avec un message d'erreur explicite."""
+def _load_json(path: str | Path) -> dict[str, Any]:
+    """Load a JSON file and provide explicit error messages.
 
+    Args:
+        path:
+            Path to the JSON file.
+
+    Returns:
+        The decoded JSON content.
+
+    Raises:
+        FileNotFoundError:
+            If the JSON file does not exist.
+        json.JSONDecodeError:
+            If the file does not contain valid JSON.
+    """
     path = Path(path)
 
     if not path.exists():
         raise FileNotFoundError(
-            f"Le fichier JSON n'existe pas : {path}"
+            f"JSON file does not exist: {path}"
         )
 
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
-    
+
+
 def prepare_dataset_from_config(
-    df_merged: pl.DataFrame,
-    config_mode: Any,
+    df_merged: pl.DataFrame | pl.LazyFrame,
+    config_mode: config_dataclass.ConfigFeatures,
     target_col: str,
     patient_col: str,
     targets: list[str],
     seed: int,
-    dynamic_features_path: str | Path = "../utilitaries/dynamic_features.json",
+    dynamic_features_path: str | Path = (
+        "../../Preprocessing_pipeline/preprocessing-pipelines/"
+        "json/dynamic_features.json"
+    ),
     calculated_features_path: str | Path = (
-        "../utilitaries/calculated_features_to_original_features.json"
+        "../../Preprocessing_pipeline/preprocessing-pipelines/"
+        "json/calculated_features_to_original_features.json"
     ),
     show_fig: bool = True,
 ) -> tuple[pl.DataFrame, list[str], int | None]:
+    """Prepare a merged patient dataset according to a configured mode.
+
+    The function first removes rows containing invalid null values. Depending
+    on the selected configuration, it then either extracts a time window or
+    resamples each ICU stay to a common number of time points.
+
+    Lomax-based modes generate a random prediction timestamp before applying
+    window extraction or resampling.
+
+    Supported window modes include:
+
+    - ``"24h_alea_lomax_prio_24h_no-fill"``
+    - Other window configurations handled by ``extract.prepare_data``
+
+    Supported resampling modes include:
+
+    - ``"resampling_x_points"``
+    - ``"resampling_x_points_alea_lomax_prio_24h_no-fill"``
+
+    Args:
+        df_merged:
+            Merged static and time-series patient data.
+        config_mode:
+            Configuration object. It must provide at least the ``mode`` and
+            ``name`` attributes. Window modes may also require
+            ``hour_offset``, ``random``, ``used_distribution``, and
+            ``strict_mode``.
+        target_col:
+            Name of the prediction target column.
+        patient_col:
+            Name of the patient or stay identifier column.
+        targets:
+            Additional target-related columns passed to
+            ``extract.prepare_data``.
+        seed:
+            Random seed used when generating Lomax-based timestamps.
+        dynamic_features_path:
+            Path to the JSON file containing valid dynamic feature names.
+        calculated_features_path:
+            Path to the JSON file mapping calculated features to their
+            original features.
+        show_fig:
+            Whether preprocessing functions may display diagnostic figures.
+
+    Returns:
+        A tuple containing:
+
+        - The prepared patient DataFrame.
+        - The list of dynamic features used for resampling. This list is
+          empty for window-based modes.
+        - The number of resampling points. This value is ``None`` for
+          window-based modes.
+
+    Raises:
+        FileNotFoundError:
+            If one of the required JSON files does not exist.
+        RuntimeError:
+            If a Lomax-based mode is selected but prediction timestamps were
+            not generated.
+        ValueError:
+            If preprocessing produces an empty DataFrame, no valid dynamic
+            feature is found, the resampling output is invalid, or the
+            requested mode is not supported.
     """
-    Nettoie et prépare les données selon le mode configuré.
-
-    Modes pris en charge
-    --------------------
-    windows :
-        - 24h_alea_lomax_prio24h_no-fill
-        - autres modes gérés par extract.prepare_data
-
-    resampling :
-        - resampling_x_points
-        - resampling_x_points_alea_lomax_prio_24h_no-fill
-
-    Retours
-    -------
-    df_clean :
-        DataFrame préparé.
-
-    features_list :
-        Liste des variables dynamiques utilisées pour le resampling.
-        Liste vide pour le mode windows.
-
-    target_length :
-        Nombre de points utilisé pour le resampling.
-        None pour le mode windows.
-    """
-
+    if isinstance(df_merged, pl.LazyFrame):
+        df_merged = df_merged.collect()
     features_list: list[str] = []
     target_length: int | None = None
 
-    # Nettoyage commun à tous les modes
+    # Apply preprocessing shared by all configuration modes.
     df_clean = extract.remove_null_values(df_merged)
 
     if df_clean.is_empty():
-        raise ValueError("Le DataFrame est vide après remove_null_values.")
+        raise ValueError(
+            "The DataFrame is empty after remove_null_values."
+        )
 
-    # Calcul des timestamps uniquement pour les modes Lomax
+    # Generate prediction timestamps only for Lomax-based configurations.
     df_timestamp: pl.DataFrame | None = None
 
-    if "lomax" in config_mode.name:
+    if "lomax" in config_mode.name.lower():
         df_timestamp = tsu.build_sampling_dataset(
             df_clean,
             sanctuary_hours=6,
@@ -133,33 +210,31 @@ def prepare_dataset_from_config(
             seed=seed,
         )
 
-    # ------------------------------------------------------------------
-    # Mode fenêtres
-    # ------------------------------------------------------------------
+    # Handle fixed-window configurations.
     if config_mode.mode == "windows":
-        if config_mode.name == "24h_alea_lomax_prio24h_no-fill":
+        if config_mode.name == "24h_alea_lomax_prio_24h_no-fill":
             if df_timestamp is None:
                 raise RuntimeError(
-                    "df_timestamp n'a pas été calculé pour le mode Lomax."
+                    "Prediction timestamps were not generated for the "
+                    "selected Lomax mode."
                 )
 
             df_clean = (
-                df_clean
-                .join(
+                df_clean.join(
                     df_timestamp.select(
                         [
                             patient_col,
-                            pl.col("delta_hour").alias("windows_end"),
+                            pl.col("delta_hour").alias("window_end"),
                         ]
                     ),
                     on=patient_col,
                     how="inner",
                 )
                 .filter(
-                    (pl.col("delta_hour") <= pl.col("windows_end"))
+                    (pl.col("delta_hour") <= pl.col("window_end"))
                     & (
                         pl.col("delta_hour")
-                        > pl.col("windows_end") - 24
+                        > pl.col("window_end") - 24
                     )
                 )
             )
@@ -179,19 +254,19 @@ def prepare_dataset_from_config(
 
         return df_clean, features_list, target_length
 
-    # ------------------------------------------------------------------
-    # Mode resampling
-    # ------------------------------------------------------------------
+    # Handle resampling configurations.
     if config_mode.mode == "resampling":
         variables_json = _load_json(dynamic_features_path)
-        calc_json = _load_json(calculated_features_path)
+        calculated_features_json = _load_json(
+            calculated_features_path
+        )
 
-        correct_features = (
+        valid_dynamic_features = (
             set(variables_json)
             | {
                 column
                 for column in df_merged.columns
-                if column in calc_json
+                if column in calculated_features_json
             }
         )
 
@@ -199,16 +274,13 @@ def prepare_dataset_from_config(
             column
             for column in df_merged.columns
             if column not in {target_col, patient_col}
-            and column in correct_features
+            and column in valid_dynamic_features
         ]
 
         if not features_list:
             raise ValueError(
-                "Aucune variable dynamique valide n'a été trouvée "
-                "pour le resampling."
+                "No valid dynamic features were found for resampling."
             )
-
-        print(f"Variables dynamiques retenues : {features_list}")
 
         columns_to_exclude = list(
             dict.fromkeys(
@@ -221,14 +293,12 @@ def prepare_dataset_from_config(
                     "duree_reelle_sejour",
                     "observed_duration",
                     "real_time_hours",
-                    "windows_end",
+                    "window_end",
                 ]
             )
         )
 
-        # --------------------------------------------------------------
-        # Resampling du séjour disponible
-        # --------------------------------------------------------------
+        # Resample the complete available ICU stay.
         if config_mode.name == "resampling_x_points":
             target_length = _compute_median_target_length(
                 df_clean,
@@ -241,20 +311,21 @@ def prepare_dataset_from_config(
                 target_length=target_length,
                 features=features_list,
                 variables_json=variables_json,
-                help_json=calc_json,
+                help_json=calculated_features_json,
             )
 
             if "duree_reelle_sejour" not in df_clean.columns:
                 raise ValueError(
-                    "resample_icu_stays n'a pas produit la colonne "
-                    "'duree_reelle_sejour'."
+                    "resample_icu_stays did not produce the "
+                    "'duree_reelle_sejour' column."
                 )
 
-            # Hypothèse : après resampling, delta_hour varie de 1
-            # à target_length.
+            # Map resampled indices back to the original stay timeline.
             #
-            # Le premier point correspond à l'heure 1 et le dernier
-            # à duree_reelle_sejour.
+            # This assumes that delta_hour ranges from 1 to target_length
+            # after resampling. The first resampled point corresponds to
+            # hour 1, while the last point corresponds to the full stay
+            # duration.
             if target_length == 1:
                 df_clean = df_clean.with_columns(
                     pl.lit(1.0).alias("real_time_hours")
@@ -273,42 +344,40 @@ def prepare_dataset_from_config(
                     ).alias("real_time_hours")
                 )
 
-            # La durée complète pourrait provoquer une fuite
-            # d'information.
+            # Remove the complete stay duration to prevent data leakage.
             df_clean = df_clean.drop("duree_reelle_sejour")
 
-        # --------------------------------------------------------------
-        # Lomax, puis resampling de la partie observée
-        # --------------------------------------------------------------
+        # Sample an observation cutoff with Lomax, then resample the
+        # observed part of the stay.
         elif (
             config_mode.name
             == "resampling_x_points_alea_lomax_prio_24h_no-fill"
         ):
             if df_timestamp is None:
                 raise RuntimeError(
-                    "df_timestamp n'a pas été calculé pour le mode Lomax."
+                    "Prediction timestamps were not generated for the "
+                    "selected Lomax mode."
                 )
 
             df_clean = (
-                df_clean
-                .join(
+                df_clean.join(
                     df_timestamp.select(
                         [
                             patient_col,
-                            pl.col("delta_hour").alias("windows_end"),
+                            pl.col("delta_hour").alias("window_end"),
                         ]
                     ),
                     on=patient_col,
                     how="inner",
                 )
                 .filter(
-                    pl.col("delta_hour") <= pl.col("windows_end")
+                    pl.col("delta_hour") <= pl.col("window_end")
                 )
             )
 
             if df_clean.is_empty():
                 raise ValueError(
-                    "Le filtrage Lomax a supprimé toutes les observations."
+                    "Lomax filtering removed all observations."
                 )
 
             target_length = _compute_median_target_length(
@@ -322,17 +391,17 @@ def prepare_dataset_from_config(
                 target_length=target_length,
                 features=features_list,
                 variables_json=variables_json,
-                help_json=calc_json,
+                help_json=calculated_features_json,
             )
 
             if "duree_reelle_sejour" not in df_clean.columns:
                 raise ValueError(
-                    "resample_icu_stays n'a pas produit la colonne "
-                    "'duree_reelle_sejour'."
+                    "resample_icu_stays did not produce the "
+                    "'duree_reelle_sejour' column."
                 )
 
-            # Ici, il s'agit de la durée disponible au moment
-            # de la prédiction, et non de la durée finale du séjour.
+            # In this mode, the duration represents the data available at
+            # prediction time rather than the patient's complete ICU stay.
             df_clean = df_clean.rename(
                 {
                     "duree_reelle_sejour": "observed_duration",
@@ -341,11 +410,11 @@ def prepare_dataset_from_config(
 
         else:
             raise ValueError(
-                "Version de resampling non implémentée : "
+                "Unsupported resampling configuration: "
                 f"{config_mode.name}"
             )
 
-        # Ajout des variables statiques
+        # Recover one row of static information per patient.
         static_columns = [
             column
             for column in df_merged.columns
@@ -356,11 +425,14 @@ def prepare_dataset_from_config(
             static_columns.append(patient_col)
 
         df_static_patient = (
-            df_merged
-            .select(static_columns)
-            .unique(subset=[patient_col], keep="first")
+            df_merged.select(static_columns)
+            .unique(
+                subset=[patient_col],
+                keep="first",
+            )
         )
 
+        # Attach static patient information to the resampled observations.
         df_clean = df_clean.join(
             df_static_patient,
             on=patient_col,
@@ -370,8 +442,5 @@ def prepare_dataset_from_config(
         return df_clean, features_list, target_length
 
     raise ValueError(
-        f"Mode non implémenté : {config_mode.mode}"
+        f"Unsupported preprocessing mode: {config_mode.mode}"
     )
-
-
-
