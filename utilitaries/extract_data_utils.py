@@ -1,258 +1,837 @@
-import polars as pl
-import os
-import numpy as np
-# Suppression de random as rd pour tout centraliser sur le Generator NumPy
+from pathlib import Path
+from typing import TypeAlias
+
 import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
 
-# ============================================================
-# NOMS DES COLONNES TECHNIQUES (fixes, indépendants du thésaurus)
-# ============================================================
-COL_DATE_MESURE    = 'utcChartTime'
-COL_DATE_ADMISSION = 'utcInTime'
-ID_COL      = 'encounterId'
-TIME_COL    = 'delta_hour'
-TIME_COL2   = 'heure_calibree'
+
+# ---------------------------------------------------------------------
+# Type aliases
+# ---------------------------------------------------------------------
+
+PolarsFrame: TypeAlias = pl.DataFrame | pl.LazyFrame
+RandomSeed: TypeAlias = int | np.random.Generator
+
+
+# ---------------------------------------------------------------------
+# Technical column names and preprocessing constants
+# ---------------------------------------------------------------------
+
+COL_DATE_MESURE = "utcChartTime"
+COL_DATE_ADMISSION = "utcInTime"
+
+ID_COL = "encounterId"
+TIME_COL = "delta_hour"
+CALIBRATED_TIME_COL = "heure_calibree"
+
 WINDOW_SIZE = 24
-THESAURUS_PATH = "utilitaries/thesaurus.json"
 
-def extract_data_survie(file_path):
-    if not os.path.exists(file_path):
-        print("le Fichier n'existe pas")
-        return None
-    df = pl.scan_parquet(file_path)
-    df = df.with_columns([
-        pl.col("delta_hour").cast(pl.Float64, strict=False),
-        pl.col("pam").cast(pl.Float64, strict=False),
-        # Je corrige ici le mauvais stockage de ecmo_type en str et non en bool
-        pl.col("ecmo_all").str.to_lowercase().str.strip_chars().eq("true").alias("ecmo_all"),
-    ])
+def _ensure_dataframe(df: PolarsFrame) -> pl.DataFrame:
+    """Return an eager Polars DataFrame.
+
+    Args:
+        df:
+            Polars DataFrame or LazyFrame.
+
+    Returns:
+        The input data as an eager DataFrame.
+    """
+    if isinstance(df, pl.LazyFrame):
+        return df.collect()
+
     return df
 
 
-# ==========================================
-# 1. FONCTIONS AUXILIAIRES A PREPARE_DATA
-# ==========================================
+def extract_data_survie(
+    file_path: str | Path,
+) -> pl.LazyFrame:
+    """Load survival data from a Parquet file.
 
-def prepare_base_data(df, target_col, other_cols, used_distribution):
-    """Nettoie, recale le temps et agrège les données historiques."""
-    time_str = "XX:XX"
-    
-    if df.is_empty():
-        print(" │   ├─ XX:XX (H-0) ── ✕ Blocage : DataFrame vide")
-        return None, None
-        
-    if TIME_COL not in df.columns or ID_COL not in df.columns:
-        raise ValueError(f"Colonnes temporelle ou ID absentes.")
+    The function lazily reads the Parquet file and normalizes the types of
+    selected columns. In particular, ``ecmo_all`` is converted from its
+    string representation to a Boolean value.
 
-    # Cast et nettoyage (par précaution)
-    df = df.with_columns(pl.col(TIME_COL).cast(pl.Float64, strict=False)).drop_nulls(subset=TIME_COL)
-    if df.is_empty():
-        print(f" │   ├─ {time_str} ── ✕ Blocage : Temps invalides")
-        return None, None
+    Args:
+        file_path:
+            Path to the Parquet file.
 
-    # Recalage temporel par rapport à la sortie : 0 = dernière heure, négatif = passé
-    # On arrondit en coupant les composantes à virgules
-    df = df.with_columns(pl.col(TIME_COL).floor().alias("heure_entiere"))
-    df = df.with_columns(
-        (pl.col("heure_entiere") - pl.col("heure_entiere").max().over(ID_COL)).alias("heure_calibree")
+    Returns:
+        A LazyFrame containing the loaded and normalized data.
+
+    Raises:
+        FileNotFoundError:
+            If the Parquet file does not exist.
+    """
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Parquet file does not exist: {file_path}"
+        )
+
+    return (
+        pl.scan_parquet(file_path)
+        .with_columns(
+            pl.col(TIME_COL).cast(pl.Float64, strict=False),
+            pl.col("pam").cast(pl.Float64, strict=False),
+            # Normalize the string representation of the ECMO indicator.
+            pl.col("ecmo_all")
+            .cast(pl.String, strict=False)
+            .str.to_lowercase()
+            .str.strip_chars()
+            .eq("true")
+            .alias("ecmo_all"),
+        )
     )
-    
-    df_history = df.filter(pl.col("heure_calibree") <= 0)
-    if df_history.is_empty():
-        print(f" │   ├─ {time_str} ── ✕ Blocage : Historique vide")
+
+
+def prepare_base_data(
+    df: PolarsFrame,
+    target_col: str,
+    other_cols: list[str],
+) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
+    """Clean the input data and recalibrate its time axis.
+
+    Time is recalibrated independently for each ICU stay so that hour zero
+    corresponds to the last available observation. Earlier observations are
+    represented by negative values.
+
+    Args:
+        df:
+            Patient time-series data.
+        target_col:
+            Name of the main target column.
+        other_cols:
+            Names of additional target columns.
+        used_distribution:
+            Distribution used to generate random windows.
+
+    Returns:
+        A tuple containing:
+
+        - The cleaned historical observations.
+        - One row per patient containing the earliest calibrated hour.
+
+        Both values are ``None`` when preprocessing produces no usable data.
+
+    Raises:
+        ValueError:
+            If the patient identifier, time column, target column, or one of
+            the additional target columns is missing.
+    """
+
+    df = _ensure_dataframe(df)
+
+    if df.is_empty():
+        print(
+            " │   ├─ XX:XX (H-0) ── "
+            "✕ Blocked: empty DataFrame"
+        )
         return None, None
 
-    df_agg = df_history
-    
-    if used_distribution == "flexible":
-        target_by_hour = df_history.select([ID_COL, "heure_calibree", target_col] + other_cols).unique()
-        df_agg = df_agg.join(target_by_hour, on=[ID_COL, "heure_calibree"], how="left")
+    required_columns = {
+        ID_COL,
+        TIME_COL,
+        target_col,
+        *other_cols,
+    }
+    missing_columns = required_columns - set(df.columns)
 
-    # Calcul des patients (min_h)
+    if missing_columns:
+        raise ValueError(
+            "Missing columns required for data preparation: "
+            f"{sorted(missing_columns)}"
+        )
+
+    # Normalize the time column and remove invalid time values.
+    df = (
+        df.with_columns(
+            pl.col(TIME_COL).cast(
+                pl.Float64,
+                strict=False,
+            )
+        )
+        .drop_nulls(subset=[TIME_COL])
+    )
+
+    if df.is_empty():
+        print(
+            " │   ├─ XX:XX ── "
+            "✕ Blocked: no valid time values"
+        )
+        return None, None
+
+    # Floor the elapsed time to obtain one integer-based hourly index.
+    df = df.with_columns(
+        pl.col(TIME_COL)
+        .floor()
+        .cast(pl.Int64)
+        .alias("integer_hour")
+    )
+
+    # Recalibrate time independently for each stay:
+    # 0 is the last available hour and negative values represent the past.
+    df = df.with_columns(
+        (
+            pl.col("integer_hour")
+            - pl.col("integer_hour").max().over(ID_COL)
+        ).alias(CALIBRATED_TIME_COL)
+    )
+
+    df_history = df.filter(
+        pl.col(CALIBRATED_TIME_COL) <= 0
+    )
+
+    if df_history.is_empty():
+        print(
+            " │   ├─ XX:XX ── "
+            "✕ Blocked: empty historical data"
+        )
+        return None, None
+
+    # Compute the earliest available calibrated hour for each stay.
     patients = (
-        df_agg.group_by(ID_COL)
-        .agg(pl.col("heure_calibree").min().alias("min_h"))
-        # Ajout du sort pour garantir que l'ordre des patients est identique avant l'échantillonnage
+        df_history.group_by(ID_COL)
+        .agg(
+            pl.col(CALIBRATED_TIME_COL)
+            .min()
+            .alias("min_h")
+        )
+        # Stable ordering guarantees deterministic alignment before sampling.
         .sort(ID_COL)
     )
-    
-    return df_agg, patients
+
+    return df_history, patients
 
 
-def generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig, seed=42):
-    """Construit les fenêtres temporelles selon une distribution aléatoire déterministe via Generator."""
-    
-    # On garantit la création d'un générateur d'état local et étanche
+def generate_random_windows(
+    patients: pl.DataFrame,
+    df_agg: pl.DataFrame,
+    max_hour: int,
+    used_distribution: str,
+    target_col: str,
+    show_fig: bool,
+    seed: RandomSeed = 42,
+) -> pl.DataFrame | None:
+    """Generate deterministic random time windows for each ICU stay.
+
+    A local NumPy random generator is used to avoid modifying global random
+    state. Three sampling strategies are supported:
+
+    ``"uniform"``
+        Uniformly sample a valid offset within each stay.
+
+    ``"real"``
+        Sample offsets from the empirical distribution of stay lengths.
+
+    ``"flexible"``
+        Prefer windows associated with a positive target value and fall back
+        to a random valid window when no positive target hour is available.
+
+    Args:
+        patients:
+            One row per patient containing at least ``ID_COL`` and ``min_h``.
+        df_agg:
+            Historical patient observations.
+        max_hour:
+            Number of hours preserved between the end of the selected window
+            and the prediction time.
+        used_distribution:
+            Random-window sampling strategy.
+        target_col:
+            Name of the target column used by the flexible strategy.
+        show_fig:
+            Whether to display the sampled-offset distribution.
+        seed:
+            Integer random seed or existing NumPy random generator.
+
+    Returns:
+        A DataFrame containing one row per patient and selected calibrated
+        hour, or ``None`` when the distribution is unsupported.
+
+    Raises:
+        ValueError:
+            If required columns are missing or if ``max_hour`` is negative.
+    """
+    if max_hour < 0:
+        raise ValueError(
+            f"max_hour must be non-negative, received {max_hour}."
+        )
+
+    required_patient_columns = {ID_COL, "min_h"}
+    missing_patient_columns = (
+        required_patient_columns - set(patients.columns)
+    )
+
+    if missing_patient_columns:
+        raise ValueError(
+            "Missing patient columns required to generate windows: "
+            f"{sorted(missing_patient_columns)}"
+        )
+
     if isinstance(seed, np.random.Generator):
         rng = seed
     else:
         rng = np.random.default_rng(seed)
-    
-    # On extrait l'ID_COL parallèlement pour être sûr de reconstruire proprement l'alignement
-    list_ids = patients[ID_COL].to_list()
-    if used_distribution == "uniform": 
-        offsets = np.array([
-            rng.integers(0, max(1, (-min_h - max_hour - (WINDOW_SIZE - 1)) + 1))
-            for min_h in patients["min_h"].to_list()
-        ])
-        
-    elif used_distribution == "real":
-        patients = patients.with_columns((-pl.col("min_h")).alias("max_h"))
-        real_distribution = patients["max_h"].to_numpy()
-        offsets = []
-        for max_h in real_distribution:
-            max_offset = max(1, (max_h - max_hour - (WINDOW_SIZE - 1)) + 1)
-            possible_offsets = real_distribution[real_distribution <= max_offset]
-            if len(possible_offsets) == 0:
-                offset = 0 # fallback safe
-            else:
-                offset = rng.choice(possible_offsets)
-            offsets.append(offset)
-            
-    elif used_distribution == "flexible":
-        target_info = (
-            df_agg.filter((pl.col("heure_calibree") <= -max_hour) & (pl.col(target_col) == 1))
-            .group_by(ID_COL).agg(pl.col("heure_calibree").alias("heures_positives"))
+
+    patient_ids = patients[ID_COL].to_list()
+    minimum_hours = patients["min_h"].to_list()
+
+    if used_distribution == "uniform":
+        offsets = np.asarray(
+            [
+                rng.integers(
+                    0,
+                    max(
+                        1,
+                        (
+                            -min_h
+                            - max_hour
+                            - (WINDOW_SIZE - 1)
+                        )
+                        + 1,
+                    ),
+                )
+                for min_h in minimum_hours
+            ],
+            dtype=np.int64,
         )
-        patients_selection = patients.join(target_info, on=ID_COL, how="left").sort(ID_COL)
-        
-        offsets = []
-        for row in patients_selection.iter_rows(named=True):
-            h_pos = row["heures_positives"]
-            min_h = row["min_h"]
-            chosen_start = None
-            
-            if h_pos is not None and len(h_pos) > 0:
-                possibilites = [h for h in h_pos if h + (WINDOW_SIZE - 1) <= -max_hour]
-                if possibilites:
-                    chosen_start = rng.choice(possibilites)
+
+    elif used_distribution == "real":
+        patients_with_duration = patients.with_columns(
+            (-pl.col("min_h")).alias("max_h")
+        )
+
+        empirical_durations = (
+            patients_with_duration["max_h"]
+            .to_numpy()
+        )
+
+        sampled_offsets: list[int] = []
+
+        for max_h in empirical_durations:
+            maximum_offset = max(
+                1,
+                (
+                    max_h
+                    - max_hour
+                    - (WINDOW_SIZE - 1)
+                )
+                + 1,
+            )
+
+            possible_offsets = empirical_durations[
+                empirical_durations <= maximum_offset
+            ]
+
+            if possible_offsets.size == 0:
+                sampled_offset = 0
+            else:
+                sampled_offset = int(
+                    rng.choice(possible_offsets)
+                )
+
+            sampled_offsets.append(sampled_offset)
+
+        offsets = np.asarray(
+            sampled_offsets,
+            dtype=np.int64,
+        )
+
+    elif used_distribution == "flexible":
+        if target_col not in df_agg.columns:
+            raise ValueError(
+                f"Target column {target_col!r} is missing."
+            )
+
+        # Identify calibrated hours with a positive target for each patient.
+        positive_target_hours = (
+            df_agg.filter(
+                (
+                    pl.col(CALIBRATED_TIME_COL)
+                    <= -max_hour
+                )
+                & (pl.col(target_col) == 1)
+            )
+            .group_by(ID_COL)
+            .agg(
+                pl.col(CALIBRATED_TIME_COL)
+                .unique()
+                .sort()
+                .alias("positive_hours")
+            )
+        )
+
+        patient_selection = (
+            patients.join(
+                positive_target_hours,
+                on=ID_COL,
+                how="left",
+            )
+            .sort(ID_COL)
+        )
+
+        selected_starts: list[int] = []
+
+        for row in patient_selection.iter_rows(named=True):
+            positive_hours = row["positive_hours"]
+            minimum_hour = int(row["min_h"])
+            selected_start: int | None = None
+
+            if positive_hours:
+                valid_positive_starts = [
+                    int(hour)
+                    for hour in positive_hours
+                    if (
+                        hour + (WINDOW_SIZE - 1)
+                        <= -max_hour
+                    )
+                ]
+
+                if valid_positive_starts:
+                    selected_start = int(
+                        rng.choice(valid_positive_starts)
+                    )
                 else:
-                    chosen_start = max(h_pos) - (WINDOW_SIZE - 1)
-            
-            if chosen_start is None:
-                max_possible_start = -max_hour - (WINDOW_SIZE - 1)
-                if max_possible_start > min_h:
-                    chosen_start = rng.integers(int(min_h), int(max_possible_start) + 1) # +1 car exclusif dans rng
+                    # Shift the latest positive hour so that it appears at
+                    # the end of the selected window.
+                    selected_start = (
+                        int(max(positive_hours))
+                        - (WINDOW_SIZE - 1)
+                    )
+
+            if selected_start is None:
+                latest_valid_start = (
+                    -max_hour
+                    - (WINDOW_SIZE - 1)
+                )
+
+                if latest_valid_start > minimum_hour:
+                    selected_start = int(
+                        rng.integers(
+                            minimum_hour,
+                            latest_valid_start + 1,
+                        )
+                    )
                 else:
-                    chosen_start = min_h
-            offsets.append(chosen_start)
-            
-        offsets = [int(x) for x in offsets]
+                    selected_start = minimum_hour
+
+            selected_starts.append(selected_start)
+
+        offsets = np.asarray(
+            selected_starts,
+            dtype=np.int64,
+        )
+
     else:
-        print(f"Distribution {used_distribution} non prise en charge")
+        print(
+            "Unsupported window distribution: "
+            f"{used_distribution}"
+        )
         return None
 
-    if show_fig:
-        x = np.array(offsets)
-        q05, q95 = np.quantile(x, [0.05, 0.95])
-        x_filtered = x[(x >= q05) & (x <= q95)]
+    if show_fig and offsets.size > 0:
+        lower_quantile, upper_quantile = np.quantile(
+            offsets,
+            [0.05, 0.95],
+        )
+
+        filtered_offsets = offsets[
+            (offsets >= lower_quantile)
+            & (offsets <= upper_quantile)
+        ]
+
         plt.figure(figsize=(10, 6))
-        plt.hist(x_filtered, bins=100, color='skyblue', edgecolor='black')
-        plt.title(f"Distribution des offsets relatifs (sanctuarisation : {max_hour})\nLoi: {used_distribution}")
+        plt.hist(
+            filtered_offsets,
+            bins=100,
+        )
+        plt.title(
+            "Relative offset distribution "
+            f"(sanctuary period: {max_hour} hours)\n"
+            f"Distribution: {used_distribution}"
+        )
+        plt.xlabel("Offset")
+        plt.ylabel("Frequency")
+        plt.tight_layout()
         plt.show()
 
-    # Reconstruction via un df indexé sur ID_COL pour éviter les désalignements de Series
-    df_offsets = pl.DataFrame({
-        ID_COL: list_ids,
-        "chosen_offset": offsets
-    })
-    if used_distribution == "flexible" :
-        # Retour anticipé spécifique à "flexible" car il utilise des offsets absolus
+    # Attach sampled values to patient identifiers explicitly to avoid
+    # positional misalignment between Polars Series.
+    df_offsets = pl.DataFrame(
+        {
+            ID_COL: patient_ids,
+            "chosen_offset": offsets,
+        }
+    )
+
+    if used_distribution == "flexible":
+        # Flexible sampling produces absolute calibrated start hours rather
+        # than offsets relative to each patient's minimum hour.
         return (
-            patients.join(df_offsets, on=ID_COL, how="inner")
-            .with_columns(pl.int_ranges(pl.col("chosen_offset"), pl.col("chosen_offset") + WINDOW_SIZE).alias("heure_calibree"))
-            .explode("heure_calibree")
-            .select([ID_COL, "heure_calibree"])
+            patients.join(
+                df_offsets,
+                on=ID_COL,
+                how="inner",
+            )
+            .with_columns(
+                pl.int_ranges(
+                    pl.col("chosen_offset"),
+                    pl.col("chosen_offset")
+                    + WINDOW_SIZE,
+                ).alias(CALIBRATED_TIME_COL)
+            )
+            .explode(CALIBRATED_TIME_COL)
+            .select(
+                [
+                    ID_COL,
+                    CALIBRATED_TIME_COL,
+                ]
+            )
         )
 
     return (
-        patients.join(df_offsets, on=ID_COL, how="inner")
-        .with_columns((pl.col("min_h") + pl.col("chosen_offset")).alias("start_h"))
-        .with_columns((pl.col("start_h") + (WINDOW_SIZE - 1)).alias("end_h"))
-        .with_columns(pl.int_ranges(pl.col("start_h"), pl.col("end_h") + 1).alias("heure_calibree"))
-        .explode("heure_calibree")
-        .select([ID_COL, "heure_calibree"])
+        patients.join(
+            df_offsets,
+            on=ID_COL,
+            how="inner",
+        )
+        .with_columns(
+            (
+                pl.col("min_h")
+                + pl.col("chosen_offset")
+            ).alias("start_h")
+        )
+        .with_columns(
+            (
+                pl.col("start_h")
+                + (WINDOW_SIZE - 1)
+            ).alias("end_h")
+        )
+        .with_columns(
+            pl.int_ranges(
+                pl.col("start_h"),
+                pl.col("end_h") + 1,
+            ).alias(CALIBRATED_TIME_COL)
+        )
+        .explode(CALIBRATED_TIME_COL)
+        .select(
+            [
+                ID_COL,
+                CALIBRATED_TIME_COL,
+            ]
+        )
     )
 
 
-def generate_fixed_windows(patients, hour_offset, max_hour):
-    """Construit les fenêtres de manière fixe, sans aléatoire."""
-    patients = patients.with_columns(pl.lit(hour_offset).alias("hour_offset"))
-    
+def generate_fixed_windows(
+    patients: pl.DataFrame,
+    hour_offset: int,
+    max_hour: int,
+) -> pl.DataFrame:
+    """Generate one fixed time window for each ICU stay.
+
+    The special value ``hour_offset=-1`` selects the latest possible window
+    while respecting ``max_hour``. Other values are interpreted as offsets
+    relative to each patient's earliest available hour.
+
+    Args:
+        patients:
+            One row per patient containing ``ID_COL`` and ``min_h``.
+        hour_offset:
+            Window offset relative to the earliest available hour. A value of
+            ``-1`` selects the latest valid window.
+        max_hour:
+            Number of hours preserved between the end of the selected window
+            and the prediction time.
+
+    Returns:
+        A DataFrame containing one row per patient and selected calibrated
+        hour.
+
+    Raises:
+        ValueError:
+            If ``max_hour`` is negative or required columns are missing.
+    """
+    if max_hour < 0:
+        raise ValueError(
+            f"max_hour must be non-negative, received {max_hour}."
+        )
+
+    required_columns = {ID_COL, "min_h"}
+    missing_columns = required_columns - set(patients.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "Missing patient columns required to generate windows: "
+            f"{sorted(missing_columns)}"
+        )
+
     if hour_offset == -1:
         return (
-            patients.with_columns(pl.int_ranges(-(WINDOW_SIZE - 1) - max_hour, 1 - max_hour).alias("heure_calibree"))
-            .explode("heure_calibree")
-            .select([ID_COL, "heure_calibree"])
-        )
-    else:
-        return (
-            patients.with_columns((pl.col("min_h") + pl.col("hour_offset")).alias("start_h"))
-            .with_columns((pl.col("start_h") + (WINDOW_SIZE - 1)).alias("end_h"))
-            .with_columns(pl.int_ranges(pl.col("start_h"), pl.col("end_h") + 1).alias("heure_calibree"))
-            .explode("heure_calibree")
-            .select([ID_COL, "heure_calibree"])
+            patients.with_columns(
+                pl.int_ranges(
+                    -(WINDOW_SIZE - 1) - max_hour,
+                    1 - max_hour,
+                ).alias(CALIBRATED_TIME_COL)
+            )
+            .explode(CALIBRATED_TIME_COL)
+            .select(
+                [
+                    ID_COL,
+                    CALIBRATED_TIME_COL,
+                ]
+            )
         )
 
+    return (
+        patients.with_columns(
+            pl.lit(hour_offset).alias("hour_offset")
+        )
+        .with_columns(
+            (
+                pl.col("min_h")
+                + pl.col("hour_offset")
+            ).alias("start_h")
+        )
+        .with_columns(
+            (
+                pl.col("start_h")
+                + (WINDOW_SIZE - 1)
+            ).alias("end_h")
+        )
+        .with_columns(
+            pl.int_ranges(
+                pl.col("start_h"),
+                pl.col("end_h") + 1,
+            ).alias(CALIBRATED_TIME_COL)
+        )
+        .explode(CALIBRATED_TIME_COL)
+        .select(
+            [
+                ID_COL,
+                CALIBRATED_TIME_COL,
+            ]
+        )
+    )
 
-def finalize_data(df_windows, df_agg, strict_mode):
-    """Effectue la jointure, le filtrage strict, l'imputation et les features finales."""
-    df_agg = df_agg.with_columns([pl.col("heure_calibree").cast(pl.Int64), pl.lit(1).alias("real_hour")])
-    df_full = df_windows.join(df_agg, on=[ID_COL, "heure_calibree"], how="left").sort([ID_COL, "heure_calibree"])
-    
+
+def finalize_data(
+    df_windows: pl.DataFrame,
+    df_agg: pl.DataFrame,
+    strict_mode: bool,
+) -> pl.DataFrame:
+    """Join selected windows with observations and apply strict filtering.
+
+    Args:
+        df_windows:
+            Selected patient-hour combinations.
+        df_agg:
+            Historical patient observations.
+        strict_mode:
+            Whether to retain only windows containing all expected hourly
+            observations.
+
+    Returns:
+        The finalized windowed dataset.
+    """
+    df_agg = df_agg.with_columns(
+        pl.col(CALIBRATED_TIME_COL).cast(pl.Int64),
+        pl.lit(1).alias("real_hour"),
+    )
+
+    df_full = (
+        df_windows.join(
+            df_agg,
+            on=[
+                ID_COL,
+                CALIBRATED_TIME_COL,
+            ],
+            how="left",
+        )
+        .sort(
+            [
+                ID_COL,
+                CALIBRATED_TIME_COL,
+            ]
+        )
+    )
+
     if strict_mode:
-        seuil = 1
         valid_ids = (
             df_full.group_by(ID_COL)
-            .agg(pl.col("real_hour").fill_null(0).sum().alias("nb_hour_present"))
-            .filter(pl.col("nb_hour_present") >= WINDOW_SIZE * seuil)
+            .agg(
+                pl.col("real_hour")
+                .fill_null(0)
+                .sum()
+                .alias("observed_hour_count")
+            )
+            .filter(
+                pl.col("observed_hour_count")
+                >= WINDOW_SIZE
+            )
             .select(ID_COL)
         )
-        df_full = df_full.join(valid_ids, on=ID_COL, how="inner")
-        
-    df_full = df_full.drop('real_hour')
-    return df_full
+
+        df_full = df_full.join(
+            valid_ids,
+            on=ID_COL,
+            how="inner",
+        )
+
+    return df_full.drop("real_hour")
 
 
-# ==========================================
-# 2. FONCTION PRINCIPALE (L'Orchestrateur)
-# ==========================================
+def prepare_data(
+    df: PolarsFrame,
+    hour_offset: int = 0,
+    random: bool = False,
+    max_hour: int = 0,
+    used_distribution: str = "uniform",
+    strict_mode: bool = False,
+    target_col: str = "isDeceased_lt_24h",
+    other_cols: list[str] | None = None,
+    show_fig: bool = True,
+    seed: RandomSeed = 42,
+) -> pl.DataFrame:
+    """Prepare fixed-length patient time windows for model training.
 
-def prepare_data(df, hour_offset=0, random=False, max_hour=0, used_distribution="uniform", 
-                 strict_mode=False, target_col="isDeceased_lt_24h", other_cols=None, show_fig=True, seed=42):
-    
-    if other_cols is None: other_cols = []
-    
-    # Etape 1 : Nettoyage et Agrégation 
-    df_agg, patients = prepare_base_data(df, target_col, other_cols, used_distribution)
-    if df_agg is None:
+    The function cleans and recalibrates patient time-series data, generates
+    either fixed or random 24-hour windows, and joins the selected hours with
+    the original observations.
+
+    Args:
+        df:
+            Patient time-series data.
+        hour_offset:
+            Offset used by fixed-window sampling. The special value ``-1``
+            selects the latest valid window.
+        random:
+            Whether to generate random rather than fixed windows.
+        max_hour:
+            Number of hours preserved between the end of a window and the
+            prediction time.
+        used_distribution:
+            Random sampling strategy. Supported values are ``"uniform"``,
+            ``"real"``, and ``"flexible"``.
+        strict_mode:
+            Whether to discard windows that do not contain all 24 expected
+            hourly observations.
+        target_col:
+            Name of the main prediction target.
+        other_cols:
+            Names of additional target columns that must be present.
+        show_fig:
+            Whether to display the random-offset distribution.
+        seed:
+            Integer random seed or existing NumPy random generator.
+
+    Returns:
+        The prepared DataFrame. An empty DataFrame is returned when no valid
+        observations or windows can be constructed.
+    """
+    if other_cols is None:
+        other_cols = []
+
+    # Step 1: clean the input and recalibrate patient time.
+    df_agg, patients = prepare_base_data(
+        df=df,
+        target_col=target_col,
+        other_cols=other_cols,
+        used_distribution=used_distribution,
+    )
+
+    if df_agg is None or patients is None:
         return pl.DataFrame()
 
-    # Etape 2 : Construction des fenêtres
+    # Step 2: generate fixed or random time windows.
     if random:
-        # Passage explicite de la seed (ou du Generator) à la fonction
-        df_windows = generate_random_windows(patients, df_agg, max_hour, used_distribution, target_col, show_fig, seed=seed)
+        df_windows = generate_random_windows(
+            patients=patients,
+            df_agg=df_agg,
+            max_hour=max_hour,
+            used_distribution=used_distribution,
+            target_col=target_col,
+            show_fig=show_fig,
+            seed=seed,
+        )
     else:
-        df_windows = generate_fixed_windows(patients, hour_offset, max_hour)
+        df_windows = generate_fixed_windows(
+            patients=patients,
+            hour_offset=hour_offset,
+            max_hour=max_hour,
+        )
 
     if df_windows is None or df_windows.is_empty():
-        print(f" │   ├─ (H-{hour_offset}) ── ✕ Blocage : Aucune fenêtre construite")
+        print(
+            f" │   ├─ (H-{hour_offset}) ── "
+            "✕ Blocked: no window could be generated"
+        )
         return pl.DataFrame()
 
-    # Etape 3 : Finalisation
-    df_full = finalize_data(df_windows, df_agg, strict_mode)
-
-    return df_full
-
-
-def remove_null_values(df):
-    df = df.with_columns(
-    (pl.col("is_ventilated").fill_null(pl.lit(False))).alias("is_ventilated"),
-    (pl.col("is_prone").fill_null(pl.lit(False))).alias("is_prone"),
-    (pl.col("is_conscious").fill_null(pl.lit(False))).alias("is_conscious"),
-    (pl.col("is_cvvhf").fill_null(pl.lit(False))).alias("is_cvvhf"),
-    (pl.col("is_hdi").fill_null(pl.lit(False))).alias("is_hdi"),
+    # Step 3: attach observations and apply strict completeness filtering.
+    return finalize_data(
+        df_windows=df_windows,
+        df_agg=df_agg,
+        strict_mode=strict_mode,
     )
-    df = df.filter(pl.col("taille").is_not_null() & pl.col("poids_admission").is_not_null())
-    return df
 
+
+def remove_null_values(
+    df: PolarsFrame,
+) -> pl.DataFrame:
+    """Fill missing Boolean indicators and remove incomplete static data.
+
+    Missing values in selected Boolean clinical indicators are replaced with
+    ``False``. Rows without height or admission weight are then removed.
+
+    Args:
+        df:
+            Patient dataset to clean.
+
+    Returns:
+        The cleaned eager DataFrame.
+
+    Raises:
+        ValueError:
+            If one of the required columns is missing.
+    """
+    df = _ensure_dataframe(df)
+
+    boolean_columns = [
+        "is_ventilated",
+        "is_prone",
+        "is_conscious",
+        "is_cvvhf",
+        "is_hdi",
+    ]
+    required_columns = {
+        *boolean_columns,
+        "taille",
+        "poids_admission",
+    }
+
+    missing_columns = required_columns - set(df.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "Missing columns required for null-value cleaning: "
+            f"{sorted(missing_columns)}"
+        )
+
+    return (
+        df.with_columns(
+            [
+                pl.col(column)
+                .cast(pl.Boolean, strict=False)
+                .fill_null(False)
+                .alias(column)
+                for column in boolean_columns
+            ]
+        )
+        .filter(
+            pl.col("taille").is_not_null()
+            & pl.col("poids_admission").is_not_null()
+        )
+    )
