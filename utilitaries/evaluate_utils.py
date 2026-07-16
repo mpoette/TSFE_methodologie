@@ -13,6 +13,8 @@ from utilitaries.models.lstmTimeModified import (
     train_lstm_model,
 )
 
+from utilitaries.training_utils import get_root_estimator
+
 def align_tsfel_features(X_train, X_test, root_model):
     """Aligne les colonnes de X_train/X_test avec les features attendues par le modèle racine."""
 
@@ -107,25 +109,3 @@ def evaluate_tsfel_fold(fold_idx, X_train, X_test, y_train, y_test, loaded_model
         "y_test": y_test, "y_pred_test": y_pred_nb_test,
         "probas_uncalib": prob_uncalib_fold, "probas_calib": prob_calib_fold
     }
-
-def get_root_estimator(estimator_to_unwrap):
-    """Extrait récursivement le modèle racine derrière les wrappers de calibration."""
-
-    # 1. Si c'est Platt (CalibratedClassifierCV)
-    if hasattr(estimator_to_unwrap, "calibrated_classifiers_"):
-        return get_root_estimator(estimator_to_unwrap.calibrated_classifiers_[0].estimator)
-    
-    # 2. Si c'est FrozenEstimator (scikit-learn >= 1.6)
-    elif estimator_to_unwrap.__class__.__name__ == "FrozenEstimator":
-        return get_root_estimator(estimator_to_unwrap.estimator)
-    
-    # 3. Si c'est TemperatureScaledEstimator
-    elif hasattr(estimator_to_unwrap, "calibrator"):
-        return get_root_estimator(estimator_to_unwrap.estimator)
-    
-    # 4. Si c'est PriorCorrectionWrapper
-    elif hasattr(estimator_to_unwrap, "base_estimator") and hasattr(estimator_to_unwrap, "beta"):
-        return get_root_estimator(estimator_to_unwrap.base_estimator)
-
-    # 5. Modèle racine trouvé
-    return estimator_to_unwrap

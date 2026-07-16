@@ -80,7 +80,7 @@ def run_stage1_search(
     X_train_3d,
     y_train_seq,
     study_name,
-    n_trials=80,
+    n_trials=40,
     storage=OPTUNA_STORAGE,
     fixed_params=None,
 ):

@@ -23,137 +23,614 @@ from sklearn.metrics import (
     )
 
 from sklearn.linear_model import LogisticRegression
-from scipy.interpolate import UnivariateSpline
+from sklearn.metrics import brier_score_loss 
+from statsmodels.nonparametric.smoothers_lowess import lowess
 
 import utilitaries.features_extraction_utils as feu
 from pathlib import Path
 
 import utilitaries.evaluate_utils as evaluate
 
-def calibration_curve_homemade(probas_uncalib, probas_calib, y_test_global, 
-                             model_name, extraction_type, calibration, save_figure, 
-                             output_dir, transparent, calibration_mode = "Platt"):
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot([0, 1], [0, 1], "k:", label="Perfect calibration")
+def calibration_curve_homemade(
+    probas_uncalib,
+    probas_calib,
+    y_test_global,
+    model_name,
+    extraction_type,
+    calibration,
+    save_figure,
+    output_dir,
+    transparent,
+    calibration_mode="Platt",
+):
+    """
+    Affiche une courbe de calibration classique basée sur des groupes
+    de probabilités prédictes.
+    """
+    probas_uncalib = np.asarray(
+        probas_uncalib,
+        dtype=float,
+    ).ravel()
 
-    # Courbe de base (Modèle brut ou modèle DL déjà calibré en température)
-    fraction_pos_uncalib, mean_pred_uncalib = calibration_curve(y_test_global, probas_uncalib, n_bins=10)
-    plt.plot(mean_pred_uncalib, fraction_pos_uncalib, "s-", color="red", label=f"Curve ({model_name})")
+    y_test_global = np.asarray(
+        y_test_global,
+        dtype=int,
+    ).ravel()
 
-    # Courbe calibrée (Uniquement affichée pour TSFEL si demandée)
-    if extraction_type == "TSFEL" and calibration:
-        fraction_pos_calib, mean_pred_calib = calibration_curve(y_test_global, probas_calib, n_bins=10)
-        plt.plot(mean_pred_calib, fraction_pos_calib, "s-", color="blue", label=f"After calibration ({calibration_mode[1:]})")
+    if probas_calib is not None:
+        probas_calib = np.asarray(
+            probas_calib,
+            dtype=float,
+        ).ravel()
 
-    plt.ylabel("True fraction of positives")
-    plt.xlabel("Mean predicted probability")
-    plt.title(f"Global Calibration Curve (5-Fold Cross-Validation)\nModel: {model_name}")
-    plt.legend(loc="lower right")
-    plt.grid(True)
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    ax.plot(
+        [0, 1],
+        [0, 1],
+        "k:",
+        label="Perfect calibration",
+    )
+
+    # Courbe du modèle brut
+    fraction_pos_uncalib, mean_pred_uncalib = calibration_curve(
+        y_test_global,
+        probas_uncalib,
+        n_bins=10,
+        strategy="uniform",
+    )
+
+    ax.plot(
+        mean_pred_uncalib,
+        fraction_pos_uncalib,
+        "s-",
+        color="red",
+        label=f"Curve ({model_name})",
+    )
+
+    # Courbe du modèle calibré
+    if (
+        extraction_type == "TSFEL"
+        and calibration
+        and probas_calib is not None
+    ):
+        fraction_pos_calib, mean_pred_calib = calibration_curve(
+            y_test_global,
+            probas_calib,
+            n_bins=10,
+            strategy="uniform",
+        )
+
+        ax.plot(
+            mean_pred_calib,
+            fraction_pos_calib,
+            "s-",
+            color="blue",
+            label=f"After calibration ({calibration_mode})",
+        )
+
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("True fraction of positives")
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    ax.set_title(
+        "Global Calibration Curve "
+        "(5-Fold Cross-Validation)\n"
+        f"Model: {model_name}"
+    )
+
+    ax.legend(loc="lower right")
+    ax.grid(True)
+
+    fig.tight_layout()
 
     if save_figure:
-        plt.savefig(output_dir / Path("calibration_curve"), dpi=300, bbox_inches="tight", transparent=transparent)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        output_path = (
+            output_dir
+            / "calibration_curve.png"
+        )
+
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
 
     plt.show()
+    plt.close(fig)
 
-def get_calibration_stats(probas, y_test):
-    """Calcule proprement les statistiques de calibration individuelles."""
+
+def _validate_calibration_inputs(
+    probas,
+    y_test,
+):
+    """
+    Valide et convertit les données utilisées pour l'analyse
+    de calibration.
+    """
+    probas = np.asarray(
+        probas,
+        dtype=float,
+    ).ravel()
+
+    y_test = np.asarray(
+        y_test,
+        dtype=int,
+    ).ravel()
+
+    if probas.size == 0:
+        raise ValueError(
+            "probas and y_test must not be empty."
+        )
+
+    if probas.shape[0] != y_test.shape[0]:
+        raise ValueError(
+            "probas and y_test must have the same length."
+        )
+
+    if not np.all(np.isfinite(probas)):
+        raise ValueError(
+            "probas contains NaN or infinite values."
+        )
+
+    if not np.all(np.isfinite(y_test)):
+        raise ValueError(
+            "y_test contains NaN or infinite values."
+        )
+
+    if np.any((probas < 0) | (probas > 1)):
+        raise ValueError(
+            "Predicted probabilities must be between 0 and 1."
+        )
+
+    unique_classes = np.unique(y_test)
+
+    if not np.array_equal(
+        unique_classes,
+        np.array([0, 1]),
+    ):
+        raise ValueError(
+            "y_test must contain both binary classes 0 and 1."
+        )
+
+    return probas, y_test
+
+
+def _prepare_lowess_for_interpolation(
+    lowess_result,
+):
+    """
+    Prépare une courbe LOWESS pour l'interpolation.
+
+    LOWESS peut renvoyer plusieurs lignes ayant la même valeur de x,
+    notamment lorsque le modèle produit de nombreuses probabilités
+    identiques. Ces valeurs sont regroupées avant interpolation.
+    """
+    lowess_x = lowess_result[:, 0]
+    lowess_y = lowess_result[:, 1]
+
+    unique_x, inverse_indices = np.unique(
+        lowess_x,
+        return_inverse=True,
+    )
+
+    unique_y = np.zeros(
+        unique_x.shape[0],
+        dtype=float,
+    )
+
+    counts = np.zeros(
+        unique_x.shape[0],
+        dtype=int,
+    )
+
+    np.add.at(
+        unique_y,
+        inverse_indices,
+        lowess_y,
+    )
+
+    np.add.at(
+        counts,
+        inverse_indices,
+        1,
+    )
+
+    unique_y = unique_y / counts
+
+    return unique_x, unique_y
+
+
+def get_calibration_stats(
+    probas,
+    y_test,
+    lowess_frac=0.30,
+    lowess_it=0,
+):
+    """
+    Calcule les principales statistiques de calibration.
+
+    La fonction de calibration est estimée directement à partir
+    des observations individuelles avec une régression LOWESS.
+
+    Paramètres
+    ----------
+    probas : array-like
+        Probabilités prédites pour la classe positive.
+
+    y_test : array-like
+        Valeurs observées binaires, codées 0 et 1.
+
+    lowess_frac : float, default=0.30
+        Fraction des observations utilisée dans chaque voisinage
+        local LOWESS. Une valeur plus faible produit une courbe plus
+        flexible ; une valeur plus élevée produit une courbe plus
+        lissée.
+
+    lowess_it : int, default=0
+        Nombre d'itérations robustes supplémentaires de LOWESS.
+        Pour une réponse binaire, 0 est généralement un choix simple
+        et reproductible.
+
+    Retours
+    -------
+    dict
+        Calibration intercept, calibration slope, Brier score,
+        ICI, E90 et coordonnées de la courbe LOWESS.
+    """
+    probas, y_test = _validate_calibration_inputs(
+        probas,
+        y_test,
+    )
+
+    if not 0 < lowess_frac <= 1:
+        raise ValueError(
+            "lowess_frac must be strictly greater than 0 "
+            "and lower than or equal to 1."
+        )
+
+    if lowess_it < 0:
+        raise ValueError(
+            "lowess_it must be greater than or equal to 0."
+        )
+
+    # ---------------------------------------------------------
+    # Calibration intercept et calibration slope
+    # ---------------------------------------------------------
     eps = 1e-7
-    probas_clipped = np.clip(probas, eps, 1 - eps)
-    logits = np.log(probas_clipped / (1 - probas_clipped)).reshape(-1, 1)
-    
-    lr = LogisticRegression(penalty=None, solver='lbfgs')
-    lr.fit(logits, y_test)
-    
-    # Spline plus rigide (s=len(nodes)) pour lisser sans ondulations folles
-    sort_idx = np.argsort(probas)
-    probas_sorted = probas[sort_idx]
-    y_sorted = y_test[sort_idx]
-    
-    counts, bins = np.histogram(probas_sorted, bins=30)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    valid = counts > 0
-    bin_centers = bin_centers[valid]
-    
-    obs_rates = []
-    for i in range(len(bins)-1):
-        mask = (probas_sorted >= bins[i]) & (probas_sorted < bins[i+1])
-        obs_rates.append(y_sorted[mask].mean() if mask.sum() > 0 else 0.0)
-    obs_rates = np.array(obs_rates)[valid]
-    
-    spline = UnivariateSpline(bin_centers, obs_rates, w=counts[valid], s=len(bin_centers))
-    smooth_obs = np.clip(spline(probas_sorted), 0, 1)
-    
-    # Métriques
-    errors = np.abs(smooth_obs - probas_sorted)
+
+    probas_clipped = np.clip(
+        probas,
+        eps,
+        1 - eps,
+    )
+
+    logits = np.log(
+        probas_clipped
+        / (1 - probas_clipped)
+    ).reshape(-1, 1)
+
+    calibration_model = LogisticRegression(
+        penalty=None,
+        solver="lbfgs",
+        max_iter=1000,
+    )
+
+    calibration_model.fit(
+        logits,
+        y_test,
+    )
+
+    # ---------------------------------------------------------
+    # Courbe LOWESS
+    # ---------------------------------------------------------
+    lowess_result = lowess(
+        endog=y_test,
+        exog=probas,
+        frac=lowess_frac,
+        it=lowess_it,
+        is_sorted=False,
+        return_sorted=True,
+    )
+
+    lowess_x, lowess_y = (
+        _prepare_lowess_for_interpolation(
+            lowess_result
+        )
+    )
+
+    if lowess_x.size < 2:
+        raise ValueError(
+            "Not enough distinct predicted probabilities "
+            "to estimate a LOWESS calibration curve."
+        )
+
+    # La LOWESS n'est pas contrainte dans [0, 1].
+    lowess_y = np.clip(
+        lowess_y,
+        0,
+        1,
+    )
+
+    # ---------------------------------------------------------
+    # Calcul de l'ICI et de l'E90
+    # ---------------------------------------------------------
+    smooth_observed_at_predictions = np.interp(
+        probas,
+        lowess_x,
+        lowess_y,
+        left=lowess_y[0],
+        right=lowess_y[-1],
+    )
+
+    smooth_observed_at_predictions = np.clip(
+        smooth_observed_at_predictions,
+        0,
+        1,
+    )
+
+    absolute_errors = np.abs(
+        smooth_observed_at_predictions
+        - probas
+    )
+
     return {
-        "intercept": lr.intercept_[0],
-        "slope": lr.coef_[0][0],
-        "brier": brier_score_loss(y_test, probas),
-        "ici": np.mean(errors),
-        "e90": np.percentile(errors, 90),
-        "x": probas_sorted,
-        "y": smooth_obs
+        "intercept": float(
+            calibration_model.intercept_[0]
+        ),
+        "slope": float(
+            calibration_model.coef_[0, 0]
+        ),
+        "brier": float(
+            brier_score_loss(
+                y_test,
+                probas,
+            )
+        ),
+        "ici": float(
+            np.mean(absolute_errors)
+        ),
+        "e90": float(
+            np.percentile(
+                absolute_errors,
+                90,
+            )
+        ),
+        "x": lowess_x,
+        "y": lowess_y,
     }
 
-def calibration_curve_advanced(probas_uncalib, probas_calib, y_test_global, 
-                               model_name, extraction_type, calibration, save_figure, 
-                               output_dir, transparent, calibration_mode="Platt"):
+
+def calibration_curve_advanced(
+    probas_uncalib,
+    probas_calib,
+    y_test_global,
+    model_name,
+    extraction_type,
+    calibration,
+    save_figure,
+    output_dir,
+    transparent,
+    calibration_mode="Platt",
+    lowess_frac=0.30,
+    lowess_it=0,
+):
     """
-    Fonction de calibration de niveau congrès. Affiche l'histogramme de densité,
-    la courbe avant (rouge) et après calibration (bleu) avec toutes les métriques avancées.
+    Affiche :
+
+    - l'histogramme des probabilités prédites en arrière-plan ;
+    - la diagonale de calibration parfaite ;
+    - la courbe LOWESS avant calibration ;
+    - la courbe LOWESS après calibration si applicable ;
+    - le calibration intercept ;
+    - la calibration slope ;
+    - le Brier score ;
+    - l'ICI ;
+    - l'E90.
     """
-    fig, ax1 = plt.subplots(figsize=(9, 7))
-    
-    # 1. Histogramme global en arrière-plan
-    ax1.hist(probas_uncalib, bins=40, alpha=0.1, color="grey", density=False)
-    ax1.set_xlabel("Predicted Probability / Risk")
-    ax1.set_ylabel("Number of Patients (Density)")
-    
+    probas_uncalib, y_test_global = (
+        _validate_calibration_inputs(
+            probas_uncalib,
+            y_test_global,
+        )
+    )
+
+    if probas_calib is not None:
+        probas_calib = np.asarray(
+            probas_calib,
+            dtype=float,
+        ).ravel()
+
+    fig, ax1 = plt.subplots(
+        figsize=(9, 7)
+    )
+
+    # ---------------------------------------------------------
+    # Histogramme en arrière-plan
+    # ---------------------------------------------------------
+    ax1.hist(
+        probas_uncalib,
+        bins=40,
+        range=(0, 1),
+        alpha=0.10,
+        color="grey",
+        density=False,
+    )
+
+    ax1.set_xlabel(
+        "Predicted Probability / Risk"
+    )
+
+    ax1.set_ylabel(
+        "Number of Patients"
+    )
+
+    ax1.set_xlim(0, 1)
+
+    # ---------------------------------------------------------
+    # Axe de calibration
+    # ---------------------------------------------------------
     ax2 = ax1.twinx()
-    ax2.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect calibration")
-    
-    # 2. Calcul et tracé du modèle brut (Uncalibrated)
-    stats_raw = get_root_stats = get_calibration_stats(probas_uncalib, y_test_global)
-    ax2.plot(stats_raw["x"], stats_raw["y"], color="red", linewidth=2, 
-             label=f"Before Calib (Brier: {stats_raw['brier']:.3f})")
-    
+
+    ax2.plot(
+        [0, 1],
+        [0, 1],
+        "k--",
+        linewidth=1.5,
+        alpha=0.5,
+        label="Perfect calibration",
+    )
+
+    # ---------------------------------------------------------
+    # Modèle brut
+    # ---------------------------------------------------------
+    stats_raw = get_calibration_stats(
+        probas=probas_uncalib,
+        y_test=y_test_global,
+        lowess_frac=lowess_frac,
+        lowess_it=lowess_it,
+    )
+
+    ax2.plot(
+        stats_raw["x"],
+        stats_raw["y"],
+        color="red",
+        linewidth=2,
+        label=(
+            "Before Calibration "
+            f"(Brier: {stats_raw['brier']:.3f})"
+        ),
+    )
+
     text_str = (
-        f"[Raw Model]\n"
+        "[Raw Model]\n"
         f"Intercept: {stats_raw['intercept']:.2f}\n"
         f"Slope: {stats_raw['slope']:.2f}\n"
-        f"E90: {stats_raw['e90']:.2f}\n"
+        f"ICI: {stats_raw['ici']:.3f}\n"
+        f"E90: {stats_raw['e90']:.3f}\n"
+        f"Brier: {stats_raw['brier']:.3f}"
     )
-    
-    # 3. Calcul et tracé du modèle calibré (si applicable)
+
+    # ---------------------------------------------------------
+    # Modèle calibré
+    # ---------------------------------------------------------
     if extraction_type == "TSFEL" and calibration:
-        stats_calib = get_calibration_stats(probas_calib, y_test_global)
-        ax2.plot(stats_calib["x"], stats_calib["y"], color="blue", linewidth=2, 
-                 label=f"After {calibration_mode} (Brier: {stats_calib['brier']:.3f})")
-        
+        if probas_calib is None:
+            raise ValueError(
+                "probas_calib must be provided when calibration "
+                "is enabled for TSFEL."
+            )
+
+        probas_calib, y_test_calib = (
+            _validate_calibration_inputs(
+                probas_calib,
+                y_test_global,
+            )
+        )
+
+        stats_calib = get_calibration_stats(
+            probas=probas_calib,
+            y_test=y_test_calib,
+            lowess_frac=lowess_frac,
+            lowess_it=lowess_it,
+        )
+
+        ax2.plot(
+            stats_calib["x"],
+            stats_calib["y"],
+            color="blue",
+            linewidth=2,
+            label=(
+                f"After {calibration_mode} "
+                f"(Brier: {stats_calib['brier']:.3f})"
+            ),
+        )
+
         text_str += (
-            f"\n[Calibrated]\n"
+            "\n\n"
+            "[Calibrated Model]\n"
             f"Intercept: {stats_calib['intercept']:.2f}\n"
             f"Slope: {stats_calib['slope']:.2f}\n"
-            f"E90: {stats_calib['e90']:.2f}"
+            f"ICI: {stats_calib['ici']:.3f}\n"
+            f"E90: {stats_calib['e90']:.3f}\n"
+            f"Brier: {stats_calib['brier']:.3f}"
         )
-    
-    # Affichage de la boîte de texte des métriques
-    props = dict(boxstyle='round', facecolor='white', alpha=0.8)
-    ax2.text(0.05, 0.95, text_str, transform=ax2.transAxes, fontsize=9,
-             verticalalignment='top', bbox=props)
-    
-    ax2.set_ylabel("Observed Proportion / Mortality Rate")
+
+    # ---------------------------------------------------------
+    # Boîte de métriques
+    # ---------------------------------------------------------
+    text_box_properties = {
+        "boxstyle": "round",
+        "facecolor": "white",
+        "alpha": 0.8,
+    }
+
+    ax2.text(
+        0.05,
+        0.95,
+        text_str,
+        transform=ax2.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=text_box_properties,
+    )
+
+    ax2.set_ylabel(
+        "Observed Proportion / Mortality Rate"
+    )
+
     ax2.set_xlim(0, 1)
     ax2.set_ylim(0, 1)
-    ax2.legend(loc="lower right")
-    plt.title(f"Advanced Calibration Assessment\nModel: {model_name}")
-    plt.tight_layout()
-    
+
+    ax2.legend(
+        loc="lower right"
+    )
+
+    ax2.grid(
+        True,
+        alpha=0.25,
+    )
+
+    ax2.set_title(
+        "Advanced Calibration Assessment\n"
+        f"Model: {model_name}"
+    )
+
+    fig.tight_layout()
+
+    # ---------------------------------------------------------
+    # Sauvegarde
+    # ---------------------------------------------------------
     if save_figure:
-        plt.savefig(Path(output_dir) / "advanced_calibration_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        output_path = (
+            output_dir
+            / "advanced_calibration_curve.png"
+        )
+
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
+
     plt.show()
+    plt.close(fig)
 
 def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     (fpr, tpr, thresholds) = roc_curve(y_test, probas)

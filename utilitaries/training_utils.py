@@ -193,36 +193,85 @@ def fit_model_by_name(model_name, X_train, y_train, X_val, y_val, seed, is_final
     return clf, train_score, val_score
 
 
-def apply_model_calibration(model, X_calib, y_calib, method_calib, seed):
-    """Applique Platt Scaling ou Temperature Scaling sur un modèle de base."""
-    # Formatage des sets de calibration
-    if hasattr(model, "base_estimator"):
-        model = model.base_estimator
-    elif hasattr(model, "estimator"):
-        model = model.estimator
+def apply_model_calibration(model, X_calib, y_calib, method_calib):
+    """Applique une calibration au modèle racine déjà entraîné."""
 
-        
-    if "XGB" in type(model).__name__ or hasattr(X_calib, "to_numpy"):
-        X_calib = X_calib.to_numpy() if hasattr(X_calib, "to_numpy") else np.asarray(X_calib)
-        y_calib = np.asarray(y_calib).astype(int)
+    base_model = get_root_estimator(model)
+    
+    if hasattr(X_calib, "to_numpy"):
+        X_calib = X_calib.to_numpy()
+    else:
+        X_calib = np.asarray(X_calib)
 
     if method_calib == "platt":
-        frozen_model = FrozenEstimator(model)
-        calibrated_clf = CalibratedClassifierCV(estimator=frozen_model, method="sigmoid")
+        calibrated_clf = CalibratedClassifierCV(
+            estimator=FrozenEstimator(base_model),
+            method="sigmoid",
+        )
         calibrated_clf.fit(X_calib, y_calib)
         return calibrated_clf
 
-    elif method_calib == "temperature_scaling":
-        from utilitaries.models.inceptionTimeModified import TemperatureCalibrator
-        probas = np.clip(model.predict_proba(X_calib)[:, 1], 1e-7, 1 - 1e-7)
+    if method_calib == "temperature_scaling":
+        from utilitaries.models.inceptionTimeModified import (
+            TemperatureCalibrator,
+        )
+
+        probas = np.clip(
+            base_model.predict_proba(X_calib)[:, 1],
+            1e-7,
+            1 - 1e-7,
+        )
         logits = np.log(probas / (1 - probas))
 
         calibrator = TemperatureCalibrator(init_T=1.0)
-        calibrator.fit(torch.tensor(logits, dtype=torch.float32), torch.tensor(y_calib, dtype=torch.float32), max_iter=200)
-        return TemperatureScaledEstimator(model, calibrator)
+        calibrator.fit(
+            torch.tensor(logits, dtype=torch.float32),
+            torch.tensor(y_calib, dtype=torch.float32),
+            max_iter=200,
+        )
+
+        return TemperatureScaledEstimator(base_model, calibrator)
 
     raise ValueError(f"Calibration {method_calib} non gérée.")
 
 
 
-       
+
+
+def get_root_estimator(estimator_to_unwrap):
+    """Extrait récursivement le modèle racine derrière les wrappers connus."""
+
+    class_name = type(estimator_to_unwrap).__name__
+
+    if class_name == "CalibratedClassifierCV":
+        calibrated_classifiers = getattr(
+            estimator_to_unwrap,
+            "calibrated_classifiers_",
+            None,
+        )
+
+        if not calibrated_classifiers:
+            raise RuntimeError(
+                "Le CalibratedClassifierCV n'est pas entraîné."
+            )
+
+        return get_root_estimator(
+            calibrated_classifiers[0].estimator
+        )
+
+    if class_name == "FrozenEstimator":
+        return get_root_estimator(
+            estimator_to_unwrap.estimator
+        )
+
+    if class_name == "TemperatureScaledEstimator":
+        return get_root_estimator(
+            estimator_to_unwrap.estimator
+        )
+
+    if class_name == "PriorCorrectionWrapper":
+        return get_root_estimator(
+            estimator_to_unwrap.base_estimator
+        )
+
+    return estimator_to_unwrap

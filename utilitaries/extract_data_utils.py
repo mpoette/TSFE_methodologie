@@ -243,3 +243,16 @@ def prepare_data(df, hour_offset=0, random=False, max_hour=0, used_distribution=
     df_full = finalize_data(df_windows, df_agg, strict_mode)
 
     return df_full
+
+
+def remove_null_values(df):
+    df = df.with_columns(
+    (pl.col("is_ventilated").fill_null(pl.lit(False))).alias("is_ventilated"),
+    (pl.col("is_prone").fill_null(pl.lit(False))).alias("is_prone"),
+    (pl.col("is_conscious").fill_null(pl.lit(False))).alias("is_conscious"),
+    (pl.col("is_cvvhf").fill_null(pl.lit(False))).alias("is_cvvhf"),
+    (pl.col("is_hdi").fill_null(pl.lit(False))).alias("is_hdi"),
+    )
+    df = df.filter(pl.col("taille").is_not_null() & pl.col("poids_admission").is_not_null())
+    return df
+
