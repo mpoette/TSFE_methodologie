@@ -4,6 +4,16 @@ import joblib
 
 
 class Experiment:
+    """Store an experiment configuration and generate its artifact paths.
+
+    The class centralizes the naming and directory structure used for models,
+    outputs, preprocessed inputs, selected variables, and resampled datasets.
+
+    Directory and file names are derived from the experiment configuration to
+    keep results from different targets, preprocessing modes, feature sets,
+    populations, seeds, and calibration settings separated.
+    """
+
     def __init__(
         self,
         config_mode,
@@ -17,6 +27,32 @@ class Experiment:
         stratify_mode="",
         calibrated_mode="",
     ):
+        """Initialize an experiment configuration.
+
+        Args:
+            config_mode:
+                Windowing or resampling configuration identifier.
+            config_cleaning:
+                Cleaning configuration object exposing a ``clean`` attribute.
+            config_y:
+                Target configuration object exposing a ``target_name``
+                attribute.
+            str_balance_method:
+                Class-balancing method identifier.
+            modex:
+                Feature configuration object exposing a ``value`` attribute.
+            class_weight_choice:
+                Class-weight configuration object exposing a ``value``
+                attribute.
+            str_pop:
+                Population selection identifier.
+            seed:
+                Random seed associated with the experiment.
+            stratify_mode:
+                Stratification strategy identifier.
+            calibrated_mode:
+                Calibration strategy identifier.
+        """
         self.config_mode = config_mode
         self.clean = config_cleaning.clean
         self.target_name = config_y.target_name
@@ -27,9 +63,19 @@ class Experiment:
         self.seed = seed
         self.stratify_mode = stratify_mode
         self.calibrated_mode = calibrated_mode
-    
 
     def shortdirname(self, class_weight=None, config_optuna=False):
+        """Build a compact directory name for the experiment.
+
+        Args:
+            class_weight:
+                Optional class-weight value overriding the experiment default.
+            config_optuna:
+                Whether the directory name must indicate Optuna optimization.
+
+        Returns:
+            A normalized experiment directory name.
+        """
         return "_".join([
             self._normalize_component(self.target_name),
             self._get_stratify_slug(),
@@ -42,6 +88,18 @@ class Experiment:
         ])
 
     def _normalize_component(self, value, default="default"):
+        """Normalize a value for safe use in a path component.
+
+        Args:
+            value:
+                Value to normalize.
+            default:
+                Fallback value used when the input is empty or ``None``.
+
+        Returns:
+            A normalized string with spaces replaced by underscores and
+            slashes replaced by hyphens.
+        """
         if value is None:
             return default
 
@@ -53,15 +111,50 @@ class Experiment:
         return value.replace(" ", "_").replace("/", "-")
 
     def _get_stratify_slug(self):
+        """Return the normalized stratification identifier.
+
+        Returns:
+            The normalized stratification path component.
+        """
         return self._normalize_component(self.stratify_mode)
 
     def _get_feature_slug(self):
+        """Return the normalized feature-set identifier.
+
+        Returns:
+            The normalized feature-set path component.
+        """
         return self._normalize_component(self.modex)
 
     def _get_cleaning_slug(self):
+        """Return the normalized cleaning configuration identifier.
+
+        Returns:
+            A cleaning path component based on the ``clean`` attribute.
+
+        Notes:
+            This component is no longer included in generated paths because
+            cleaning is always enabled in the current pipeline.
+        """
         return f"clean_{self._normalize_component(self.clean)}"
 
     def _get_base_path(self, root, config_mode=""):
+        """Build the common base directory for experiment artifacts.
+
+        Args:
+            root:
+                Top-level artifact directory, such as ``"models"``,
+                ``"outputs"``, or ``"inputs"``.
+            config_mode:
+                Optional preprocessing mode overriding the experiment default.
+
+        Returns:
+            The common experiment base path.
+
+        Notes:
+            The cleaning configuration is intentionally omitted because
+            cleaning is always enabled.
+        """
         mode = config_mode if config_mode != "" else self.config_mode
 
         return (
@@ -69,7 +162,6 @@ class Experiment:
             / self._normalize_component(self.target_name)
             / self._get_stratify_slug()
             / self._normalize_component(mode)
-            / self._get_cleaning_slug()
             / self._get_feature_slug()
         )
 
@@ -79,6 +171,21 @@ class Experiment:
         config_optuna=False,
         include_calibration=True,
     ):
+        """Build the run-specific path component.
+
+        Args:
+            class_weight:
+                Optional class-weight value overriding the experiment default.
+            config_optuna:
+                Whether to include an Optuna marker.
+            include_calibration:
+                Whether to include the calibration mode.
+
+        Returns:
+            A normalized run identifier containing the applicable balancing,
+            weighting, population, seed, calibration, and optimization
+            components.
+        """
         weight = self.class_weight if class_weight is None else class_weight
         components = []
 
@@ -114,6 +221,20 @@ class Experiment:
         config_mode=None,
         config_optuna=False,
     ):
+        """Build a normalized model identifier.
+
+        Args:
+            class_weight:
+                Optional class-weight value overriding the experiment default.
+            config_mode:
+                Optional preprocessing mode overriding the experiment default.
+            config_optuna:
+                Whether to include an Optuna marker.
+
+        Returns:
+            A normalized identifier combining preprocessing mode, feature set,
+            and run configuration.
+        """
         mode = config_mode if config_mode is not None else self.config_mode
 
         return (
@@ -131,6 +252,27 @@ class Experiment:
         config_mode="",
         config_optuna=False,
     ):
+        """Return the path used to save a fold-specific model.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            model_name:
+                Model identifier.
+            fold_idx:
+                Fold index included in the filename.
+            extension:
+                Model file extension.
+            class_weight:
+                Optional class-weight override.
+            config_mode:
+                Optional preprocessing mode override.
+            config_optuna:
+                Whether the model was optimized with Optuna.
+
+        Returns:
+            Path to the fold-specific model file.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -153,6 +295,23 @@ class Experiment:
         config_mode="",
         config_optuna=False,
     ):
+        """Return the output directory for a model experiment.
+
+        The directory is created automatically when needed.
+
+        Args:
+            model_name:
+                Model identifier.
+            class_weight:
+                Optional class-weight override.
+            config_mode:
+                Optional preprocessing mode override.
+            config_optuna:
+                Whether the model was optimized with Optuna.
+
+        Returns:
+            Path to the model output directory.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -176,6 +335,27 @@ class Experiment:
         config_mode="",
         config_optuna=False,
     ):
+        """Load a serialized model result from the experiment output folder.
+
+        Args:
+            model_name:
+                Model identifier.
+            class_weight:
+                Optional class-weight override.
+            name_file:
+                Name of the serialized file to load.
+            config_mode:
+                Optional preprocessing mode override.
+            config_optuna:
+                Whether the model was optimized with Optuna.
+
+        Returns:
+            A tuple containing the model name and the deserialized object.
+
+        Raises:
+            FileNotFoundError:
+                If the requested serialized file does not exist.
+        """
         file_path = (
             self.get_output_path(
                 model_name=model_name,
@@ -192,6 +372,17 @@ class Experiment:
         return model_name, joblib.load(file_path)
 
     def get_tsfel_parquet_path(self, config_mode=""):
+        """Return the path of the global raw TSFEL feature dataset.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            config_mode:
+                Optional preprocessing mode override.
+
+        Returns:
+            Path to the global TSFEL Parquet file.
+        """
         path = self._get_base_path("inputs", config_mode) / "tsfel_global"
         path.mkdir(parents=True, exist_ok=True)
 
@@ -204,6 +395,23 @@ class Experiment:
         config_mode="",
         class_weight="",
     ):
+        """Return the path of a fold-specific Boruta-filtered TSFEL dataset.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            mode:
+                Boruta or feature-selection mode identifier.
+            fold_idx:
+                Fold index included in the filename.
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the fold-specific Parquet file.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -227,6 +435,23 @@ class Experiment:
         config_mode="",
         class_weight="",
     ):
+        """Return the path of a fold-specific time-series input file.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            mode:
+                Time-series preprocessing mode identifier.
+            fold_idx:
+                Fold index included in the filename.
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the fold-specific NumPy file.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -248,6 +473,19 @@ class Experiment:
         config_mode="",
         class_weight="",
     ):
+        """Return the path of the retained-variable file.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the NumPy file containing retained variable names.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -271,6 +509,25 @@ class Experiment:
         config_mode="",
         class_weight="",
     ):
+        """Return the path of a fold-specific Lasso artifact.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            mode:
+                Lasso preprocessing or selection mode identifier.
+            fold_idx:
+                Fold index included in the filename.
+            extension:
+                File extension without a leading period.
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the fold-specific Lasso artifact.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
@@ -293,6 +550,21 @@ class Experiment:
         class_weight="",
         config_mode="",
     ):
+        """Return the path of a resampled patient dataset.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            target_length:
+                Number of time points used during resampling.
+            class_weight:
+                Optional class-weight override.
+            config_mode:
+                Optional preprocessing mode override.
+
+        Returns:
+            Path to the resampled Parquet file.
+        """
         weight = class_weight if class_weight != "" else None
 
         path = (
