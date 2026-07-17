@@ -98,6 +98,8 @@ sys.excepthook = _uncaught_exception_hook
 print(f"[LOG] Journal de cette exécution : {_LOG_PATH}", flush=True)
 
 import joblib
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import polars as pl
 import polars.selectors as cs
@@ -125,8 +127,8 @@ mode_run = "wp1"
 print("lancement de tous les entraînements du mode IGS2")
 if mode_run == "wp1":
     CIBLE = "Survie à 28 jours"
-    models_name = ["InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
-    # models_name = ["XGBoost TSFEL"]
+    # models_name = ["InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+    models_name = ["XGBoost TSFEL"]
     STRATIFY_MODE = "target_col"
     runs_optuna = [False, True]
     modes_features = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
@@ -788,6 +790,7 @@ for mod in modes_features:
 
                 update_progress("Expérience terminée avec succès")
                 print(f"[EXPÉRIENCE {EXPERIMENT_INDEX}/{TOTAL_EXPERIMENTS}] TERMINÉE AVEC SUCCÈS", flush=True)
+                plt.close("all")
 
 update_progress("Toutes les expériences sont terminées")
 print(f"[PIPELINE] Fin normale. Journal complet : {_LOG_PATH}", flush=True)

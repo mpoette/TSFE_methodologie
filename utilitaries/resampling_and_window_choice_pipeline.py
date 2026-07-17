@@ -322,24 +322,18 @@ def prepare_dataset_from_config(
 
             # Map resampled indices back to the original stay timeline.
             #
-            # This assumes that delta_hour ranges from 1 to target_length
-            # after resampling. The first resampled point corresponds to
-            # hour 1, while the last point corresponds to the full stay
-            # duration.
+            # This assumes that delta_hour ranges from 0 to target_length - 1
+            # after resampling. The first resampled point corresponds to time 0,
+            # while the last point corresponds to the full observed stay duration.
             if target_length == 1:
                 df_clean = df_clean.with_columns(
-                    pl.lit(1.0).alias("real_time_hours")
+                    pl.lit(0.0).alias("real_time_hours")
                 )
             else:
                 df_clean = df_clean.with_columns(
                     (
-                        1
-                        + (
-                            pl.col("duree_reelle_sejour") - 1
-                        )
-                        * (
-                            pl.col("delta_hour") - 1
-                        )
+                        pl.col("duree_reelle_sejour")
+                        * pl.col("delta_hour")
                         / (target_length - 1)
                     ).alias("real_time_hours")
                 )

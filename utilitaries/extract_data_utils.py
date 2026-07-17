@@ -104,8 +104,6 @@ def prepare_base_data(
             Name of the main target column.
         other_cols:
             Names of additional target columns.
-        used_distribution:
-            Distribution used to generate random windows.
 
     Returns:
         A tuple containing:
@@ -739,7 +737,6 @@ def prepare_data(
         df=df,
         target_col=target_col,
         other_cols=other_cols,
-        used_distribution=used_distribution,
     )
 
     if df_agg is None or patients is None:

@@ -7,8 +7,14 @@ from sklearn.metrics import get_scorer
 from utilitaries.optuna.optuna_utils import OPTUNA_STORAGE
 
 def _to_numpy(X):
-    """
-    Accepte Polars / Pandas / numpy.
+    """Convert Polars, pandas, or NumPy input data to a NumPy array.
+
+    Args:
+        X:
+            Input data exposing an optional ``to_numpy`` method.
+
+    Returns:
+        A NumPy representation of the input data.
     """
     if hasattr(X, "to_numpy"):
         return X.to_numpy()
@@ -21,16 +27,33 @@ def make_objective_rf_stage1(
     metric_name="balanced_accuracy",
     fixed_params=None,
 ):
+    """Create the first-stage Optuna objective for a random forest.
+
+    Args:
+        X_train:
+            Training feature matrix.
+        y_train:
+            Training target labels.
+        metric_name:
+            Scikit-learn scoring metric used during cross-validation.
+        fixed_params:
+            Optional dictionary containing fixed random-forest and
+            cross-validation parameters.
+
+    Returns:
+        A callable Optuna objective returning the mean cross-validation score.
+    """
     fixed_params = fixed_params or {}
 
     X_train = _to_numpy(X_train)
     y_train = np.asarray(y_train)
 
     def objective(trial):
-        # 1. Remplacement du categorical par un int ordonné (0 correspond à None)
+        # 1. Use an ordered integer search space for maximum depth.
+        """Evaluate one random-forest hyperparameter trial."""
         real_max_depth = trial.suggest_int("max_depth", 3, 12)
 
-        # 2. Enregistrement de la vraie valeur pour les analyses
+        # 2. Store the actual value for later analysis.
         trial.set_user_attr("actual_max_depth", real_max_depth)
 
         params = {
@@ -45,7 +68,7 @@ def make_objective_rf_stage1(
                 ["balanced", "balanced_subsample", None],
             ),
             "random_state": fixed_params.get("random_state", 42),
-            "n_jobs": fixed_params.get("n_jobs", -1),
+            "n_jobs": fixed_params.get("n_jobs", 1),
         }
 
         clf = RandomForestClassifier(**params)
@@ -63,7 +86,8 @@ def make_objective_rf_stage1(
                 y_train,
                 cv=cv,
                 scoring=metric_name,
-                n_jobs=fixed_params.get("cv_n_jobs", 1),
+                n_jobs=fixed_params.get("cv_n_jobs", 5),
+                pre_dispatch=fixed_params.get("pre_dispatch", "n_jobs"),
             )
 
             score = np.mean(scores)
@@ -90,7 +114,29 @@ def run_rf_stage1_search(
     metric_name="balanced_accuracy",
     fixed_params=None,
 ):
-    # useless sauf pour erreurs
+    # The pruner is mainly useful for handling failed trials here.
+    """Run the first-stage Optuna search for a random forest.
+
+    Args:
+        X_train:
+            Training feature matrix.
+        y_train:
+            Training target labels.
+        study_name:
+            Name of the Optuna study.
+        n_trials:
+            Number of optimization trials.
+        storage:
+            Optuna storage URL.
+        metric_name:
+            Scikit-learn scoring metric used during cross-validation.
+        fixed_params:
+            Optional dictionary containing fixed random-forest and
+            cross-validation parameters.
+
+    Returns:
+        The optimized Optuna study.
+    """
     sampler = optuna.samplers.TPESampler(seed=42)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=8)
 

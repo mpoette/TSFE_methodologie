@@ -23,24 +23,40 @@ def make_objective_lstm_stage1(
     metric_name="val_auc",
     fixed_params=None,
 ):
+    """Create the first-stage Optuna objective for an LSTM model.
+
+    Args:
+        X_train:
+            Training feature array.
+        y_train:
+            Training target labels.
+        metric_name:
+            Validation metric optimized by Optuna.
+        fixed_params:
+            Optional dictionary containing fixed training parameters.
+
+    Returns:
+        A callable Optuna objective returning the selected validation metric.
+    """
     fixed_params = fixed_params or {}
 
     def objective(trial):
+        """Evaluate one LSTM hyperparameter trial."""
         fc_units_key = trial.suggest_categorical("fc_units", FC_UNITS_KEYS)
 
-        # 1. Extraction des exposants pour les puissances de 2
+        # 1. Suggest exponents used to generate powers of two.
         hidden_size_exp = trial.suggest_int("hidden_size_exp", 5, 8)  
         batch_size_exp = trial.suggest_int("batch_size_exp", 4, 7) 
         
-        # 2. Calcul des vraies valeurs numériques
+        # 2. Convert the exponents to their actual numeric values.
         real_hidden_size = 2 ** hidden_size_exp
         real_batch_size = 2 ** batch_size_exp
         
-        # Passage du clip_grad en numérique ordonné (0.0 fait office de None)
+        # Represent disabled gradient clipping with 0.0 in the search space.
         clip_grad_val = trial.suggest_float("clip_grad", 0.0, 2.0, step=0.5)
         real_clip_grad = None if clip_grad_val == 0.0 else clip_grad_val
 
-        # 3. Sauvegarde dans les attributs utilisateur pour l'analyse finale
+        # 3. Store actual values as user attributes for final analysis.
         trial.set_user_attr("actual_hidden_size", real_hidden_size)
         trial.set_user_attr("actual_batch_size", real_batch_size)
         trial.set_user_attr("actual_clip_grad", real_clip_grad)
@@ -68,7 +84,7 @@ def make_objective_lstm_stage1(
             "use_scheduler": trial.suggest_categorical("use_scheduler", [True, False]),
         }
 
-        # Contrainte LSTM classique de PyTorch
+        # PyTorch LSTMs ignore dropout when only one recurrent layer is used.
         if params["num_layers"] == 1:
             params["dropout"] = 0.0
 
@@ -105,6 +121,27 @@ def run_lstm_stage1_search(
     metric_name="val_auc",
     fixed_params=None,
 ):
+    """Run the first-stage Optuna search for an LSTM model.
+
+    Args:
+        X_train:
+            Training feature array.
+        y_train:
+            Training target labels.
+        study_name:
+            Name of the Optuna study.
+        n_trials:
+            Number of optimization trials.
+        storage:
+            Optuna storage URL.
+        metric_name:
+            Validation metric optimized by Optuna.
+        fixed_params:
+            Optional dictionary containing fixed training parameters.
+
+    Returns:
+        The optimized Optuna study.
+    """
     direction = "maximize" if metric_name == "val_auc" else "minimize"
     sampler = optuna.samplers.TPESampler(seed=42)
 

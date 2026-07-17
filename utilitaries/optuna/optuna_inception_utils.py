@@ -12,20 +12,34 @@ def make_objective_stage1(
     y_train_seq,
     fixed_params=None,
 ):
+    """Create the first-stage Optuna objective for InceptionTime.
+
+    Args:
+        X_train_3d:
+            Three-dimensional training feature array.
+        y_train_seq:
+            Training target sequence.
+        fixed_params:
+            Optional dictionary containing fixed training parameters.
+
+    Returns:
+        A callable Optuna objective returning the best validation loss.
+    """
     fixed_params = fixed_params or {}
  
     def objective(trial):
-        # 1. On suggère les exposants (noms distincts pour éviter les conflits)
+        # 1. Suggest exponents with distinct names to avoid conflicts.
+        """Evaluate one InceptionTime hyperparameter trial."""
         out_channels_exp = trial.suggest_int("out_channels_exp", 4, 7)
         bottleneck_exp = trial.suggest_int("bottleneck_channels_exp", 3, 6)
         batch_size_exp = trial.suggest_int("batch_size_exp", 4, 7)
         
-        # 2. On calcule les vraies puissances de 2
+        # 2. Convert the exponents to powers of two.
         real_out_channels = 2 ** out_channels_exp
         real_bottleneck = 2 ** bottleneck_exp
         real_batch_size = 2 ** batch_size_exp
         
-        # 3. On enregistre les vraies valeurs dans Optuna pour l'analyse de fin
+        # 3. Store the actual values in Optuna for final analysis.
         trial.set_user_attr("actual_out_channels", real_out_channels)
         trial.set_user_attr("actual_bottleneck_channels", real_bottleneck)
         trial.set_user_attr("actual_batch_size", real_batch_size)
@@ -40,7 +54,7 @@ def make_objective_stage1(
             "device": fixed_params.get("device", "cuda"),
             "progress": False,
  
-            # Hyperparams passés proprement au modèle
+            # Pass model hyperparameters explicitly.
             "num_blocks": trial.suggest_int("num_blocks", 3, 8),
             "out_channels": real_out_channels,
             "bottleneck_channels": real_bottleneck,    
@@ -84,6 +98,25 @@ def run_stage1_search(
     storage=OPTUNA_STORAGE,
     fixed_params=None,
 ):
+    """Run the first-stage Optuna search for an InceptionTime model.
+
+    Args:
+        X_train_3d:
+            Three-dimensional training feature array.
+        y_train_seq:
+            Training target sequence.
+        study_name:
+            Name of the Optuna study.
+        n_trials:
+            Number of optimization trials.
+        storage:
+            Optuna storage URL.
+        fixed_params:
+            Optional dictionary containing fixed training parameters.
+
+    Returns:
+        The optimized Optuna study.
+    """
     sampler = optuna.samplers.TPESampler(seed=42)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=5)
  

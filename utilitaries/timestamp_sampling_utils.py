@@ -1,40 +1,51 @@
 """
 Timestamp sampling pipeline for ICU survival prediction at H24.
-One timestamp per patient.
+
+One timestamp is selected per patient.
 
 Strategy:
-  1. Pre-filter invalid rows (sanctuary + insufficient lookback).
-  2. Census: for each patient, enumerate which profiles are reachable.
-  3. Assignment:
-       a. Mono-profile patients are assigned immediately (no choice).
-       b. Multi-profile patients are assigned to best balance classes,
-          with explicit priority on protecting profile (1,1) — the
-          positive class for H24 mortality prediction.
-  4. Within the assigned zone, draw one timestamp using Lomax weights
-     (favoring earlier timestamps in the zone).
+    1. Pre-filter invalid rows based on the sanctuary period and minimum
+       observation duration.
+    2. Census: enumerate the mortality profiles reachable by each patient.
+    3. Assignment:
+        a. Assign mono-profile patients immediately.
+        b. Assign multi-profile patients to balance classes while explicitly
+           protecting profile ``(1, 1)``, the positive class for H24
+           mortality prediction.
+    4. Draw one timestamp within the assigned profile zone using Lomax
+       weights, favoring earlier timestamps in the zone.
 
-Input dataset columns:
-    - encounterId : patient identifier
-    - delta_hour  : hours since admission (1 row per patient-hour)
-    - isDeceased_lt_24h      : bool, death within 24h after this timestamp
-    - isDeceased_lt_28d      : bool, death before day 28 (absolute, patient-level)
+Expected input columns:
+    encounterId:
+        Patient identifier.
+    delta_hour:
+        Hours since admission, with one row per patient-hour.
+    isDeceased_lt_24h:
+        Whether death occurs within 24 hours after the current timestamp.
+    isDeceased_lt_28d:
+        Whether death occurs before day 28.
 
 Profile taxonomy:
-    (1, 1) -> death within next 24h  [positive class — protect first]
-    (0, 1) -> no 24h death, dies before J28
-    (0, 0) -> survives J28
-    (1, 0) -> impossible by construction
+    ``(1, 1)``:
+        Death within the next 24 hours.
+    ``(0, 1)``:
+        No death within 24 hours, but death before day 28.
+    ``(0, 0)``:
+        Survival beyond day 28.
+    ``(1, 0)``:
+        Impossible by construction.
 """
+
+from collections import defaultdict
 
 import numpy as np
 import polars as pl
 from scipy.stats import lomax
-from collections import defaultdict
 
 
-# ──────────────────────────────────────────────
-# PARAMETERS
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------
 
 SANCTUARY_HOURS = 6
 MIN_OBSERVATION_HOURS = 24
@@ -42,247 +53,504 @@ LOMAX_ALPHA = 4.3085
 LOMAX_LAMBDA = 1161.9368
 RANDOM_SEED = 42
 
-PRIORITY_PROFILE = (1, 1)   # protect this class first
+# Protect the H24-positive class during profile assignment.
+PRIORITY_PROFILE = (1, 1)
 
-# ──────────────────────────────────────────────
-# STEP 0 — LABELIZATION (relative or absolute)
-# ──────────────────────────────────────────────
+
+# ---------------------------------------------------------------------
+# Step 0: label preparation
+# ---------------------------------------------------------------------
 
 def prepare_labels(df, mode):
+    """Create mortality labels according to the selected temporal definition.
+
+    Args:
+        df:
+            Input DataFrame containing ``deces_datediff_days`` and
+            ``delta_hour``.
+        mode:
+            Labeling mode. Supported values are ``"relative"``,
+            ``"absolute"``, and ``"mixed"``.
+
+    Returns:
+        The input DataFrame with mortality target columns added.
+    """
     if mode == "relative":
-        return df.with_columns([
-            # H24 (delta + 24h)
-            # ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
-             ((pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24))
-            .fill_null(False).alias("isDeceased_lt_24h"),
-            
-            # J7 (delta + 168h)
-            # ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
-             ((pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 168))
-            .fill_null(False).alias("isDeceased_lt_7d"),
-            
-            # J28 (delta + 672h)
-            # ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
-             ((pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 672))
-            .fill_null(False).alias("isDeceased_lt_28d"),
-            
-            # 3 Mois / J90 (delta + 2160h)
-            # ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
-             ((pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 2160))
-            .fill_null(False).alias("isDeceased_lt_3m")
-        ])
-        
+        return df.with_columns(
+            [
+                # Death within 24 hours after the current timestamp.
+                (
+                    pl.col("deces_datediff_days") * 24
+                    <= pl.col("delta_hour") + 24
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_24h"),
+
+                # Death within 7 days after the current timestamp.
+                (
+                    pl.col("deces_datediff_days") * 24
+                    <= pl.col("delta_hour") + 168
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_7d"),
+
+                # Death within 28 days after the current timestamp.
+                (
+                    pl.col("deces_datediff_days") * 24
+                    <= pl.col("delta_hour") + 672
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_28d"),
+
+                # Death within 3 months after the current timestamp.
+                (
+                    pl.col("deces_datediff_days") * 24
+                    <= pl.col("delta_hour") + 2160
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_3m"),
+            ]
+        )
+
     elif mode == "absolute":
-        return df.with_columns([
-            (pl.col("deces_datediff_days") * 24 <= 24).fill_null(False).alias("isDeceased_lt_24h"),
-            (pl.col("deces_datediff_days") <= 7).fill_null(False).alias("isDeceased_lt_7d"),
-            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d"),
-            (pl.col("deces_datediff_days") <= 90).fill_null(False).alias("isDeceased_lt_3m")
-        ])
-        
-    elif mode == "mixed": 
-        return df.with_columns([
-            # H24 reste en relatif
-            ((pl.col("deces_datediff_days") * 24 > pl.col("delta_hour")) & 
-             (pl.col("deces_datediff_days") * 24 <= pl.col("delta_hour") + 24))
-            .fill_null(False).alias("isDeceased_lt_24h"),
-            
-            # Le reste passe en absolu à partir de J0
-            (pl.col("deces_datediff_days") <= 7).fill_null(False).alias("isDeceased_lt_7d"),
-            (pl.col("deces_datediff_days") <= 28).fill_null(False).alias("isDeceased_lt_28d"),
-            (pl.col("deces_datediff_days") <= 90).fill_null(False).alias("isDeceased_lt_3m")
-        ])
+        return df.with_columns(
+            [
+                (
+                    pl.col("deces_datediff_days") * 24
+                    <= 24
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_24h"),
 
-# ──────────────────────────────────────────────
-# STEP 1 — PRE-FILTERING
-# ──────────────────────────────────────────────
+                (
+                    pl.col("deces_datediff_days")
+                    <= 7
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_7d"),
 
-def prefilter(df: pl.DataFrame, sanctuary_hours, min_observation_hours) -> pl.DataFrame:
+                (
+                    pl.col("deces_datediff_days")
+                    <= 28
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_28d"),
+
+                (
+                    pl.col("deces_datediff_days")
+                    <= 90
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_3m"),
+            ]
+        )
+
+    elif mode == "mixed":
+        return df.with_columns(
+            [
+                # Keep H24 relative to the current timestamp.
+                (
+                    (
+                        pl.col("deces_datediff_days") * 24
+                        > pl.col("delta_hour")
+                    )
+                    & (
+                        pl.col("deces_datediff_days") * 24
+                        <= pl.col("delta_hour") + 24
+                    )
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_24h"),
+
+                # Use absolute mortality horizons from admission for the
+                # remaining targets.
+                (
+                    pl.col("deces_datediff_days")
+                    <= 7
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_7d"),
+
+                (
+                    pl.col("deces_datediff_days")
+                    <= 28
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_28d"),
+
+                (
+                    pl.col("deces_datediff_days")
+                    <= 90
+                )
+                .fill_null(False)
+                .alias("isDeceased_lt_3m"),
+            ]
+        )
+
+
+# ---------------------------------------------------------------------
+# Step 1: pre-filtering
+# ---------------------------------------------------------------------
+
+def prefilter(
+    df: pl.DataFrame,
+    sanctuary_hours,
+    min_observation_hours,
+) -> pl.DataFrame:
+    """Remove rows outside the valid timestamp-sampling interval.
+
+    Rows are excluded when they occur before the minimum observation duration
+    or within the sanctuary period preceding the end of the ICU stay.
+
+    Patients with no remaining valid row are excluded automatically.
+
+    Args:
+        df:
+            Input patient-hour DataFrame.
+        sanctuary_hours:
+            Number of hours excluded before the end of the ICU stay.
+        min_observation_hours:
+            Minimum elapsed time required before a timestamp can be sampled.
+
+    Returns:
+        The filtered DataFrame.
     """
-    Remove rows outside the valid sampling window once and for all:
-      - before MIN_OBSERVATION_HOURS  (no lookback available)
-      - within SANCTUARY_HOURS of end of stay  (prediction too obvious)
-    Patients with no remaining valid rows are excluded entirely.
-    """
-    los = (
+    length_of_stay = (
         df.group_by("encounterId")
-        .agg(pl.col("delta_hour").max().alias("los_hours"))
+        .agg(
+            pl.col("delta_hour")
+            .max()
+            .alias("los_hours")
+        )
     )
+
     df = (
-        df.join(los, on="encounterId", how="left")
+        df.join(
+            length_of_stay,
+            on="encounterId",
+            how="left",
+        )
         .filter(
-            (pl.col("delta_hour") >= min_observation_hours) &
-            (pl.col("delta_hour") <= pl.col("los_hours") - sanctuary_hours)
+            (
+                pl.col("delta_hour")
+                >= min_observation_hours
+            )
+            & (
+                pl.col("delta_hour")
+                <= pl.col("los_hours") - sanctuary_hours
+            )
         )
         .drop("los_hours")
     )
+
     return df
 
 
-# ──────────────────────────────────────────────
-# STEP 2 — PROFILE VALIDATION
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Step 2: profile validation
+# ---------------------------------------------------------------------
 
 def validate_profiles(df: pl.DataFrame) -> pl.DataFrame:
-    """Cast booleans and check that (1,0) never occurs."""
-    df = df.with_columns([
-        pl.col("isDeceased_lt_24h").cast(pl.Int8),
-        pl.col("isDeceased_lt_28d").cast(pl.Int8),
-    ])
-    impossible = df.filter(
-        (pl.col("isDeceased_lt_24h") == 1) & (pl.col("isDeceased_lt_28d") == 0)
+    """Cast mortality labels and validate profile consistency.
+
+    The profile ``(1, 0)`` is impossible because death within 24 hours implies
+    death within 28 days.
+
+    Args:
+        df:
+            Input DataFrame containing H24 and J28 mortality labels.
+
+    Returns:
+        The DataFrame with mortality labels cast to ``Int8``.
+
+    Raises:
+        ValueError:
+            If one or more rows contain the impossible profile ``(1, 0)``.
+    """
+    df = df.with_columns(
+        [
+            pl.col("isDeceased_lt_24h").cast(pl.Int8),
+            pl.col("isDeceased_lt_28d").cast(pl.Int8),
+        ]
     )
+
+    impossible = df.filter(
+        (
+            pl.col("isDeceased_lt_24h") == 1
+        )
+        & (
+            pl.col("isDeceased_lt_28d") == 0
+        )
+    )
+
     if len(impossible) > 0:
         raise ValueError(
-            f"{len(impossible)} rows with impossible profile (isDeceased_lt_24h=1, isDeceased_lt_28d=0)."
+            f"{len(impossible)} rows contain the impossible profile "
+            "(isDeceased_lt_24h=1, isDeceased_lt_28d=0)."
         )
+
     return df
 
 
-# ──────────────────────────────────────────────
-# STEP 3 — CENSUS
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Step 3: profile census
+# ---------------------------------------------------------------------
+
 def census(df: pl.DataFrame) -> dict:
+    """Enumerate the mortality profiles reachable by each patient.
+
+    Args:
+        df:
+            Filtered patient-hour DataFrame.
+
+    Returns:
+        A dictionary mapping each patient identifier to a frozenset of
+        reachable ``(H24, J28)`` profiles.
     """
-    For each patient, enumerate the set of reachable profiles
-    within their valid sampling window.
-    """
-    # 1. On crée une structure (paire) et on extrait les valeurs uniques par patient
+    # Create one structure per patient containing all unique reachable
+    # mortality profiles.
     df_agg = (
         df.group_by("encounterId")
         .agg(
-            pl.struct(["isDeceased_lt_24h", "isDeceased_lt_28d"])
+            pl.struct(
+                [
+                    "isDeceased_lt_24h",
+                    "isDeceased_lt_28d",
+                ]
+            )
             .unique()
             .alias("profiles")
         )
     )
-    
-    # 2. On reconstruit le dictionnaire de frozensets
-    # Chaque élément de 'profiles' est un dictionnaire Python {'isDeceased_lt_24h': v1, 'isDeceased_lt_28d': v2}
+
+    # Convert the aggregated profile structures into frozensets.
     return {
         row["encounterId"]: frozenset(
-            (int(p["isDeceased_lt_24h"]), int(p["isDeceased_lt_28d"]))
-            for p in row["profiles"]
+            (
+                int(profile["isDeceased_lt_24h"]),
+                int(profile["isDeceased_lt_28d"]),
+            )
+            for profile in row["profiles"]
         )
         for row in df_agg.iter_rows(named=True)
     }
 
 
 def print_census_summary(patient_profiles: dict) -> None:
-    """Print how many patients can reach each profile, and flexibility stats."""
+    """Print reachable-profile and patient-flexibility statistics.
+
+    Args:
+        patient_profiles:
+            Mapping between patient identifiers and reachable profiles.
+    """
     profile_reach = defaultdict(int)
     flexibility = defaultdict(int)
 
     for profiles in patient_profiles.values():
-        for p in profiles:
-            profile_reach[p] += 1
+        for profile in profiles:
+            profile_reach[profile] += 1
+
         flexibility[len(profiles)] += 1
 
-    print("\nCensus — patients who can reach each profile:")
+    print(
+        "\nCensus — patients who can reach each profile:"
+    )
+
     for profile in sorted(profile_reach):
         label = {
-            (1, 1): "death within 24h          (1,1)",
-            (0, 1): "no 24h death, dead by J28 (0,1)",
-            (0, 0): "survivor J28               (0,0)",
-        }.get(profile, str(profile))
-        print(f"  {label} : {profile_reach[profile]} patients")
+            (1, 1): (
+                "death within 24h          (1,1)"
+            ),
+            (0, 1): (
+                "no 24h death, dead by J28 (0,1)"
+            ),
+            (0, 0): (
+                "survivor J28               (0,0)"
+            ),
+        }.get(
+            profile,
+            str(profile),
+        )
 
-    print("\nPatient flexibility (number of reachable profiles):")
-    for n, count in sorted(flexibility.items()):
-        print(f"  {n} profile(s) reachable : {count} patients")
+        print(
+            f"  {label} : "
+            f"{profile_reach[profile]} patients"
+        )
+
+    print(
+        "\nPatient flexibility "
+        "(number of reachable profiles):"
+    )
+
+    for number_profiles, count in sorted(
+        flexibility.items()
+    ):
+        print(
+            f"  {number_profiles} profile(s) reachable : "
+            f"{count} patients"
+        )
 
 
-# ──────────────────────────────────────────────
-# STEP 4 — ASSIGNMENT
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Step 4: profile assignment
+# ---------------------------------------------------------------------
 
-def assign_profiles(patient_profiles: dict, rng: np.random.Generator) -> dict:
-    """
-    Assign each patient to exactly one profile, prioritizing balance
-    while protecting the (1,1) class first.
+def assign_profiles(
+    patient_profiles: dict,
+    rng: np.random.Generator,
+) -> dict:
+    """Assign exactly one mortality profile to each patient.
+
+    Assignment prioritizes class balance while protecting the H24-positive
+    profile ``(1, 1)``.
 
     Assignment order:
-      1. Mono-profile patients: forced assignment, no choice.
-      2. Multi-profile patients who can reach (1,1): assign to (1,1)
-         until its count reaches the level of the other classes.
-      3. Remaining multi-profile patients: assign to the most
-         under-represented profile among their reachable set.
+
+    1. Mono-profile patients are assigned to their only reachable profile.
+    2. Multi-profile patients capable of reaching ``(1, 1)`` are assigned to
+       that profile until it reaches the level of the other classes.
+    3. Remaining patients are assigned to the least represented profile among
+       their reachable profiles.
+
+    Args:
+        patient_profiles:
+            Mapping between patient identifiers and reachable profiles.
+        rng:
+            NumPy random generator used to avoid ordering bias.
 
     Returns:
-        assignment[encounter_id] = (isDeceased_lt_24h, isDeceased_lt_28d) tuple
+        A dictionary mapping each patient identifier to one assigned
+        ``(H24, J28)`` profile.
     """
     assignment = {}
-    counts = {(0, 0): 0, (0, 1): 0, (1, 1): 0}
+    counts = {
+        (0, 0): 0,
+        (0, 1): 0,
+        (1, 1): 0,
+    }
 
-    mono = {pid: list(profiles)[0]
-            for pid, profiles in patient_profiles.items()
-            if len(profiles) == 1}
-    multi = {pid: profiles
-             for pid, profiles in patient_profiles.items()
-             if len(profiles) > 1}
+    mono = {
+        patient_id: list(profiles)[0]
+        for patient_id, profiles
+        in patient_profiles.items()
+        if len(profiles) == 1
+    }
 
-    # step 1: assign mono-profile patients
-    for pid, profile in mono.items():
-        assignment[pid] = profile
+    multi = {
+        patient_id: profiles
+        for patient_id, profiles
+        in patient_profiles.items()
+        if len(profiles) > 1
+    }
+
+    # Step 1: assign patients with only one reachable profile.
+    for patient_id, profile in mono.items():
+        assignment[patient_id] = profile
         counts[profile] += 1
 
-    print(f"\nAfter mono-profile assignment: {counts}")
+    print(
+        f"\nAfter mono-profile assignment: {counts}"
+    )
 
-    # step 2: priority fill for (1,1)
-    # compute target = max count among non-(1,1) profiles after mono assignment
-    # we want (1,1) to reach at least that level before doing general balancing
+    # Step 2: prioritize patients capable of reaching the H24-positive class.
     can_reach_priority = {
-        pid: profiles
-        for pid, profiles in multi.items()
+        patient_id: profiles
+        for patient_id, profiles in multi.items()
         if PRIORITY_PROFILE in profiles
     }
+
     cannot_reach_priority = {
-        pid: profiles
-        for pid, profiles in multi.items()
+        patient_id: profiles
+        for patient_id, profiles in multi.items()
         if PRIORITY_PROFILE not in profiles
     }
 
-    # shuffle to avoid order bias
-    priority_pids = list(can_reach_priority.keys())
-    rng.shuffle(priority_pids)
+    # Shuffle patient identifiers to avoid assignment-order bias.
+    priority_patient_ids = list(
+        can_reach_priority.keys()
+    )
 
-    other_counts = {p: c for p, c in counts.items() if p != PRIORITY_PROFILE}
-    target_11 = max(other_counts.values()) if other_counts else 0
+    rng.shuffle(priority_patient_ids)
+
+    other_counts = {
+        profile: count
+        for profile, count in counts.items()
+        if profile != PRIORITY_PROFILE
+    }
+
+    target_priority_count = (
+        max(other_counts.values())
+        if other_counts
+        else 0
+    )
 
     remaining_for_general = []
 
-    for pid in priority_pids:
-        profiles = can_reach_priority[pid]
-        if counts[PRIORITY_PROFILE] < target_11:
-            # still under target: assign to (1,1)
-            assignment[pid] = PRIORITY_PROFILE
+    for patient_id in priority_patient_ids:
+        profiles = can_reach_priority[
+            patient_id
+        ]
+
+        if (
+            counts[PRIORITY_PROFILE]
+            < target_priority_count
+        ):
+            # Assign to the priority profile until its target count is reached.
+            assignment[patient_id] = (
+                PRIORITY_PROFILE
+            )
+
             counts[PRIORITY_PROFILE] += 1
+
         else:
-            # (1,1) is sufficiently represented: defer to general balancing
-            remaining_for_general.append((pid, profiles))
+            # Defer remaining patients to the general balancing step.
+            remaining_for_general.append(
+                (
+                    patient_id,
+                    profiles,
+                )
+            )
 
-    print(f"After (1,1) priority fill: {counts}")
+    print(
+        "After (1,1) priority fill: "
+        f"{counts}"
+    )
 
-    # step 3: general balancing for remaining multi-profile patients
-    general_pids = remaining_for_general + [
-        (pid, profiles) for pid, profiles in cannot_reach_priority.items()
-    ]
-    rng.shuffle(general_pids)
+    # Step 3: assign remaining patients to their least represented reachable
+    # profile.
+    general_patients = (
+        remaining_for_general
+        + [
+            (
+                patient_id,
+                profiles,
+            )
+            for patient_id, profiles
+            in cannot_reach_priority.items()
+        ]
+    )
 
-    for pid, profiles in general_pids:
-        # assign to the least represented reachable profile
-        best_profile = min(profiles, key=lambda p: counts[p])
-        assignment[pid] = best_profile
+    rng.shuffle(general_patients)
+
+    for patient_id, profiles in general_patients:
+        best_profile = min(
+            profiles,
+            key=lambda profile: counts[profile],
+        )
+
+        assignment[patient_id] = best_profile
         counts[best_profile] += 1
 
-    print(f"After general balancing: {counts}")
+    print(
+        f"After general balancing: {counts}"
+    )
 
     return assignment
 
 
-# ──────────────────────────────────────────────
-# STEP 5 — LOMAX-WEIGHTED TIMESTAMP DRAW
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Step 5: Lomax-weighted timestamp sampling
+# ---------------------------------------------------------------------
 
 def draw_timestamps(
     df: pl.DataFrame,
@@ -291,90 +559,253 @@ def draw_timestamps(
     lomax_lambda: float,
     rng: np.random.Generator,
 ) -> pl.DataFrame:
-    """Sélectionne un timestamp par patient via Lomax, sans aucune boucle sur le DF."""
-    if not assignment:
-        return pl.DataFrame(schema=df.schema)
+    """Draw one Lomax-weighted timestamp per patient.
 
-    # 1. Conversion du dictionnaire d'assignation en DataFrame Polars pour jointure
+    Each patient is restricted to timestamps matching the mortality profile
+    assigned during the balancing step. Lomax weights are then computed from
+    the distance to the end of the assigned profile zone.
+
+    Sampling is performed with inverse transform sampling without iterating
+    over DataFrame rows.
+
+    Args:
+        df:
+            Filtered patient-hour DataFrame.
+        assignment:
+            Mapping between patient identifiers and assigned profiles.
+        lomax_alpha:
+            Lomax shape parameter.
+        lomax_lambda:
+            Lomax scale parameter.
+        rng:
+            NumPy random generator.
+
+    Returns:
+        A DataFrame containing at most one sampled timestamp per patient.
+    """
+    if not assignment:
+        return pl.DataFrame(
+            schema=df.schema
+        )
+
+    # Convert the patient assignment dictionary into a Polars DataFrame for
+    # an efficient join.
     assignment_df = pl.DataFrame(
-        [{"encounterId": pid, "assigned_h24": h24, "assigned_j28": j28} for pid, (h24, j28) in assignment.items()],
-        schema={"encounterId": df.schema["encounterId"], "assigned_h24": pl.Int8, "assigned_j28": pl.Int8}
+        [
+            {
+                "encounterId": patient_id,
+                "assigned_h24": h24,
+                "assigned_j28": j28,
+            }
+            for patient_id, (h24, j28)
+            in assignment.items()
+        ],
+        schema={
+            "encounterId": df.schema[
+                "encounterId"
+            ],
+            "assigned_h24": pl.Int8,
+            "assigned_j28": pl.Int8,
+        },
     )
 
-    # 2. Filtrage global des lignes qui matchent le profil affecté
-    df_assigned = df.join(assignment_df, on="encounterId", how="inner").filter(
-        (pl.col("isDeceased_lt_24h") == pl.col("assigned_h24")) &
-        (pl.col("isDeceased_lt_28d") == pl.col("assigned_j28"))
+    # Keep only timestamps matching the assigned mortality profile.
+    df_assigned = (
+        df.join(
+            assignment_df,
+            on="encounterId",
+            how="inner",
+        )
+        .filter(
+            (
+                pl.col("isDeceased_lt_24h")
+                == pl.col("assigned_h24")
+            )
+            & (
+                pl.col("isDeceased_lt_28d")
+                == pl.col("assigned_j28")
+            )
+        )
     )
 
     if df_assigned.is_empty():
-        return pl.DataFrame(schema=df.schema)
+        return pl.DataFrame(
+            schema=df.schema
+        )
 
-    # 3. Tri chronologique indispensable pour le calcul des cumsums
-    df_assigned = df_assigned.sort(["encounterId", "delta_hour"])
-
-    # 4. Au lieu d'une position [0, 1], on calcule le nombre d'heures réelles 
-    # qui séparent la ligne actuelle de la fin de la fenêtre de ce profil.
-    df_assigned = df_assigned.with_columns([
-        pl.col("delta_hour").max().over("encounterId").alias("h_max")
-    ]).with_columns(
-        (pl.col("h_max") - pl.col("delta_hour")).alias("distance_fin_zone")
+    # Sort chronologically before cumulative computations.
+    df_assigned = df_assigned.sort(
+        [
+            "encounterId",
+            "delta_hour",
+        ]
     )
 
-    # 5. Calcul des poids Lomax en une seule passe NumPy
-    distances_np = df_assigned["distance_fin_zone"].to_numpy()
-    raw_weights = lomax.pdf(distances_np, c=lomax_alpha, scale=lomax_lambda)
+    # Compute the remaining time until the end of the assigned profile zone.
+    df_assigned = (
+        df_assigned.with_columns(
+            [
+                pl.col("delta_hour")
+                .max()
+                .over("encounterId")
+                .alias("h_max")
+            ]
+        )
+        .with_columns(
+            (
+                pl.col("h_max")
+                - pl.col("delta_hour")
+            ).alias("distance_fin_zone")
+        )
+    )
 
-    # 6. Normalisation des poids à l'échelle de chaque patient
-    df_assigned = df_assigned.with_columns(pl.Series("raw_weight", raw_weights))
+    # Compute Lomax weights in a single NumPy pass.
+    distances_np = (
+        df_assigned[
+            "distance_fin_zone"
+        ]
+        .to_numpy()
+    )
+
+    raw_weights = lomax.pdf(
+        distances_np,
+        c=lomax_alpha,
+        scale=lomax_lambda,
+    )
+
+    # Normalize weights independently for each patient.
     df_assigned = df_assigned.with_columns(
-        pl.col("raw_weight").sum().over("encounterId").alias("total_weight")
-    ).with_columns(
-        pl.when(pl.col("total_weight") > 0)
-        .then(pl.col("raw_weight") / pl.col("total_weight"))
-        .otherwise(1.0 / pl.col("raw_weight").count().over("encounterId"))
-        .alias("weight")
+        pl.Series(
+            "raw_weight",
+            raw_weights,
+        )
     )
 
-    # 7. Cumsum des poids par patient pour préparer la transformation inverse
+    df_assigned = (
+        df_assigned.with_columns(
+            pl.col("raw_weight")
+            .sum()
+            .over("encounterId")
+            .alias("total_weight")
+        )
+        .with_columns(
+            pl.when(
+                pl.col("total_weight") > 0
+            )
+            .then(
+                pl.col("raw_weight")
+                / pl.col("total_weight")
+            )
+            .otherwise(
+                1.0
+                / pl.col("raw_weight")
+                .count()
+                .over("encounterId")
+            )
+            .alias("weight")
+        )
+    )
+
+    # Compute cumulative weights for inverse transform sampling.
     df_assigned = df_assigned.with_columns(
-        pl.col("weight").cum_sum().over("encounterId").alias("cum_weight")
+        pl.col("weight")
+        .cum_sum()
+        .over("encounterId")
+        .alias("cum_weight")
     )
 
-    # 8. Génération d'un nombre aléatoire uniforme U(0,1) UNIQUE par patient
-    unique_patients = df_assigned.select("encounterId").unique()
-    u_values = rng.random(len(unique_patients))
-    patient_u_df = unique_patients.with_columns(pl.Series("u", u_values))
-
-    # 9. Jointure de la valeur U et sélection de la première ligne qui dépasse ce seuil
-    df_assigned = df_assigned.join(patient_u_df, on="encounterId", how="left")
-    df_assigned = df_assigned.with_columns(
-        pl.col("delta_hour").max().over("encounterId").alias("max_hour")
+    # Draw one uniform random value for each patient.
+    unique_patients = (
+        df_assigned
+        .select("encounterId")
+        .unique()
     )
 
-    # Le filtre garde toutes les lignes au-dessus du seuil aléatoire (+ sécurité borne supérieure)
+    uniform_values = rng.random(
+        len(unique_patients)
+    )
+
+    patient_uniform_df = (
+        unique_patients.with_columns(
+            pl.Series(
+                "u",
+                uniform_values,
+            )
+        )
+    )
+
+    # Join patient-specific random values and identify candidate timestamps.
+    df_assigned = (
+        df_assigned.join(
+            patient_uniform_df,
+            on="encounterId",
+            how="left",
+        )
+        .with_columns(
+            pl.col("delta_hour")
+            .max()
+            .over("encounterId")
+            .alias("max_hour")
+        )
+    )
+
+    # Keep timestamps whose cumulative probability exceeds the sampled
+    # threshold. The final timestamp is retained as a safety fallback.
     df_candidates = df_assigned.filter(
-        (pl.col("cum_weight") >= pl.col("u")) | (pl.col("delta_hour") == pl.col("max_hour"))
+        (
+            pl.col("cum_weight")
+            >= pl.col("u")
+        )
+        | (
+            pl.col("delta_hour")
+            == pl.col("max_hour")
+        )
     )
 
-    # On ne retient que l'heure minimale (la toute première à avoir franchi le cap du cumsum)
-    df_candidates = df_candidates.with_columns(
-        pl.col("delta_hour").min().over("encounterId").alias("min_candidate_hour")
+    # Retain the first timestamp crossing the cumulative threshold.
+    df_candidates = (
+        df_candidates.with_columns(
+            pl.col("delta_hour")
+            .min()
+            .over("encounterId")
+            .alias("min_candidate_hour")
+        )
     )
-    result = df_candidates.filter(pl.col("delta_hour") == pl.col("min_candidate_hour"))
 
-    # Nettoyage final des colonnes de calcul pour coller au schéma d'origine
+    result = df_candidates.filter(
+        pl.col("delta_hour")
+        == pl.col("min_candidate_hour")
+    )
+
+    # Remove intermediate computation columns and restore the original schema.
     cols_to_drop = [
-        "assigned_h24", "assigned_j28", "h_max", "distance_fin_zone", 
-        "raw_weight", "total_weight", "weight", "cum_weight", "u", 
-        "max_hour", "min_candidate_hour"
+        "assigned_h24",
+        "assigned_j28",
+        "h_max",
+        "distance_fin_zone",
+        "raw_weight",
+        "total_weight",
+        "weight",
+        "cum_weight",
+        "u",
+        "max_hour",
+        "min_candidate_hour",
     ]
-    return result.drop(cols_to_drop).sort(["encounterId", "delta_hour"])
+
+    return (
+        result.drop(cols_to_drop)
+        .sort(
+            [
+                "encounterId",
+                "delta_hour",
+            ]
+        )
+    )
 
 
-# ──────────────────────────────────────────────
-# MAIN PIPELINE
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------
 
 def build_sampling_dataset(
     df: pl.DataFrame,
@@ -384,61 +815,164 @@ def build_sampling_dataset(
     lomax_lambda: float = LOMAX_LAMBDA,
     seed: int = RANDOM_SEED,
 ) -> pl.DataFrame:
+    """Build a one-timestamp-per-patient sampling dataset.
 
+    The function applies pre-filtering, validates mortality profiles,
+    enumerates reachable profiles, assigns one profile to each patient, and
+    samples one timestamp using Lomax-weighted probabilities.
+
+    Args:
+        df:
+            Input patient-hour DataFrame.
+        sanctuary_hours:
+            Number of hours excluded before the end of each ICU stay.
+        min_observation_hours:
+            Minimum elapsed time required before sampling.
+        lomax_alpha:
+            Lomax shape parameter.
+        lomax_lambda:
+            Lomax scale parameter.
+        seed:
+            Random seed controlling profile assignment and timestamp sampling.
+
+    Returns:
+        A DataFrame containing one sampled timestamp per retained patient.
+    """
     rng = np.random.default_rng(seed)
 
-    n_patients_in = df["encounterId"].n_unique()
-    print(f"Input: {n_patients_in} patients, {len(df)} rows")
+    n_patients_in = (
+        df["encounterId"]
+        .n_unique()
+    )
 
-    # step 1: pre-filter
-    df = prefilter(df, sanctuary_hours, min_observation_hours)
-    n_patients_kept = df["encounterId"].n_unique()
-    print(f"After pre-filtering: {n_patients_kept} patients ({n_patients_in - n_patients_kept} excluded)")
+    print(
+        f"Input: {n_patients_in} patients, "
+        f"{len(df)} rows"
+    )
 
-    # step 2: validate
+    # Step 1: pre-filter invalid timestamps.
+    df = prefilter(
+        df,
+        sanctuary_hours,
+        min_observation_hours,
+    )
+
+    n_patients_kept = (
+        df["encounterId"]
+        .n_unique()
+    )
+
+    print(
+        "After pre-filtering: "
+        f"{n_patients_kept} patients "
+        f"({n_patients_in - n_patients_kept} excluded)"
+    )
+
+    # Step 2: validate mortality profiles.
     df = validate_profiles(df)
 
-    # step 3: census
+    # Step 3: enumerate reachable patient profiles.
     patient_profiles = census(df)
-    print_census_summary(patient_profiles)
 
-    # step 4: assignment (mono → priority (1,1) → general)
-    assignment = assign_profiles(patient_profiles, rng)
+    print_census_summary(
+        patient_profiles
+    )
 
-    # step 5: draw one timestamp per patient
-    result = draw_timestamps(df, assignment, lomax_alpha, lomax_lambda, rng)
+    # Step 4: assign one profile per patient.
+    assignment = assign_profiles(
+        patient_profiles,
+        rng,
+    )
 
-    print(f"\nFinal dataset: {len(result)} patients, one timestamp each")
+    # Step 5: draw one timestamp per patient.
+    result = draw_timestamps(
+        df,
+        assignment,
+        lomax_alpha,
+        lomax_lambda,
+        rng,
+    )
+
+    print(
+        f"\nFinal dataset: {len(result)} patients, "
+        "one timestamp each"
+    )
+
     return result
 
 
-# ──────────────────────────────────────────────
-# USAGE EXAMPLE (synthetic data)
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# Usage example with synthetic data
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
+
     n_patients = 300
     rows = []
 
-    for pid in range(n_patients):
-        los = int(rng.integers(12, 400))
-        dead_j28 = rng.random() < 0.35
-        death_hour = int(rng.integers(6, min(los, 672))) if dead_j28 else None
-
-        for h in range(los + 1):
-            isDeceased_lt_24h = (
-                dead_j28
-                and death_hour is not None
-                and (h < death_hour <= h + 24)
+    for patient_id in range(n_patients):
+        length_of_stay = int(
+            rng.integers(
+                12,
+                400,
             )
-            rows.append({
-                "encounterId": pid,
-                "delta_hour": h,
-                "deces_datediff_days": (death_hour / 24) if death_hour is not None else None
-            })
+        )
+
+        dead_by_day_28 = (
+            rng.random() < 0.35
+        )
+
+        death_hour = (
+            int(
+                rng.integers(
+                    6,
+                    min(
+                        length_of_stay,
+                        672,
+                    ),
+                )
+            )
+            if dead_by_day_28
+            else None
+        )
+
+        for hour in range(
+            length_of_stay + 1
+        ):
+            is_deceased_lt_24h = (
+                dead_by_day_28
+                and death_hour is not None
+                and (
+                    hour
+                    < death_hour
+                    <= hour + 24
+                )
+            )
+
+            rows.append(
+                {
+                    "encounterId": patient_id,
+                    "delta_hour": hour,
+                    "deces_datediff_days": (
+                        death_hour / 24
+                        if death_hour is not None
+                        else None
+                    ),
+                }
+            )
 
     df_raw = pl.DataFrame(rows)
-    df_raw = prepare_labels(df_raw, "mixed")
-    result = build_sampling_dataset(df_raw)
-    print(result.head(10))
+
+    df_raw = prepare_labels(
+        df_raw,
+        "mixed",
+    )
+
+    result = build_sampling_dataset(
+        df_raw
+    )
+
+    print(
+        result.head(10)
+    )

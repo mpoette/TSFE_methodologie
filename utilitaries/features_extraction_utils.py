@@ -237,20 +237,14 @@ def _process_single_patient(
         )
 
     # The target is expected to be constant within each patient group.
-    target_values = (
+    target_value = (
         patient_df[target_col]
         .drop_nulls()
         .unique()
-        .to_list()
+        #On prend le last comme ça on est sûr qu'il est bien étiqueté
+        .last()
     )
-
-    if len(target_values) != 1:
-        raise ValueError(
-            f"Target column {target_col!r} must contain exactly one "
-            f"non-null value per patient. Patient: {patient_id!r}."
-        )
-
-    extracted_features[target_col] = target_values[0]
+    extracted_features[target_col] = target_value
     extracted_features[patient_col] = patient_id
 
     feature_output_columns = [
