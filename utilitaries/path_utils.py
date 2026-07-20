@@ -26,6 +26,7 @@ class Experiment:
         seed,
         stratify_mode="",
         calibrated_mode="",
+        keep_duplicates = False,
     ):
         """Initialize an experiment configuration.
 
@@ -52,6 +53,9 @@ class Experiment:
                 Stratification strategy identifier.
             calibrated_mode:
                 Calibration strategy identifier.
+            keep_duplicates:
+                Whether to retain patient duplicates across encounters.
+                Determines if artifacts are stored under "duplicates" or "no_duplicates".
         """
         self.config_mode = config_mode
         self.clean = config_cleaning.clean
@@ -63,6 +67,7 @@ class Experiment:
         self.seed = seed
         self.stratify_mode = stratify_mode
         self.calibrated_mode = calibrated_mode
+        self.duplicates_folder = "duplicates" if keep_duplicates else "no_duplicates"
 
     def shortdirname(self, class_weight=None, config_optuna=False):
         """Build a compact directory name for the experiment.
@@ -159,6 +164,7 @@ class Experiment:
 
         return (
             Path(root)
+            / self.duplicates_folder
             / self._normalize_component(self.target_name)
             / self._get_stratify_slug()
             / self._normalize_component(mode)
