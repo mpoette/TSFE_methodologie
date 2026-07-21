@@ -27,6 +27,7 @@ class Experiment:
         stratify_mode="",
         calibrated_mode="",
         keep_duplicates = False,
+        mode_duplicates = "prio_first"
     ):
         """Initialize an experiment configuration.
 
@@ -55,7 +56,9 @@ class Experiment:
                 Calibration strategy identifier.
             keep_duplicates:
                 Whether to retain patient duplicates across encounters.
-                Determines if artifacts are stored under "duplicates" or "no_duplicates".
+            mode_duplicates:
+                Strategy used when dropping duplicates (e.g., "prio_first" or "prio_last").
+                Ignored if ``keep_duplicates`` is True.
         """
         self.config_mode = config_mode
         self.clean = config_cleaning.clean
@@ -67,15 +70,16 @@ class Experiment:
         self.seed = seed
         self.stratify_mode = stratify_mode
         self.calibrated_mode = calibrated_mode
-        self.duplicates_folder = "duplicates" if keep_duplicates else "no_duplicates"
+        self.mode_duplicates = mode_duplicates
+        self.duplicates_folder = "duplicates" if keep_duplicates else f"no_duplicates_{mode_duplicates}"
 
-    def shortdirname(self, class_weight=None, config_optuna=False):
+    def shortdirname(self, class_weight=None, uses_optuna_config=False):
         """Build a compact directory name for the experiment.
 
         Args:
             class_weight:
                 Optional class-weight value overriding the experiment default.
-            config_optuna:
+            uses_optuna_config:
                 Whether the directory name must indicate Optuna optimization.
 
         Returns:
@@ -88,7 +92,7 @@ class Experiment:
             self._get_feature_slug(),
             self._get_run_slug(
                 class_weight=class_weight,
-                config_optuna=config_optuna,
+                uses_optuna_config=uses_optuna_config,
             ),
         ])
 
@@ -174,7 +178,7 @@ class Experiment:
     def _get_run_slug(
         self,
         class_weight=None,
-        config_optuna=False,
+        uses_optuna_config=False,
         include_calibration=True,
     ):
         """Build the run-specific path component.
@@ -182,7 +186,7 @@ class Experiment:
         Args:
             class_weight:
                 Optional class-weight value overriding the experiment default.
-            config_optuna:
+            uses_optuna_config:
                 Whether to include an Optuna marker.
             include_calibration:
                 Whether to include the calibration mode.
@@ -216,7 +220,7 @@ class Experiment:
                 self._normalize_component(self.calibrated_mode)
             )
 
-        if config_optuna:
+        if uses_optuna_config:
             components.append("optuna")
 
         return "_".join(components)
@@ -225,7 +229,7 @@ class Experiment:
         self,
         class_weight=None,
         config_mode=None,
-        config_optuna=False,
+        uses_optuna_config=False,
     ):
         """Build a normalized model identifier.
 
@@ -234,7 +238,7 @@ class Experiment:
                 Optional class-weight value overriding the experiment default.
             config_mode:
                 Optional preprocessing mode overriding the experiment default.
-            config_optuna:
+            uses_optuna_config:
                 Whether to include an Optuna marker.
 
         Returns:
@@ -246,7 +250,7 @@ class Experiment:
         return (
             f"{self._normalize_component(mode)}_"
             f"{self._get_feature_slug()}_"
-            f"{self._get_run_slug(class_weight, config_optuna)}"
+            f"{self._get_run_slug(class_weight, uses_optuna_config)}"
         )
 
     def get_model_path(
@@ -256,7 +260,7 @@ class Experiment:
         extension=".joblib",
         class_weight="",
         config_mode="",
-        config_optuna=False,
+        uses_optuna_config=False,
     ):
         """Return the path used to save a fold-specific model.
 
@@ -273,7 +277,7 @@ class Experiment:
                 Optional class-weight override.
             config_mode:
                 Optional preprocessing mode override.
-            config_optuna:
+            uses_optuna_config:
                 Whether the model was optimized with Optuna.
 
         Returns:
@@ -286,7 +290,7 @@ class Experiment:
             / self._normalize_component(model_name)
             / self._get_run_slug(
                 class_weight=weight,
-                config_optuna=config_optuna,
+                uses_optuna_config=uses_optuna_config,
             )
         )
 
@@ -299,7 +303,7 @@ class Experiment:
         model_name,
         class_weight="",
         config_mode="",
-        config_optuna=False,
+        uses_optuna_config=False,
     ):
         """Return the output directory for a model experiment.
 
@@ -312,7 +316,7 @@ class Experiment:
                 Optional class-weight override.
             config_mode:
                 Optional preprocessing mode override.
-            config_optuna:
+            uses_optuna_config:
                 Whether the model was optimized with Optuna.
 
         Returns:
@@ -325,7 +329,7 @@ class Experiment:
             / self._normalize_component(model_name)
             / self._get_run_slug(
                 class_weight=weight,
-                config_optuna=config_optuna,
+                uses_optuna_config=uses_optuna_config,
             )
         )
 
@@ -339,7 +343,7 @@ class Experiment:
         class_weight="",
         name_file="all_res.joblib",
         config_mode="",
-        config_optuna=False,
+        uses_optuna_config=False,
     ):
         """Load a serialized model result from the experiment output folder.
 
@@ -352,7 +356,7 @@ class Experiment:
                 Name of the serialized file to load.
             config_mode:
                 Optional preprocessing mode override.
-            config_optuna:
+            uses_optuna_config:
                 Whether the model was optimized with Optuna.
 
         Returns:
@@ -367,7 +371,7 @@ class Experiment:
                 model_name=model_name,
                 class_weight=class_weight,
                 config_mode=config_mode,
-                config_optuna=config_optuna,
+                uses_optuna_config=uses_optuna_config,
             )
             / name_file
         )
@@ -585,3 +589,27 @@ class Experiment:
         path.mkdir(parents=True, exist_ok=True)
 
         return path / f"length_{target_length}.parquet"
+    
+
+    def get_comparison_path(
+        self,
+        comparison_name="Comparaison_All",
+        config_mode="",
+    ):
+        """Return the directory path for multi-model comparisons within the experiment.
+
+        The parent directory is created automatically when needed. This method centralizes 
+        the storage of comparative reports to prevent cross-experiment data overwrites.
+
+        Args:
+            comparison_name (str): Identifier for the comparison group or report.
+                Defaults to "Comparaison_All".
+            config_mode (str): Optional preprocessing mode overriding the experiment 
+                default configuration. Defaults to "".
+
+        Returns:
+            pathlib.Path: Path to the experiment-specific comparison directory.
+        """
+        path = self._get_base_path("outputs", config_mode) / self._normalize_component(comparison_name)
+        path.mkdir(parents=True, exist_ok=True)
+        return path

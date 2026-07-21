@@ -42,13 +42,14 @@ def _ensure_dataframe(df: PolarsFrame) -> pl.DataFrame:
 
     return df
 
-def remove_duplicates(df_no_ano: PolarsFrame, df: PolarsFrame) -> pl.DataFrame:
-    """Removes patient duplicates by retaining only their most recent encounter.
+def remove_duplicates(df_no_ano: PolarsFrame, df: PolarsFrame, remove_prio_last : bool) -> pl.DataFrame:
+    """Removes patient duplicates by retaining either their most or least recent encounter.
 
     This function accepts either a Polars DataFrame or LazyFrame for both inputs.
     It ensures they are evaluated into DataFrames, sorts the unanonymized data
-    by admission time to identify the latest encounter for each unique patient
-    (`lifeTimeNumber`), and filters the target dataframe using an inner join.
+    by admission time (`utcInTime`) to identify the targeted encounter for each 
+    unique patient (`lifeTimeNumber`), and filters the target dataframe using 
+    an inner join.
 
     Args:
         df_no_ano:
@@ -58,16 +59,19 @@ def remove_duplicates(df_no_ano: PolarsFrame, df: PolarsFrame) -> pl.DataFrame:
         df:
             The target Polars DataFrame or LazyFrame to filter, which must
             contain an `encounterId` column.
+        remove_prio_last:
+            Whether to prioritize removing the latest encounters. If ``True``, 
+            the earliest (first) encounter is kept. If ``False``, the most recent 
+            (latest) encounter is kept.
 
     Returns:
         A collected Polars DataFrame containing only the rows corresponding to
-        each patient's most recent encounter.
+        each patient's selected encounter.
     """
     df_no_ano = _ensure_dataframe(df_no_ano)
     df = _ensure_dataframe(df)
-
     df_keep_eId = (
-    df_no_ano.sort(["utcInTime"], descending=[True])
+    df_no_ano.sort(["utcInTime"], descending=[remove_prio_last])
       .unique(subset=["lifeTimeNumber"], keep="first")
     ).select("encounterId")
 

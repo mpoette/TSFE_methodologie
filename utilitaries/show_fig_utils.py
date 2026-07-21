@@ -31,12 +31,12 @@ from pathlib import Path
 
 import utilitaries.evaluate_utils as evaluate
 
+
 def calibration_curve_homemade(
     probas_uncalib,
     probas_calib,
     y_test_global,
     model_name,
-    extraction_type,
     calibration,
     save_figure,
     output_dir,
@@ -59,8 +59,6 @@ def calibration_curve_homemade(
             Binary ground-truth labels associated with the predictions.
         model_name:
             Model name displayed in the figure title and legend.
-        extraction_type:
-            Feature-extraction type used by the model.
         calibration:
             Whether calibrated predictions should be displayed.
         save_figure:
@@ -118,8 +116,7 @@ def calibration_curve_homemade(
 
     # Calibrated-model curve
     if (
-        extraction_type == "TSFEL"
-        and calibration
+        calibration
         and probas_calib is not None
     ):
         calibrated_fraction_positive, calibrated_mean_prediction = calibration_curve(
@@ -364,7 +361,7 @@ def get_calibration_stats(
     ).reshape(-1, 1)
 
     calibration_model = LogisticRegression(
-        penalty=None,
+        C=np.inf,
         solver="lbfgs",
         max_iter=1000,
     )
@@ -449,6 +446,12 @@ def get_calibration_stats(
                 90,
             )
         ),
+        "eMax" : float(
+            np.percentile(
+                absolute_errors,
+                100,
+            )
+        ),
         "x": lowess_x,
         "y": lowess_y,
     }
@@ -459,7 +462,6 @@ def calibration_curve_advanced(
     probas_calib,
     y_test_global,
     model_name,
-    extraction_type,
     calibration,
     save_figure,
     output_dir,
@@ -484,8 +486,6 @@ def calibration_curve_advanced(
             Binary ground-truth labels associated with the predictions.
         model_name:
             Model name displayed in the figure title.
-        extraction_type:
-            Feature-extraction type used by the model.
         calibration:
             Whether a calibrated curve should be computed and displayed.
         save_figure:
@@ -595,7 +595,7 @@ def calibration_curve_advanced(
     # ---------------------------------------------------------
     # Calibrated model
     # ---------------------------------------------------------
-    if extraction_type == "TSFEL" and calibration:
+    if calibration:
         if probas_calib is None:
             raise ValueError(
                 "probas_calib must be provided when calibration "
@@ -1183,102 +1183,6 @@ def plot_all_figs(probas, y_test, config_models, calibration, save_figure, outpu
     y_pred, mcc = confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, **cfg)
     return auc_final, fpr, tpr, th, brier_score, best_f1, best_t, y_pred, mcc, non_overlap_area, asymmetric_uncertainty, mean_risk_diff, mean_p1
 
-def plot_decision_curve_analysis(probas, y_test, model_name, save_figure, output_dir, transparent):
-    """Plot a decision curve analysis for a binary prediction model.
-    
-    The model's net benefit is compared with the strategies of treating all
-    patients and treating no patients over probability thresholds from 0.01 to
-    0.99.
-    
-    Args:
-        probas:
-            Predicted probabilities for the positive class.
-        y_test:
-            Binary ground-truth labels.
-        model_name:
-            Model name displayed in the figure title and legend.
-        save_figure:
-            Whether the generated figure should be saved.
-        output_dir:
-            Directory in which the figure files should be written.
-        transparent:
-            Whether the saved figures should use a transparent background.
-    
-    Returns:
-        A tuple containing the evaluated thresholds, model net benefits, and
-        treat-all net benefits.
-    """
-    y_test = np.asarray(y_test)
-    probas = np.asarray(probas)
-    n = len(y_test)
-    
-    # Total number of positives (deaths) and negatives (survivors)
-    total_pos = np.sum(y_test == 1)
-    total_neg = np.sum(y_test == 0)
-    
-    # Probability-threshold grid from 1% to 99%
-    thresholds = np.linspace(0.01, 0.99, 100)
-    
-    net_benefit_model = []
-    net_benefit_all = []
-    
-    for p in thresholds:
-        # Harm-to-benefit weight p / (1 - p)
-        weight = p / (1 - p)
-        
-        # 1. Model-based strategy
-        y_pred = (probas >= p).astype(int)
-        tp = np.sum((y_pred == 1) & (y_test == 1))
-        fp = np.sum((y_pred == 1) & (y_test == 0))
-        nb_model = (tp / n) - (fp / n) * weight
-        net_benefit_model.append(nb_model)
-        
-        # 2. Treat-all strategy: every patient is considered positive
-        nb_all = (total_pos / n) - (total_neg / n) * weight
-        net_benefit_all.append(nb_all)
-        
-    # 3. Treat-none strategy: net benefit is always zero
-    net_benefit_none = np.zeros_like(thresholds)
-    
-    # --- Figure construction ---
-    plt.figure(figsize=(8, 6))
-    
-    # Model curve
-    plt.plot(thresholds, net_benefit_model, color="blue", linewidth=2.5, 
-             label=f"Modèle : {model_name}")
-    
-    # Treat-all curve
-    plt.plot(thresholds, net_benefit_all, color="red", linestyle="--", linewidth=1.5, 
-             label="Stratégie : Considérer tout le monde Positif")
-    
-    # Treat-none curve
-    plt.plot(thresholds, net_benefit_none, color="black", linestyle="-", alpha=0.6, linewidth=1.5, 
-             label="Stratégie : Considérer tout le monde Négatif")
-    
-    # Adjust axes for clinical interpretability
-    plt.xlim(0.0, 1.0)
-    
-    # Limit the y-axis so large negative benefits do not flatten the useful region
-    max_visible_nb = max(max(net_benefit_model), total_pos / n)
-    plt.ylim(-0.05, max_visible_nb + 0.05)
-    
-    plt.xlabel("Seuil de probabilité critique (p)", fontsize=10)
-    plt.ylabel("Bénéfice Net (Net Benefit)", fontsize=10)
-    plt.title(f"Decision Curve Analysis (DCA)\nModel: {model_name}", fontsize=12, fontweight='bold')
-    plt.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="none")
-    plt.grid(True, linestyle=":", alpha=0.6)
-    plt.tight_layout()
-    
-    if save_figure:
-        path = Path(output_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        plt.savefig(path / "decision_curve_analysis.png", dpi=300, bbox_inches="tight", transparent=transparent)
-        plt.savefig(path / "decision_curve_analysis.pdf", bbox_inches="tight", transparent=transparent)
-        
-    plt.show()
-    
-    return thresholds, net_benefit_model, net_benefit_all
-
 def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder="", savefig=True, transparent=True, seed=42):
     """Analyze and plot TSFEL feature importance with MDI and SHAP.
     
@@ -1614,145 +1518,213 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
         plt.savefig(f"{folder}/comparison_{figname}", dpi=300, bbox_inches="tight")
     plt.show()
 
-def générer_rapport_comparatif(configurations, y_true_base = None, save_dir=None, table_format='fancy_grid', saps2_pred = None, saps2_true = None):
-    """Generate a comparative performance table and collective ROC curve.
+def générer_rapport_comparatif(configurations, y_true_base=None, save_dir=None, table_format='fancy_grid', saps2_pred=None, saps2_true=None):
+    """Generate comprehensive performance table and three separate standalone collective plots.
+    
+    ROC, PRC, and Calibration curves are generated as completely independent figures.
+    All legends are safely anchored outside to the right to accommodate long pipeline paths seamlessly.
+    PR-AUC uses strict trapezoidal integration for all models with step-corrections for dummy baselines.
     
     Args:
-        configurations:
-            Iterable of ``(name, configuration)`` pairs. Each configuration
-            must provide predicted probabilities and the precomputed F1, MCC,
-            AUC, and Brier metrics. It must also provide ``y_true`` when
-            ``y_true_base`` is not supplied.
-        y_true_base:
-            Optional common ground-truth label array shared by all models.
-        save_dir:
-            Optional directory in which the ROC figure and LaTeX table should
-            be saved.
-        table_format:
-            Output format passed to ``tabulate`` for console display.
-        saps2_pred:
-            Optional SAPS II or IGS II predicted risks added to the ROC curve.
-        saps2_true:
-            Optional labels associated with ``saps2_pred``.
-    
+        configurations: Iterable of ``(name, configuration)`` pairs.
+        y_true_base: Optional common ground-truth label array shared by all models.
+        save_dir: Optional directory in which the figures and LaTeX table should be saved.
+        table_format: Output format passed to ``tabulate`` for console display.
+        saps2_pred: Optional SAPS II or IGS II predicted risks added to the curves.
+        saps2_true: Optional labels associated with ``saps2_pred``.
+        
     Returns:
-        A pandas DataFrame containing the comparative model metrics.
+        pd.DataFrame: A pandas DataFrame containing all comparative metrics.
     """
+    # ---------------------------------------------------------
+    # Extract reference ground truth to build dummy baselines
+    # ---------------------------------------------------------
+    configurations = list(configurations)
+    if y_true_base is not None:
+        ref_y = np.asarray(y_true_base).ravel()
+    elif configurations:
+        ref_y = np.asarray(configurations[0][1]['y_true']).ravel()
+    else:
+        ref_y = None
+
+    if ref_y is not None:
+        from sklearn.metrics import f1_score, matthews_corrcoef, brier_score_loss
+
+        # Inject Always 0 Dummy Model (raw arrays, metrics will be calculated dynamically below)
+        dummy_0_config = {
+            'probas': np.zeros_like(ref_y, dtype=float),
+            'preds': np.zeros_like(ref_y, dtype=int),
+            'y_true': ref_y, 'color': 'darkgray', 
+            'calibration_intercept': np.nan, 'calibration_slope': np.nan, 'brier': brier_score_loss(ref_y, np.zeros_like(ref_y)),
+            'ici': np.nan, 'e90': np.nan, 'non_overlap_area': np.nan, 'f1_score': 0.0, 'mcc': 0.0,
+            'asymetric_incertitude': np.nan, 'mean_risk_diff': np.nan, 'mean_deaths_prediction': 0.0
+        }
+        configurations.append(("Baseline: Always 0", dummy_0_config))
+
+        # Inject Always 1 Dummy Model
+        dummy_1_config = {
+            'probas': np.ones_like(ref_y, dtype=float),
+            'preds': np.ones_like(ref_y, dtype=int),
+            'y_true': ref_y, 'color': 'silver', 
+            'calibration_intercept': np.nan, 'calibration_slope': np.nan, 'brier': brier_score_loss(ref_y, np.ones_like(ref_y)),
+            'ici': np.nan, 'e90': np.nan, 'non_overlap_area': np.nan,
+            'f1_score': f1_score(ref_y, np.ones_like(ref_y), zero_division=0), 'mcc': 0.0,
+            'asymetric_incertitude': np.nan, 'mean_risk_diff': np.nan, 'mean_deaths_prediction': 1.0
+        }
+        configurations.append(("Baseline: Always 1", dummy_1_config))
+
+    # ---------------------------------------------------------
+    # Initialize 3 Standalone Wide Figures
+    # ---------------------------------------------------------
     results = {}
+    fig_roc, ax_roc = plt.subplots(figsize=(18, 6), layout="constrained")
+    fig_prc, ax_prc = plt.subplots(figsize=(12, 6), layout="constrained")
+    fig_cal, ax_cal = plt.subplots(figsize=(12, 6), layout="constrained")
 
-    # Configure the collective ROC figure
-    plt.figure(figsize=(8, 8))
+    ax_cal.plot([0, 1], [0, 1], "k:", alpha=0.7, label="Perfect calibration")
+    last_y_true = None
+
+    # ---------------------------------------------------------
+    # Main Processing Loop
+    # ---------------------------------------------------------
     for name, config in configurations:
-        # Extract precomputed vectors
-        probas = config['probas']
-        if y_true_base is None:
-            y_true = config['y_true']
-        else:
-            y_true = y_true_base
-            
-        # Retrieve metrics
-        f1 = config['f1_score']
-        mcc = config['mcc']
-        auc = config['auc']
-        brier = config ['brier']
+        probas = np.asarray(config['probas']).ravel()
+        y_true = np.asarray(y_true_base if y_true_base is not None else config['y_true']).ravel()
+        last_y_true = y_true
+        color = config.get('color', None)
 
-        # Store metrics for the comparison table
+        # Compute PRC coordinates
+        precision, recall, _ = precision_recall_curve(y_true, probas)
+        
+        # Methodological correction for constant predictions (baselines) to prevent trapezoidal rule inflation
+        if np.all(probas == probas[0]):
+            prevalence = np.sum(y_true) / len(y_true)
+            precision = np.array([1.0, prevalence, prevalence])
+            recall = np.array([0.0, 0.0, 1.0])
+
+        # Strict Area Under the Curve (Trapezoidal integration)
+        auprc = auc(recall, precision)
+
+        # Extract all metrics safely
         results[name] = {
-            'F1-Score': f1,
-            'MCC': mcc,
-            'AUC': auc,
-            "brier" : brier
+            'AUC ROC': config.get('auc', np.nan) if not np.all(probas == probas[0]) else 0.5,
+            'AUPRC': auprc,
+            'F1-Score': config.get('f1_score', np.nan),
+            'MCC': config.get('mcc', np.nan),
+            'Brier': config.get('brier', np.nan),
+            'Intercept': config.get('calibration_intercept', np.nan),
+            'Slope': config.get('calibration_slope', np.nan),
+            'ICI': config.get('ici', np.nan),
+            'E90': config.get('e90', np.nan),
+            'Non-Overlap Area': config.get('non_overlap_area', np.nan),
+            'Asym Incertitude': config.get('asymetric_incertitude', np.nan),
+            'Mean Risk Diff': config.get('mean_risk_diff', np.nan),
+            'Mean Deaths Pred': config.get('mean_deaths_prediction', np.nan)
         }
 
-        # Add the model to the collective ROC curve
+        # Plot ROC
         fpr, tpr, _ = roc_curve(y_true, probas)
-        color = config.get('color', None)
-        plt.plot(fpr, tpr, label=f'{name} (AUC = {auc:.3f})', color=color, lw=2)
+        ax_roc.plot(fpr, tpr, label=f"{name} (AUC = {results[name]['AUC ROC']:.3f})", color=color, lw=2)
 
-    # 1. Generate the comparison table with tabulate
+        # Plot PRC
+        ax_prc.plot(recall, precision, label=f'{name} (AUPRC = {auprc:.3f})', color=color, lw=2)
+
+        # Plot Calibration
+        intercept = results[name]['Intercept']
+        slope = results[name]['Slope']
+        ici = results[name]['ICI']
+        
+        if not np.isnan(intercept):
+            calib_label = f"{name} (Int={intercept:.2f}, Slope={slope:.2f}, ICI={ici:.3f})"
+        else:
+            calib_label = name
+            
+        fraction_of_positives, mean_predicted_value = calibration_curve(y_true, probas, n_bins=10, strategy="uniform")
+        ax_cal.plot(mean_predicted_value, fraction_of_positives, "s-", label=calib_label, color=color, lw=2)
+
+    # ---------------------------------------------------------
+    # Baseline SAPS II / IGS II processing (if provided)
+    # ---------------------------------------------------------
+    if saps2_pred is not None and saps2_true is not None:
+        saps2_pred = np.asarray(saps2_pred).ravel()
+        saps2_true = np.asarray(saps2_true).ravel()
+        saps2_name = "IGS II Score"
+
+        saps2_fpr, saps2_tpr, _ = roc_curve(saps2_true, saps2_pred)
+        saps2_auc = roc_auc_score(saps2_true, saps2_pred)
+        ax_roc.plot(saps2_fpr, saps2_tpr, label=f'{saps2_name} (AUC = {saps2_auc:.3f})', lw=2, linestyle='-.', color='black')
+
+        saps2_prec, saps2_rec, _ = precision_recall_curve(saps2_true, saps2_pred)
+        saps2_auprc = auc(saps2_rec, saps2_prec)
+        ax_prc.plot(saps2_rec, saps2_prec, label=f'{saps2_name} (AUPRC = {saps2_auprc:.3f})', lw=2, linestyle='-.', color='black')
+
+        eps = 1e-7
+        saps2_pred_clipped = np.clip(saps2_pred, eps, 1 - eps)
+        saps2_logits = np.log(saps2_pred_clipped / (1 - saps2_pred_clipped)).reshape(-1, 1)
+        saps2_calib = LogisticRegression(
+            C=np.inf, 
+            solver="lbfgs", 
+            max_iter=1000
+        )
+        saps2_calib.fit(saps2_logits, saps2_true)
+        saps2_int = float(saps2_calib.intercept_[0])
+        saps2_slope = float(saps2_calib.coef_[0, 0])
+        
+        saps2_fop, saps2_mpv = calibration_curve(saps2_true, saps2_pred, n_bins=10, strategy="uniform")
+        saps2_cal_label = f"{saps2_name} (Int={saps2_int:.2f}, Slope={saps2_slope:.2f})"
+        ax_cal.plot(saps2_mpv, saps2_fop, "s-", label=saps2_cal_label, lw=2, linestyle='-.', color='black')
+
+    # ---------------------------------------------------------
+    # Finalize Plots Styling & Legend Placement (Outside Right)
+    # ---------------------------------------------------------
+    ax_roc.plot([0, 1], [0, 1], linestyle='--', label='Chance', color='gray')
+    ax_roc.set_xlabel('False Positive Rate (FPR)')
+    ax_roc.set_ylabel('True Positive Rate (TPR)')
+    ax_roc.set_title('ROC Curves Comparison')
+    ax_roc.grid(True, linestyle=':', alpha=0.6)
+    ax_roc.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
+
+    reference_y = y_true_base if y_true_base is not None else last_y_true
+    baseline = np.sum(reference_y) / len(reference_y) if reference_y is not None else 0.5
+    ax_prc.axhline(y=baseline, linestyle='--', color='green', alpha=0.7, label=f'Chance (Pos Ratio = {baseline:.3f})')
+    ax_prc.set_xlabel('Recall (Sensitivity)')
+    ax_prc.set_ylabel('Precision (PPV)')
+    ax_prc.set_title('Precision-Recall Curves Comparison')
+    ax_prc.set_xlim([0.0, 1.0])
+    ax_prc.set_ylim([0.0, 1.05])
+    ax_prc.grid(True, linestyle=':', alpha=0.6)
+    ax_prc.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
+
+    ax_cal.set_xlabel('Mean Predicted Probability')
+    ax_cal.set_ylabel('True Fraction of Positives')
+    ax_cal.set_title('Collective Calibration Curves (Binned)')
+    ax_cal.set_xlim([0.0, 1.0])
+    ax_cal.set_ylim([0.0, 1.0])
+    ax_cal.grid(True, linestyle=':', alpha=0.6)
+    ax_cal.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
+
+    # ---------------------------------------------------------
+    # Save & Export
+    # ---------------------------------------------------------
     results_df = pd.DataFrame(results).T
     print("\n=== PERFORMANCE COMPARISON TABLE ===")
     print(tabulate(results_df, headers='keys', tablefmt=table_format, floatfmt=".3f"))
-    # Compute the SAPS II AUC
-    if saps2_pred is not None and saps2_true is not None:
-        saps2_fpr, saps2_tpr, _ = roc_curve(saps2_true, saps2_pred)
-        saps2_auc = roc_auc_score(saps2_true, saps2_pred)
-        saps2_name = "IGS II Score"
-        plt.plot(saps2_fpr, saps2_tpr, label=f'{saps2_name} (AUC = {saps2_auc:.3f})', lw=2, linestyle='-.')
-    # 2. Finalize the ROC figure
-    plt.plot([0, 1], [0, 1], linestyle='--', label='Chance', color='gray')
-    plt.xlabel('False Positive Rate (FPR)')
-    plt.ylabel('True Positive Rate (TPR)')
-    plt.title('ROC Curves Comparison')
-    plt.legend(loc='lower right')
-    plt.grid(True, linestyle=':', alpha=0.6)
 
-    # Save generated artifacts
     if save_dir:
         output_path = Path(save_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # Save the figure
-        plt.savefig(output_path / "collective_roc_curve.png", dpi=300, bbox_inches="tight")
+        fig_roc.savefig(output_path / "collective_roc_curve.png", dpi=300, bbox_inches="tight")
+        fig_prc.savefig(output_path / "collective_prc_curve.png", dpi=300, bbox_inches="tight")
+        fig_cal.savefig(output_path / "collective_calibration_curve.png", dpi=300, bbox_inches="tight")
 
-        # Save the table as LaTeX booktabs for Overleaf
         with open(output_path / "results_table.tex", "w") as f:
             f.write(tabulate(results_df, headers='keys', tablefmt='latex_booktabs', floatfmt=".3f"))
 
     plt.show()
+    
+    plt.close(fig_roc)
+    plt.close(fig_prc)
+    plt.close(fig_cal)
 
     return results_df
-
-
-
-def plot_collected_learning_curve(sample_sizes, train_matrix, val_matrix, model_name="Model",  folder = "", savefig = True, transparent = True):
-    """Plot learning curves collected during cross-validation training.
-    
-    Mean training and out-of-fold validation scores are plotted for each sample
-    size. The validation curve includes a one-standard-deviation band across
-    folds.
-    
-    Args:
-        sample_sizes:
-            Training-set sizes associated with the score columns.
-        train_matrix:
-            Training-score matrix shaped as ``(n_folds, n_sample_sizes)``.
-        val_matrix:
-            Validation-score matrix shaped as ``(n_folds, n_sample_sizes)``.
-        model_name:
-            Model name displayed in the figure title.
-        folder:
-            Directory in which the figure should be written.
-        savefig:
-            Whether the generated figure should be saved.
-        transparent:
-            Whether the saved figure should use a transparent background.
-    
-    Returns:
-        ``None``.
-    """
-
-    # Compute means and standard deviations across folds
-    train_mean = np.mean(train_matrix, axis=0)
-    val_mean = np.mean(val_matrix, axis=0)
-    val_std = np.std(val_matrix, axis=0)
-    
-    plt.figure(figsize=(10, 5))
-    
-    # Training curve
-    plt.plot(sample_sizes, train_mean, "o-", color="crimson", label="Training Score (Mean)", linewidth=2)
-    
-    # Out-of-fold validation curve with its variability band
-    plt.plot(sample_sizes, val_mean, "o-", color="royalblue", label="Validation Score (Mean OOF)", linewidth=2)
-    plt.fill_between(sample_sizes, val_mean - val_std, val_mean + val_std, alpha=0.15, color="royalblue", label="OOF Volatility (± 1 STD)")
-    
-    plt.title(f"Learning Curve — {model_name} (Embedded Fold Splitting)", fontsize=13, fontweight="bold")
-    plt.xlabel("Number of Training Samples (Aggregated)")
-    plt.ylabel("AUC-ROC Score")
-    plt.ylim(0.6, 1)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend(loc="lower right")
-    plt.tight_layout()
-    if savefig:
-        plt.savefig(f"{folder}/learning_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
-    plt.show()

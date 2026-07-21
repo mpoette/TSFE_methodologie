@@ -185,7 +185,7 @@ def evaluate_inception_fold(
         loaded_model,
     )
 
-    model, _, temperature = load_model_from_checkpoint(
+    model, _, temperature, bias = load_model_from_checkpoint(
         loaded_model
     )
 
@@ -195,6 +195,7 @@ def evaluate_inception_fold(
         model,
         X_test,
         T=1.0,
+        calibration_bias = 0
     )
 
     # Apply the temperature learned during calibration.
@@ -202,6 +203,7 @@ def evaluate_inception_fold(
         model,
         X_test,
         T=temperature,
+        calibration_bias = bias
     )
 
     return {
@@ -250,7 +252,7 @@ def evaluate_lstm_fold(
         loaded_model,
     )
 
-    model, _, temperature = load_lstm_from_checkpoint(
+    model, _, temperature, bias = load_lstm_from_checkpoint(
         loaded_model
     )
 
@@ -260,6 +262,7 @@ def evaluate_lstm_fold(
         model,
         X_test,
         T=1.0,
+        calibration_bias = 0
     )
 
     # Apply the temperature learned during calibration.
@@ -267,6 +270,7 @@ def evaluate_lstm_fold(
         model,
         X_test,
         T=temperature,
+        calibration_bias = bias
     )
 
     return {
@@ -328,10 +332,16 @@ def evaluate_tsfel_fold(
     classifier = joblib.load(
         loaded_model
     )
+    # TODO : enlever ces debugs
+    print(f"   [DEBUG] Type de classifier: {type(classifier)}")
+    if hasattr(classifier, 'estimator'):
+        print(f"   [DEBUG] Type de classifier.estimator: {type(classifier.estimator)}")
+    # --------------------------------------------
 
     root_model = get_root_estimator(
         classifier
     )
+    print(f"   [DEBUG] Type de root_model extrait: {type(root_model)}")
 
     # Align and reorder the TSFEL features according to the schema used when
     # the estimator was fitted.

@@ -224,26 +224,38 @@ class InceptionModel(nn.Module):
 
 class TemperatureCalibrator(nn.Module):
     """
-    Calibre les logits via température scalaire : logits_cal = logits / T.
-    Optimisé par LBFGS pour minimiser BCE sur validation.
+    Calibrateur affine pour classification binaire.
+
+    La transformation appliquée aux logits est::
+
+        calibrated_logits = logits / T + bias
+
+    ``T`` corrige la confiance du modèle, tandis que ``bias`` corrige le
+    décalage global des logits, notamment celui pouvant être introduit par
+    ``pos_weight`` pendant l'entraînement.
     """
-    
-    def __init__(self, init_T: float = 1.0):
+
+    def __init__(self, init_T: float = 1.0, init_bias: float = 0.0) -> None:
         super().__init__()
-        assert init_T > 0, "Température initiale doit être > 0"
+        if init_T <= 0:
+            raise ValueError("init_T doit être strictement positif")
+
         self.log_T = nn.Parameter(
-            torch.tensor([math.log(init_T)], dtype=torch.float32)
+            torch.tensor(math.log(init_T), dtype=torch.float32)
         )
-    
+        self.bias = nn.Parameter(
+            torch.tensor(init_bias, dtype=torch.float32)
+        )
+
     @property
     def T(self) -> torch.Tensor:
-        """Température (toujours positive)."""
+        """Retourne une température strictement positive."""
         return self.log_T.exp()
-    
+
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """Calibre les logits."""
-        return logits / self.T
-    
+        """Applique la calibration affine aux logits bruts."""
+        return logits / self.T + self.bias
+
     def fit(
         self,
         logits_val: torch.Tensor,
@@ -251,30 +263,48 @@ class TemperatureCalibrator(nn.Module):
         max_iter: int = 200
     ) -> float:
         """
-        Apprend T optimal sur données de validation.
-        
+        Apprend ``T`` et ``bias`` sur le jeu de validation.
+
+        Les logits sont détachés du graphe du modèle principal et les deux
+        paramètres de calibration sont optimisés avec LBFGS en minimisant la
+        BCE non pondérée.
+
         Returns:
-            Loss finale (BCE calibrée)
+            Valeur finale de la BCE calibrée.
         """
+        logits_val = logits_val.detach()
+        y_val = y_val.detach().float().reshape(-1)
         self.train()
-        opt = torch.optim.LBFGS(
-            [self.log_T],
-            lr=1.0,
+
+        optimizer = torch.optim.LBFGS(
+            self.parameters(),
+            lr=0.1,
             max_iter=max_iter,
+            line_search_fn="strong_wolfe",
             tolerance_grad=1e-7,
-            tolerance_change=1e-9
+            tolerance_change=1e-9,
         )
-        
-        def closure():
-            opt.zero_grad(set_to_none=True)
-            z = self.forward(logits_val).squeeze(-1)
-            loss = F.binary_cross_entropy_with_logits(z, y_val.float())
+
+        def closure() -> torch.Tensor:
+            optimizer.zero_grad(set_to_none=True)
+            calibrated_logits = self(logits_val).reshape(-1)
+            loss = F.binary_cross_entropy_with_logits(
+                calibrated_logits,
+                y_val,
+            )
             loss.backward()
             return loss
-        
-        loss = opt.step(closure)
+
+        optimizer.step(closure)
         self.eval()
-        return float(loss.detach().cpu())
+
+        with torch.no_grad():
+            final_loss = F.binary_cross_entropy_with_logits(
+                self(logits_val).reshape(-1),
+                y_val,
+            )
+
+        return float(final_loss.cpu())
 
 
 # ============================================================================
@@ -625,6 +655,9 @@ def train_inception_time(
     
     # ========== CALIBRATION TEMPÉRATURE ==========
     T_value = 1.0
+    calibration_bias = 0.0
+    model.temperature_ = T_value
+    model.calibration_bias_ = calibration_bias
     if calibrate:
         print("Calibration température sur validation...")
         logits_val = _gather_logits(model, val_loader, device)
@@ -639,13 +672,17 @@ def train_inception_time(
         calibrator = TemperatureCalibrator(init_T=1.0).to(device)
         _ = calibrator.fit(logits_val, y_val, max_iter=200)
         T_value = float(calibrator.T.detach().cpu())
+        calibration_bias = float(calibrator.bias.detach().cpu())
+        model.temperature_ = T_value
+        model.calibration_bias_ = calibration_bias
         
-        print(f"✓ Température calibrée : T = {T_value:.4f}")
+        print(f"✓ Calibration : T = {T_value:.4f}, bias = {calibration_bias:.4f}")
         
         # Mise à jour checkpoint avec T
         if save_best_path is not None and os.path.exists(save_best_path):
             ckpt = torch.load(save_best_path, map_location='cpu', weights_only=False)
             ckpt['temperature'] = T_value
+            ckpt['calibration_bias'] = calibration_bias
             torch.save(ckpt, save_best_path)
     
     # Libération mémoire GPU
@@ -708,8 +745,8 @@ def set_trainable_last_k_blocks(
 def load_model_from_checkpoint(
     ckpt_path: str,
     device: Union[str, torch.device] = None
-) -> Tuple[InceptionModel, dict, Optional[float]]:
-    """Charge un modèle depuis un checkpoint."""
+) -> Tuple[InceptionModel, dict, Optional[float], float]:
+    """Charge le modèle et ses paramètres de calibration depuis un checkpoint."""
     device = torch.device(device) if device is not None else (
         torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     )
@@ -722,12 +759,13 @@ def load_model_from_checkpoint(
     init_args = ckpt['init_args']
     state_dict = ckpt.get('state_dict') or ckpt.get('model_state_dict')
     T = ckpt.get('temperature', None)
+    calibration_bias = float(ckpt.get('calibration_bias', 0.0))
     
     model = InceptionModel(**init_args).to(device)
     model.load_state_dict(state_dict)
     model.eval()
     
-    return model, init_args, T
+    return model, init_args, T, calibration_bias
 
 
 def fine_tune_inception_time(
@@ -781,7 +819,7 @@ def fine_tune_inception_time(
     
     # Chargement modèle
     if isinstance(model_or_ckpt, str):
-        model, init_args, _T = load_model_from_checkpoint(model_or_ckpt, device)
+        model, init_args, _T, _calibration_bias = load_model_from_checkpoint(model_or_ckpt, device)
         print(f"✓ Modèle chargé depuis {model_or_ckpt}")
     else:
         model = model_or_ckpt.to(device)
@@ -968,6 +1006,9 @@ def fine_tune_inception_time(
     
     # ========== CALIBRATION ==========
     T_value = 1.0
+    calibration_bias = 0.0
+    model.temperature_ = T_value
+    model.calibration_bias_ = calibration_bias
     if calibrate:
         print("Calibration température sur validation fine-tuning")
         logits_val = _gather_logits(model, val_loader, device)
@@ -979,12 +1020,16 @@ def fine_tune_inception_time(
         calibrator = TemperatureCalibrator(init_T=1.0).to(device)
         _ = calibrator.fit(logits_val, y_val, max_iter=200)
         T_value = float(calibrator.T.detach().cpu())
+        calibration_bias = float(calibrator.bias.detach().cpu())
+        model.temperature_ = T_value
+        model.calibration_bias_ = calibration_bias
         
-        print(f"✓ Temperature : T = {T_value:.4f}")
+        print(f"✓ Calibration : T = {T_value:.4f}, bias = {calibration_bias:.4f}")
         
         if save_best_path is not None and os.path.exists(save_best_path):
             ckpt = torch.load(save_best_path, map_location='cpu', weights_only=False)
             ckpt['temperature'] = T_value
+            ckpt['calibration_bias'] = calibration_bias
             torch.save(ckpt, save_best_path)
     
     # Libération mémoire
@@ -1004,6 +1049,7 @@ def predict_proba(
     model: nn.Module,
     X: np.ndarray,
     T: float = 1.0,
+    calibration_bias: float = 0.0,
     device: Union[str, torch.device] = None,
     batch_size: int = 256,
     return_logits: bool = False
@@ -1015,6 +1061,7 @@ def predict_proba(
         model: Modèle InceptionTime
         X: Données (N, T, F)
         T: Température de calibration
+        calibration_bias: Biais additif appris sur la validation
         device: Device PyTorch
         batch_size: Taille batch pour inférence
         return_logits: Retourner aussi les logits bruts
@@ -1065,7 +1112,8 @@ def predict_proba(
         if not torch.isfinite(logits).all():
             warnings.warn("Logits non finis détectés dans un batch")
         
-        probs = torch.sigmoid(logits / T)
+        calibrated_logits = logits / T + calibration_bias
+        probs = torch.sigmoid(calibrated_logits)
         
         all_probs.append(probs.cpu().numpy())
         if return_logits:
@@ -1110,7 +1158,7 @@ def evaluate_on_test(
         raise ImportError("sklearn requis pour l'évaluation (pip install scikit-learn)")
     
     # Chargement modèle
-    model, init_args, T = load_model_from_checkpoint(checkpoint_path, device)
+    model, init_args, T, calibration_bias = load_model_from_checkpoint(checkpoint_path, device)
     
     # CORRECTION: assurer que device est bien défini
     if device is None:
@@ -1127,6 +1175,7 @@ def evaluate_on_test(
     print(f"✓ Modèle chargé : {checkpoint_path}")
     print(f"  Device        : {device}")
     print(f"  Temperature T : {T:.4f}")
+    print(f"  Calibration bias : {calibration_bias:.4f}")
     
     # Validation dimensions
     if X_test.ndim != 3:
@@ -1159,7 +1208,7 @@ def evaluate_on_test(
     print(f"Prédiction sur {len(X_test)} exemples...")
     try:
         p_test, logits = predict_proba(
-            model, X_test, T=T, device=device,
+            model, X_test, T=T, calibration_bias=calibration_bias, device=device,
             batch_size=batch_size, return_logits=True
         )
     except Exception as e:

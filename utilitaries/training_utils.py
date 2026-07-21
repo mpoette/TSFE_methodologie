@@ -303,12 +303,15 @@ def apply_prior_calibration(model, beta):
     Returns:
         A ``PriorCorrectionWrapper`` around the underlying raw estimator.
     """
+    
     # Unwrap an existing prior-correction wrapper.
-    if hasattr(model, "base_estimator"):
+    class_name = type(model).__name__
+
+    if class_name == "PriorCorrectionWrapper":
         model = model.base_estimator
 
     # Unwrap estimator-based calibration wrappers.
-    elif hasattr(model, "estimator"):
+    elif class_name in ["TemperatureScaledEstimator", "FrozenEstimator"]:
         model = model.estimator
 
     return PriorCorrectionWrapper(
@@ -569,33 +572,27 @@ def fit_model_by_name(
         )
 
     elif model_name == "SVC TSFEL":
+        from sklearn.calibration import CalibratedClassifierCV
         from sklearn.svm import SVC
 
-        clf = SVC(
-            kernel="rbf",
+        base_svc = SVC(
             random_state=seed,
-            probability=True,
             **parameters,
         )
+        clf = CalibratedClassifierCV(estimator=base_svc, ensemble=False)
 
     elif model_name == "Logistic Regression Lasso TSFEL":
-        if (
-            is_final_palier
-            and lasso_args
-        ):
+        if is_final_palier and lasso_args:
             if hasattr(
                 lasso_args["X_raw"],
                 "write_parquet",
             ):
-                lasso_args[
-                    "X_raw"
-                ].write_parquet(
+                lasso_args["X_raw"].write_parquet(
                     lasso_args["file_X"]
                 )
-
             else:
                 pl.DataFrame(
-                    X_train
+                    lasso_args["X_raw"]
                 ).write_parquet(
                     lasso_args["file_X"]
                 )
@@ -605,22 +602,38 @@ def fit_model_by_name(
                 lasso_args["y_raw"],
             )
 
+        groups_lasso = np.asarray(
+            lasso_args["groups_mask"]
+        ).reshape(-1)
+
+        assert len(groups_lasso) == len(X_train), (
+            "Lasso groups and training rows are misaligned: "
+            f"{len(groups_lasso)} groups for {len(X_train)} rows."
+        )
+
+        assert np.unique(groups_lasso).size >= 3, (
+            "StratifiedGroupKFold requires at least 3 distinct groups, "
+            f"but received {np.unique(groups_lasso).size}."
+        )
+
+        print(
+            "[DEBUG LASSO INNER CV] "
+            f"rows={len(X_train)}, "
+            f"groups={len(groups_lasso)}, "
+            f"unique_groups={np.unique(groups_lasso).size}"
+        )
+
         inner_cv = StratifiedGroupKFold(
             n_splits=3,
             shuffle=True,
             random_state=seed,
         )
 
-        # Pass logistic-regression parameters to the underlying solver.
-        lr_args = {
-            "l1_ratio": 1.0,
-            "solver": "saga",
-            "max_iter": 10000,
-            "random_state": seed,
-        }
-
         lr = LogisticRegression(
-            **lr_args
+            l1_ratio=1.0,
+            solver="saga",
+            max_iter=10000,
+            random_state=seed,
         )
 
         lasso_cv = GridSearchCV(
@@ -640,31 +653,27 @@ def fit_model_by_name(
         lasso_cv.fit(
             X_train,
             y_train,
-            groups=lasso_args[
-                "groups_mask"
-            ],
+            groups=groups_lasso,
         )
 
-        clf = (
-            lasso_cv.best_estimator_
-            if is_final_palier
-            else lasso_cv
-        )
-
+        # Always return the already-fitted best estimator.
+        clf = lasso_cv.best_estimator_
+    
     else:
         raise ValueError(
             f"Unknown model: {model_name}"
         )
 
     # Fit the selected classical model and compute ROC-AUC scores.
-    clf.fit(
-        X_train,
-        (
-            y_train
-            if "XGB" not in model_name
-            else y_train.astype(int)
-        ),
-    )
+    if model_name != "Logistic Regression Lasso TSFEL":
+        clf.fit(
+            X_train,
+            (
+                y_train
+                if "XGB" not in model_name
+                else y_train.astype(int)
+            ),
+        )
 
     train_score = roc_auc_score(
         y_train,
