@@ -134,6 +134,7 @@ warnings.filterwarnings(
 pl.Config.set_tbl_cols(-1)
 
 mode_names = ["wp1", "wp2", "wp3"]
+mode_names = ["test_robustesse"]
 
 RUN_COMPARISON = False
 RUN_TRAINING = True
@@ -154,6 +155,16 @@ print(f"[PIPELINE] {TOTAL_EXPERIMENTS} experiment(s) scheduled.", flush=True)
 mode_duplicates = "prio_last"
 keep_duplicates = False
 for mode_run in mode_names:
+    if mode_run == "score":
+        mode_duplicates = "prio_first"
+        WINDOWING_MODE = "24h début réanimation sans remplissage"
+        target_labels = ["Survie à 28 jours"]
+        model_names = ["IGS2"]
+        stratify_modes = ["target_col"]
+        optuna_run_options = [False]
+        feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"]
+        balancing_methods = ["Aucune Méthode"]
+        RUN_COMPARISON = True
     if mode_run == "test_imbalance":
         mode_duplicates = "prio_first"
         WINDOWING_MODE = "24h début réanimation sans remplissage"
@@ -169,7 +180,7 @@ for mode_run in mode_names:
         WINDOWING_MODE = "24h début réanimation sans remplissage"
         target_labels = ["Survie à 28 jours"]
         optuna_run_options = [False]
-        model_names = ["SVC TSFEL"]
+        model_names = ["XGBoost TSFEL"]
         stratify_modes = ["target_col"]
         feature_modes = ["Mode IGS2"]
         balancing_methods = ["Aucune Méthode"]
@@ -293,8 +304,8 @@ for mode_run in mode_names:
                                     plt.rcParams["figure.facecolor"] = "white"
                                     plt.rcParams['axes.facecolor'] = "white"
                                     plt.rcParams['savefig.facecolor'] = "white"
-
-
+                                
+                                is_score_mode = type_donnees.value == "score"
                                 patient_col = extract.ID_COL
                                 time_col = extract.TIME_COL
                                 target_col = TARGET_COLUMNS[TARGET_LABEL]
@@ -373,11 +384,12 @@ for mode_run in mode_names:
                                 if modex.value == 'Mode All':
                                     selected_features = df_clean_keep.columns.copy()
                                 elif modex.value == 'Mode All Without pmsi':
-                                    selected_features = df_clean_keep.select(~cs.starts_with('hx_') & ~cs.starts_with('icu_')).columns.copy()
+                                    selected_features = [col for col in df_clean_keep.columns if not col.startswith('hx_') and not col.startswith('icu_')]
                                 elif modex.value == 'Mode Commonly Used Without pmsi':
-                                    selected_features = df_clean_keep.select(commonly_used_features).columns.copy()
+                                    selected_features = [col for col in commonly_used_features if col in df_clean_keep.columns]
                                 elif modex.value == 'Mode Commonly Used':
-                                    selected_features = df_clean_keep.select(commonly_used_features, *pmsi_columns).columns.copy()
+                                    all_target_commonly = commonly_used_features + pmsi_columns
+                                    selected_features = [col for col in all_target_commonly if col in df_clean_keep.columns]
                                 elif modex.value == 'Mode Custom':
                                     selected_features = custom_features.value.copy()
                                 else:
@@ -397,7 +409,13 @@ for mode_run in mode_names:
                                 for feature_name in selected_features:
                                     if feature_name in feature_metadata:
                                         selected_feature_descriptions += f"- {feature_metadata[feature_name]['description']} \n"
-
+                                
+                                print("--- TYPES DEBUGGING ---")
+                                print(f"selected_features : {type(selected_features)} -> {selected_features[:3]} (Example)")
+                                print(f"patient_col       : {type(patient_col)} -> {repr(patient_col)}")
+                                print(f"time_col          : {type(time_col)} -> {repr(time_col)}")
+                                print(f"target_col        : {type(target_col)} -> {repr(target_col)}")
+                                print("--------------------------")
                                 df_clean_1 = df_clean.select(*selected_features, patient_col, time_col, target_col)
 
                                 keep_features = selected_features.copy()
@@ -474,31 +492,134 @@ for mode_run in mode_names:
                                     initial_variable_list = complete_tsfel_df.columns
                                     parent_directory = raw_global_tsfel_path.parent
                                     np.save(parent_directory / 'keepVariableList_0.npy', initial_variable_list)
-                                groups_init = df_clean_3[patient_col].to_numpy()
-                                sgkf_init = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
-                                train_init_idx, test_init_idx = next(sgkf_init.split(X=X_init, y=y_init, groups=groups_init))
-                                train_init_patients = df_clean_3[train_init_idx].select(patient_col).unique()
-                                test_init_patients = df_clean_3[test_init_idx].select(patient_col).unique()
-                                if config_models.extraction_type == 'TSFEL':
-                                    train_init_tsfel = complete_tsfel_df.join(train_init_patients, on=patient_col, how='inner').sort(patient_col)
-                                    test_holdout_tsfel = complete_tsfel_df.join(test_init_patients, on=patient_col, how='inner').sort(patient_col)
-                                    X = train_init_tsfel
-                                    y = train_init_tsfel[target_col].to_numpy()
-                                    groups = train_init_tsfel[patient_col].to_numpy()
-                                elif config_models.extraction_type == 'time' or type_donnees.value == 'score':
-                                    train_init_df = df_clean_3[train_init_idx].sort([patient_col, time_col])
-                                    test_holdout_df = df_clean_3[test_init_idx].sort([patient_col, time_col])
-                                    X = train_init_df
-                                    y = train_init_df[target_col].to_numpy()
-                                    groups = train_init_df[patient_col].to_numpy()
-
+                                
                                 saps2_pred = None
                                 saps2_true = None
-                                if type_donnees.value == 'score':
-                                    saps2_clean_df = X.join(df_clean.select(['sapsii_prob', 'encounterId']).cast(pl.Float64), on='encounterId', how='inner').filter(pl.col('sapsii_prob').is_not_null()).group_by('encounterId').first().sort(by='encounterId')
-                                    saps2_clean_df.describe()
-                                    saps2_pred = saps2_clean_df['sapsii_prob'].to_numpy()
-                                    saps2_true = saps2_clean_df['isDeceased_lt_28d'].to_numpy()
+                                score_df = None
+                                if is_score_mode:
+                                    score_df = (
+                                        df_clean
+                                        .select(
+                                            patient_col,
+                                            target_col,
+                                            pl.col("sapsii_prob").cast(pl.Float64),
+                                        )
+                                        .filter(
+                                            pl.col("sapsii_prob").is_not_null()
+                                            & pl.col(target_col).is_not_null()
+                                        )
+                                        .group_by(patient_col)
+                                        .agg(
+                                            pl.col("sapsii_prob")
+                                            .drop_nulls()
+                                            .first()
+                                            .alias("score_probability"),
+
+                                            pl.col(target_col)
+                                            .drop_nulls()
+                                            .first()
+                                            .alias(target_col),
+                                        )
+                                        .drop_nulls(
+                                            ["score_probability", target_col]
+                                        )
+                                        .sort(patient_col)
+                                    )
+
+                                    if score_df.is_empty():
+                                        raise ValueError(
+                                            "No valid score probabilities were found."
+                                        )
+
+                                    duplicate_check = (
+                                        score_df
+                                        .group_by(patient_col)
+                                        .len()
+                                        .filter(pl.col("len") > 1)
+                                    )
+
+                                    assert duplicate_check.is_empty(), (
+                                        "The score dataset must contain exactly one row per patient."
+                                    )
+
+                                    saps2_pred = (
+                                        score_df["score_probability"]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+
+                                    saps2_true = (
+                                        score_df[target_col]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+
+                                    print(
+                                        "[SCORE] Score dataset prepared: "
+                                        f"{score_df.height} patients, "
+                                        f"{int(saps2_true.sum())} positive outcomes."
+                                    )
+
+                                sgkf_init = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+                                if is_score_mode:
+                                    score_y_init = (
+                                        score_df[target_col]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+
+                                    score_groups_init = (
+                                        score_df[patient_col]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+
+                                    score_X_init = (
+                                        score_df["score_probability"]
+                                        .to_numpy()
+                                        .reshape(-1, 1)
+                                    )
+
+                                    train_init_idx, test_init_idx = next(
+                                        sgkf_init.split(
+                                            X=score_X_init,
+                                            y=score_y_init,
+                                            groups=score_groups_init,
+                                        )
+                                    )
+
+                                    train_score_df = score_df[train_init_idx]
+                                    test_holdout_score_df = score_df[test_init_idx]
+
+                                    X = train_score_df
+                                    y = (
+                                        train_score_df[target_col]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+                                    groups = (
+                                        train_score_df[patient_col]
+                                        .to_numpy()
+                                        .reshape(-1)
+                                    )
+
+                                else:
+                                    groups_init = df_clean_3[patient_col].to_numpy()
+                                    train_init_idx, test_init_idx = next(sgkf_init.split(X=X_init, y=y_init, groups=groups_init))
+                                    train_init_patients = df_clean_3[train_init_idx].select(patient_col).unique()
+                                    test_init_patients = df_clean_3[test_init_idx].select(patient_col).unique()
+                                    if config_models.extraction_type == 'TSFEL':
+                                        train_init_tsfel = complete_tsfel_df.join(train_init_patients, on=patient_col, how='inner').sort(patient_col)
+                                        test_holdout_tsfel = complete_tsfel_df.join(test_init_patients, on=patient_col, how='inner').sort(patient_col)
+                                        X = train_init_tsfel
+                                        y = train_init_tsfel[target_col].to_numpy()
+                                        groups = train_init_tsfel[patient_col].to_numpy()
+                                    elif config_models.extraction_type == 'time':
+                                        train_init_df = df_clean_3[train_init_idx].sort([patient_col, time_col])
+                                        test_holdout_df = df_clean_3[test_init_idx].sort([patient_col, time_col])
+                                        X = train_init_df
+                                        y = train_init_df[target_col].to_numpy()
+                                        groups = train_init_df[patient_col].to_numpy()
 
                                 update_progress("Building and preprocessing the 5 folds")
                                 sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
@@ -522,7 +643,55 @@ for mode_run in mode_names:
                                     fold_processing_config['train_init'] = train_init_tsfel
                                 for fold_index, (train_idx, validation_idx) in enumerate(sgkf.split(X=X, y=y, groups=groups)):
                                     print(f'\n─────────────────── Processing Fold {fold_index + 1}/5 ───────────────────')
-                                    if config_models.extraction_type == 'TSFEL':
+                                    if type_donnees.value == "score":
+                                        train_score_fold = X[train_idx]
+                                        validation_score_fold = X[validation_idx]
+
+                                        x_train_processed = (
+                                            train_score_fold["score_probability"]
+                                            .to_numpy()
+                                            .reshape(-1, 1)
+                                        )
+
+                                        x_validation_processed = (
+                                            validation_score_fold["score_probability"]
+                                            .to_numpy()
+                                            .reshape(-1, 1)
+                                        )
+
+                                        y_train_processed = (
+                                            train_score_fold[target_col]
+                                            .to_numpy()
+                                            .reshape(-1)
+                                        )
+
+                                        y_validation_processed = (
+                                            validation_score_fold[target_col]
+                                            .to_numpy()
+                                            .reshape(-1)
+                                        )
+
+                                        processed_groups = (
+                                            train_score_fold[patient_col]
+                                            .to_numpy()
+                                            .reshape(-1)
+                                        )
+
+                                        sampling_statistics = {
+                                            "n_sains_avant": int(
+                                                np.sum(y_train_processed == 0)
+                                            ),
+                                            "n_malades_avant": int(
+                                                np.sum(y_train_processed == 1)
+                                            ),
+                                            "n_sains_apres": int(
+                                                np.sum(y_train_processed == 0)
+                                            ),
+                                            "n_malades_apres": int(
+                                                np.sum(y_train_processed == 1)
+                                            ),
+                                        }
+                                    elif config_models.extraction_type == 'TSFEL':
                                         x_train_processed, x_validation_processed, y_train_processed, y_validation_processed, processed_groups, sampling_statistics = preproc.process_tsfel_fold(fold_index, train_idx, validation_idx, X, y, groups, seed, **fold_processing_config)
                                     elif config_models.extraction_type == 'time':
                                         x_train_processed, x_validation_processed, y_train_processed, y_validation_processed, processed_groups, sampling_statistics = preproc.process_time_fold(fold_index, train_idx, validation_idx, seed, **fold_processing_config)
@@ -621,7 +790,7 @@ for mode_run in mode_names:
                                 elif not is_dl_model and num_dimensions != 2:
                                     raise ValueError(f"Shape mismatch: model {config_models.models_name} expects a 2D tabular matrix, but X_train has {num_dimensions} dimension(s). Is the pipeline configured in 'TSFEL' mode?")
 
-                                if RUN_TRAINING:
+                                if RUN_TRAINING and not is_score_mode:
                                     folds_X_fit_exact = []
                                     folds_y_fit_exact = []
                                     learning_curve_fractions = [0.2, 0.4, 0.6, 0.8, 1.0]
@@ -740,19 +909,7 @@ for mode_run in mode_names:
                                 output_dir = exp.get_output_path(config_models.models_name, uses_optuna_config=uses_optuna_config)
                                 print('Output directory ready:', output_dir)
 
-                                asymmetric_uncertainty_score = None
-                                auc_final_score = None
-                                best_f1_score = None
-                                brier_score_score = None
-                                mcc_score = None
-                                mean_p1_score = None
-                                mean_risk_diff_score = None
-                                non_overlap_area_score = None
-                                y_pred_score = None
-                                if type_donnees.value == 'score':
-                                    auc_final_score, fpr_score, tpr_score, th_score, brier_score_score, best_f1_score, best_t_score, y_pred_score, mcc_score, non_overlap_area_score, asymmetric_uncertainty_score, mean_risk_diff_score, mean_p1_score = sfu.plot_all_figs(saps2_pred, saps2_true, config_models, False, save_figure.value, output_dir, config_transparent)
-
-                                if RUN_TRAINING:
+                                if RUN_TRAINING and not is_score_mode:
                                     try:
                                         sfu.plot_collected_learning_curve(lc_sample_sizes, lc_train_scores, lc_val_scores, config_models.models_name, savefig=save_figure.value, folder=output_dir, transparent=config_transparent)
                                     except:
@@ -766,36 +923,80 @@ for mode_run in mode_names:
                                 for fold_idx in range(5):
                                     update_progress(f"Evaluating fold {fold_idx + 1}/5")
                                     print(f'\n─────────────────── Evaluating Fold {fold_idx + 1}/5 ───────────────────')
-                                    X_train, X_validation = (folds_X_train[fold_idx], folds_X_validation[fold_idx])
-                                    y_train, y_validation = (folds_y_train[fold_idx], folds_y_validation[fold_idx])
-                                    loaded_model = exp.get_model_path(config_models.models_name, fold_idx, extension, uses_optuna_config=uses_optuna_config)
-                                    print('Loaded model:', loaded_model)
-                                    if config_models.models_name == 'InceptionTimeModified':
-                                        evaluation_result = evaluate.evaluate_inception_fold(X_validation, y_validation, loaded_model)
-                                        all_auc_scores.append(evaluation_result['auc'])
-                                        all_brier_scores.append(evaluation_result['brier'])
-                                    elif config_models.models_name == 'LstmTimeModified':
-                                        evaluation_result = evaluate.evaluate_lstm_fold(fold_idx, X_validation, y_validation, loaded_model)
-                                        all_auc_scores.append(evaluation_result['auc'])
-                                        all_brier_scores.append(evaluation_result['brier'])
-                                    elif config_models.extraction_type == 'TSFEL':
-                                        evaluation_result = evaluate.evaluate_tsfel_fold(fold_idx, X_train, X_validation, y_train, y_validation, loaded_model, calibration.value)
-                                        all_validation_scores.append(evaluation_result['test_score'])
-                                        all_train_scores.append(evaluation_result['train_score'])
-                                        all_y_true_report.extend(evaluation_result['y_test'])
-                                        all_y_pred_report.extend(evaluation_result['y_pred_test'])
+                                    if is_score_mode:
+                                        X_validation = folds_X_validation[fold_idx]
+                                        y_validation = folds_y_validation[fold_idx]
+
+                                        validation_probabilities = (
+                                            np.asarray(X_validation)
+                                            .reshape(-1)
+                                        )
+
+                                        validation_targets = (
+                                            np.asarray(y_validation)
+                                            .reshape(-1)
+                                        )
+
+                                        all_y_validation_global.extend(
+                                            validation_targets
+                                        )
+
+                                        # A clinical score is already a probability.
+                                        all_probas_uncalib.extend(
+                                            validation_probabilities
+                                        )
+
+                                        all_probas_calib.extend(
+                                            validation_probabilities
+                                        )
+
+
+                                        print(
+                                            f"[SCORE] Fold {fold_idx + 1}: "
+                                            f"{len(validation_targets)} patients."
+                                        )
+
                                     else:
-                                        raise ValueError(f"Unsupported model or extraction type: {config_models.models_name}")
-                                    # Legacy evaluation API: these keys still use the word 'test',
-                                    # but they contain the current outer validation fold.
-                                    all_y_validation_global.extend(evaluation_result['y_test'])
-                                    all_probas_uncalib.extend(evaluation_result['probas_uncalib'])
-                                    all_probas_calib.extend(evaluation_result['probas_calib'])
+                                        X_train, X_validation = (folds_X_train[fold_idx], folds_X_validation[fold_idx])
+                                        y_train, y_validation = (folds_y_train[fold_idx], folds_y_validation[fold_idx])
+                                        loaded_model = exp.get_model_path(config_models.models_name, fold_idx, extension, uses_optuna_config=uses_optuna_config)
+                                        print('Loaded model:', loaded_model)
+                                        if config_models.models_name == 'InceptionTimeModified':
+                                            evaluation_result = evaluate.evaluate_inception_fold(X_validation, y_validation, loaded_model)
+                                            all_auc_scores.append(evaluation_result['auc'])
+                                            all_brier_scores.append(evaluation_result['brier'])
+                                        elif config_models.models_name == 'LstmTimeModified':
+                                            evaluation_result = evaluate.evaluate_lstm_fold(fold_idx, X_validation, y_validation, loaded_model)
+                                            all_auc_scores.append(evaluation_result['auc'])
+                                            all_brier_scores.append(evaluation_result['brier'])
+                                        elif config_models.extraction_type == 'TSFEL':
+                                            evaluation_result = evaluate.evaluate_tsfel_fold(fold_idx, X_train, X_validation, y_train, y_validation, loaded_model, calibration.value)
+                                            all_validation_scores.append(evaluation_result['test_score'])
+                                            all_train_scores.append(evaluation_result['train_score'])
+                                            all_y_true_report.extend(evaluation_result['y_test'])
+                                            all_y_pred_report.extend(evaluation_result['y_pred_test'])
+                                        else:
+                                            raise ValueError(f"Unsupported model or extraction type: {config_models.models_name}")
+                                        # Legacy evaluation API: these keys still use the word 'test',
+                                        # but they contain the current outer validation fold.
+                                        all_y_validation_global.extend(evaluation_result['y_test'])
+                                        all_probas_uncalib.extend(evaluation_result['probas_uncalib'])
+                                        all_probas_calib.extend(evaluation_result['probas_calib'])
                                 print('\n' + '=' * 20 + ' GLOBAL CROSS-VALIDATION SUMMARY ' + '=' * 20)
                                 all_y_validation_global = np.array(all_y_validation_global)
                                 all_probas_uncalib = np.array(all_probas_uncalib)
                                 all_probas_calib = np.array(all_probas_calib)
-                                if config_models.extraction_type == 'TSFEL':
+                                effective_calibration = (
+                                    calibration.value
+                                    if not is_score_mode
+                                    else False
+                                )
+                                if is_score_mode:
+                                     print(
+                                        f"Score evaluation completed on "
+                                        f"{len(all_y_validation_global)} pooled validation patients."
+                                    )
+                                elif config_models.extraction_type == 'TSFEL':
                                     mean_acc = np.mean(all_validation_scores)
                                     std_acc = np.std(all_validation_scores)
                                     print(f'Mean accuracy: {mean_acc:.4f} (± {std_acc:.4f})')
@@ -809,8 +1010,8 @@ for mode_run in mode_names:
                                 print('=' * 79)
                                 print('\nGenerating the pooled calibration curve...')
                                 print(f'DEBUG SIZES -> y_true: {len(all_y_validation_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}')
-                                sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, calibration.value, save_figure.value, output_dir, config_transparent, calibration_mode.value)
-                                calibration_results = sfu.calibration_curve_advanced(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, calibration.value, save_figure.value, output_dir, config_transparent, calibration_mode.value)
+                                sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, effective_calibration, save_figure.value, output_dir, config_transparent, calibration_mode.value)
+                                calibration_results = sfu.calibration_curve_advanced(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, effective_calibration, save_figure.value, output_dir, config_transparent, calibration_mode.value)
                                 probabilities = all_probas_calib
                                 y_validation = all_y_validation_global
 
@@ -865,54 +1066,30 @@ for mode_run in mode_names:
                                 plt.close("all")
                                 global_brier = sfu.brier_evolution(probabilities, y_validation, save_figure.value, output_dir, transparent=config_transparent)
                                 plt.close("all")
-                                if type_donnees.value == 'modèle':
-                                    calibration_stats = sfu.get_calibration_stats(
-                                        probabilities,
-                                        y_validation,
-                                    )
+                                sfu.calibration_per_risk_brackets(probabilities, y_validation, save_figure.value, output_dir, transparent=config_transparent)
+                                calibration_stats = sfu.get_calibration_stats(
+                                    probabilities,
+                                    y_validation,
+                                )
 
-                                    all_results = {
-                                        "y_true": y_validation,
-                                        "probas": probabilities,
-                                        "preds": y_pred,
-                                        "f1_score": best_f1,
-                                        "mcc": mcc,
-                                        "auc": auc_final,
-                                        "brier": global_brier,
-                                        "calibration_intercept": calibration_stats["intercept"],
-                                        "calibration_slope": calibration_stats["slope"],
-                                        "ici": calibration_stats["ici"],
-                                        "e90": calibration_stats["e90"],
-                                        "eMax" : calibration_stats["eMax"],
-                                        "non_overlap_area": non_overlap_area,
-                                        "asymetric_incertitude": asymmetric_uncertainty,
-                                        "mean_risk_diff": mean_risk_diff,
-                                        "mean_deaths_prediction": mean_p1,
-                                    }
-
-                                else:
-                                    calibration_stats = sfu.get_calibration_stats(
-                                        saps2_pred,
-                                        saps2_true,
-                                    )
-
-                                    all_results = {
-                                        "y_true": saps2_true,
-                                        "probas": saps2_pred,
-                                        "preds": y_pred_score,
-                                        "f1_score": best_f1_score,
-                                        "mcc": mcc_score,
-                                        "auc": auc_final_score,
-                                        "brier": brier_score_score,
-                                        "calibration_intercept": calibration_stats["intercept"],
-                                        "calibration_slope": calibration_stats["slope"],
-                                        "ici": calibration_stats["ici"],
-                                        "e90": calibration_stats["e90"],
-                                        "non_overlap_area": non_overlap_area_score,
-                                        "asymetric_incertitude": asymmetric_uncertainty_score,
-                                        "mean_risk_diff": mean_risk_diff_score,
-                                        "mean_deaths_prediction": mean_p1_score,
-                                    }
+                                all_results = {
+                                    "y_true": y_validation,
+                                    "probas": probabilities,
+                                    "preds": y_pred,
+                                    "f1_score": best_f1,
+                                    "mcc": mcc,
+                                    "auc": auc_final,
+                                    "brier": global_brier,
+                                    "calibration_intercept": calibration_stats["intercept"],
+                                    "calibration_slope": calibration_stats["slope"],
+                                    "ici": calibration_stats["ici"],
+                                    "e90": calibration_stats["e90"],
+                                    "eMax" : calibration_stats["eMax"],
+                                    "non_overlap_area": non_overlap_area,
+                                    "asymetric_incertitude": asymmetric_uncertainty,
+                                    "mean_risk_diff": mean_risk_diff,
+                                    "mean_deaths_prediction": mean_p1,
+                                }
                                 update_progress("Saving final results")
                                 output_dir.mkdir(parents=True, exist_ok=True)
                                 joblib.dump(all_results, output_dir / 'all_res.joblib')
@@ -950,6 +1127,9 @@ for mode_run in mode_names:
                             except Exception as e:
                                 print(f"\n!!! [EXPERIMENT {EXPERIMENT_INDEX}/{TOTAL_EXPERIMENTS}] CRASHED !!!", flush=True)
                                 print(f"Error encountered: {str(e)}", flush=True)
+                                print("\n[STACKTRACE]", flush=True)
+                                print(traceback.format_exc(), flush=True)
+                                print("!" * 90 + "\n", flush=True)
                                 update_progress(f"Experiment {EXPERIMENT_INDEX} failed (skipped)")
                                 continue # Prevent one failed experiment from stopping all remaining experiments.
                             finally:
