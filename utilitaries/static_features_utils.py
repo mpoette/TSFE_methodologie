@@ -69,69 +69,82 @@ def encode_categorical_features(
         )
 
     # ---------------------------------------------------------
-    # GHM categories
+    # GHM categories and ICU Entry Mode
     # ---------------------------------------------------------
     if feature_mode == "Mode Commonly Used":
-        processed_dataframe = (
-            processed_dataframe
-            .with_columns(
-                pl.col("icu_ghm")
-                .list.first()
-                .cast(pl.String)
-                .str.head(3)
-                .fill_null("Unknown")
-                .alias("icu_ghm_f3")
-            )
+        # --- 1. Compute GHM Dummies ---
+        processed_dataframe = processed_dataframe.with_columns(
+            pl.col("icu_ghm")
+            .list.first()
+            .cast(pl.String)
+            .str.head(3)
+            .fill_null("Unknown")
+            .alias("icu_ghm_f3")
         )
 
-        ghm_dummies = (
-            processed_dataframe
-            .select("icu_ghm_f3")
-            .to_dummies(
-                columns=["icu_ghm_f3"]
-            )
+        ghm_dummies = processed_dataframe.select("icu_ghm_f3").to_dummies(
+            columns=["icu_ghm_f3"]
         )
 
         unknown_ghm_column = "icu_ghm_f3_Unknown"
-
         if unknown_ghm_column in ghm_dummies.columns:
-            ghm_dummies = ghm_dummies.drop(
-                unknown_ghm_column
-            )
+            ghm_dummies = ghm_dummies.drop(unknown_ghm_column)
 
         ghm_dummy_columns = ghm_dummies.columns
 
-        generated_dummy_columns.extend(
-            ghm_dummy_columns
-        )
-
-        ghm_source_columns = {
-            "icu_ghm",
-            "icu_ghm_f3",
-        }
-
-        updated_features = [
-            column
-            for column in updated_features
-            if column not in ghm_source_columns
+        # --- 2. Compute Entry Mode Dummies (Top 4 + Other) ---
+        TOP_4_ENTRY_MODES = [
+            "Mutation MCO",
+            "Domicile",
+            "Urgence",
+            "Transfert MCO",
         ]
 
-        updated_features.extend(
-            ghm_dummy_columns
+        # Group rare/null entries under "Other"
+        entry_mode_cleaned = processed_dataframe.select(
+            pl.when(pl.col("icu_mode_entree").is_in(TOP_4_ENTRY_MODES))
+            .then(pl.col("icu_mode_entree"))
+            .otherwise(pl.lit("Other"))
+            .alias("icu_mode_entree")
         )
 
-        existing_ghm_source_columns = [
-            column
-            for column in ghm_source_columns
-            if column in processed_dataframe.columns
+        entry_mode_dummies = entry_mode_cleaned.to_dummies(
+            columns=["icu_mode_entree"]
+        )
+        entry_mode_dummy_columns = entry_mode_dummies.columns
+
+        # --- 3. Grouped Extensions & Feature List Updates ---
+        new_dummy_columns = list(ghm_dummy_columns) + list(
+            entry_mode_dummy_columns
+        )
+
+        generated_dummy_columns.extend(new_dummy_columns)
+
+        # Source columns to drop from processed_dataframe
+        ghm_source_columns = {"icu_ghm", "icu_ghm_f3"}
+        entry_mode_source_columns = {"icu_mode_entree"}
+        all_source_columns = ghm_source_columns.union(
+            entry_mode_source_columns
+        )
+
+        # Update features list
+        updated_features = [
+            col for col in updated_features if col not in all_source_columns
+        ]
+        updated_features.extend(new_dummy_columns)
+
+        # --- 4. Final Concatenation ---
+        existing_source_columns = [
+            col
+            for col in all_source_columns
+            if col in processed_dataframe.columns
         ]
 
         processed_dataframe = pl.concat(
             [
-                processed_dataframe.drop(
-                    existing_ghm_source_columns
-                ),
+                processed_dataframe.drop(existing_source_columns),
                 ghm_dummies,
+                entry_mode_dummies,
             ],
             how="horizontal",
         )

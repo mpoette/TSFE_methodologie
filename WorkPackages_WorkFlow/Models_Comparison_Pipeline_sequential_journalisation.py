@@ -177,12 +177,12 @@ for mode_run in mode_names:
         RUN_COMPARISON = True
     elif mode_run == "test_robustesse":
         mode_duplicates = "prio_first"
-        WINDOWING_MODE = "24h début réanimation sans remplissage"
         target_labels = ["Survie à 28 jours"]
-        optuna_run_options = [False]
-        model_names = ["XGBoost TSFEL"]
+        model_names = ["InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
         stratify_modes = ["target_col"]
-        feature_modes = ["Mode IGS2"]
+        WINDOWING_MODE = "24h début réanimation sans remplissage"
+        optuna_run_options = [False, True]
+        feature_modes = ["Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
     elif mode_run == "wp1":
         mode_duplicates = "prio_first"
@@ -1011,7 +1011,6 @@ for mode_run in mode_names:
                                 print('\nGenerating the pooled calibration curve...')
                                 print(f'DEBUG SIZES -> y_true: {len(all_y_validation_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}')
                                 sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, effective_calibration, save_figure.value, output_dir, config_transparent, calibration_mode.value)
-                                calibration_results = sfu.calibration_curve_advanced(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, effective_calibration, save_figure.value, output_dir, config_transparent, calibration_mode.value)
                                 probabilities = all_probas_calib
                                 y_validation = all_y_validation_global
 

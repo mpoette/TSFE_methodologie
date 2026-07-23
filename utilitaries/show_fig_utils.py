@@ -43,52 +43,25 @@ def calibration_curve_homemade(
     transparent,
     calibration_mode="Platt",
 ):
-    """Plot a binned calibration curve for raw and calibrated predictions.
-    
-    The function compares the observed positive-class frequency with the mean
-    predicted probability in ten uniform probability bins. When applicable, a
-    second curve is added for calibrated TSFEL predictions.
-    
+    """Plot a binned calibration curve for raw and calibrated predictions using get_calibration_stats.
+
+    Points are placed on fixed 10% risk bracket centers (0.05, 0.15, ..., 0.95) to match
+    the binning strategy of calibration_per_risk_brackets.
+
     Args:
-        probas_uncalib:
-            Uncalibrated probabilities predicted for the positive class.
-        probas_calib:
-            Calibrated positive-class probabilities. May be ``None`` when no
-            calibrated curve is required.
-        y_test_global:
-            Binary ground-truth labels associated with the predictions.
-        model_name:
-            Model name displayed in the figure title and legend.
-        calibration:
-            Whether calibrated predictions should be displayed.
-        save_figure:
-            Whether the generated figure should be saved.
-        output_dir:
-            Directory in which the figure should be written.
-        transparent:
-            Whether the saved figure should use a transparent background.
-        calibration_mode:
-            Name of the calibration strategy displayed in the legend.
-    
+        probas_uncalib (array-like): Uncalibrated positive-class probabilities.
+        probas_calib (array-like): Calibrated positive-class probabilities (or None).
+        y_test_global (array-like): Binary ground-truth labels.
+        model_name (str): Model name for titles and labels.
+        calibration (bool): Whether calibrated predictions should be displayed.
+        save_figure (bool): Whether to save the generated figure.
+        output_dir (str or Path): Output directory for the figure.
+        transparent (bool): Whether to save with a transparent background.
+        calibration_mode (str, optional): Name of calibration strategy. Defaults to "Platt".
+
     Returns:
-        ``None``.
+        None.
     """
-    probas_uncalib = np.asarray(
-        probas_uncalib,
-        dtype=float,
-    ).ravel()
-
-    y_test_global = np.asarray(
-        y_test_global,
-        dtype=int,
-    ).ravel()
-
-    if probas_calib is not None:
-        probas_calib = np.asarray(
-            probas_calib,
-            dtype=float,
-        ).ravel()
-
     fig, ax = plt.subplots(figsize=(8, 6))
 
     ax.plot(
@@ -98,70 +71,71 @@ def calibration_curve_homemade(
         label="Perfect calibration",
     )
 
-    # Raw-model curve
-    uncalibrated_fraction_positive, uncalibrated_mean_prediction = calibration_curve(
-        y_test_global,
-        probas_uncalib,
-        n_bins=10,
-        strategy="uniform",
+    # 1. Compute stats & fixed bin coordinates for raw model
+    stats_uncalib = get_calibration_stats(probas_uncalib, y_test_global)
+
+    raw_label = (
+        f"Raw {model_name} "
+        f"(Int={stats_uncalib['intercept']:.2f}, "
+        f"Slope={stats_uncalib['slope']:.2f}, "
+        f"ICI={stats_uncalib['ici']:.3f})"
     )
 
+    # Note: On utilise stats["x"] (centres des bins 0.05, 0.15...) et obs_rate
     ax.plot(
-        uncalibrated_mean_prediction,
-        uncalibrated_fraction_positive,
+        stats_uncalib["x"],
+        stats_uncalib["obs_rate"],
         "s-",
         color="red",
-        label=f"Curve ({model_name})",
+        label=raw_label,
     )
 
-    # Calibrated-model curve
-    if (
-        calibration
-        and probas_calib is not None
-    ):
-        calibrated_fraction_positive, calibrated_mean_prediction = calibration_curve(
-            y_test_global,
-            probas_calib,
-            n_bins=10,
-            strategy="uniform",
+    # 2. Compute stats & fixed bin coordinates for calibrated model if requested
+    if calibration and probas_calib is not None:
+        stats_calib = get_calibration_stats(probas_calib, y_test_global)
+
+        calib_label = (
+            f"Calibrated {model_name} ({calibration_mode}) "
+            f"(Int={stats_calib['intercept']:.2f}, "
+            f"Slope={stats_calib['slope']:.2f}, "
+            f"ICI={stats_calib['ici']:.3f})"
         )
 
         ax.plot(
-            calibrated_mean_prediction,
-            calibrated_fraction_positive,
+            stats_calib["x"],
+            stats_calib["obs_rate"],
             "s-",
             color="blue",
-            label=f"After calibration ({calibration_mode})",
+            label=calib_label,
         )
 
-    ax.set_xlabel("Mean predicted probability")
+    # Figure aesthetics
+    ax.set_xlabel("Predicted Risk (10% brackets)")
     ax.set_ylabel("True fraction of positives")
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
+    ax.set_xticks(np.arange(0, 1.1, 0.1))
 
     ax.set_title(
-        "Global Calibration Curve "
-        "(5-Fold Cross-Validation)\n"
+        "Global Calibration Curve (5-Fold Cross-Validation)\n"
         f"Model: {model_name}"
     )
 
-    ax.legend(loc="lower right")
-    ax.grid(True)
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(True, linestyle=":", alpha=0.6)
 
     fig.tight_layout()
 
-    if save_figure:
+    # Save logic
+    if save_figure and output_dir is not None:
         output_dir = Path(output_dir)
         output_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        output_path = (
-            output_dir
-            / "calibration_curve.png"
-        )
+        output_path = output_dir / f"calibration_curve.png"
 
         fig.savefig(
             output_path,
@@ -295,457 +269,82 @@ def _prepare_lowess_for_interpolation(
     return unique_x, unique_y
 
 
-def get_calibration_stats(
-    probas,
-    y_test,
-    lowess_frac=0.10,
-    lowess_it=0,
-):
-    """Compute calibration statistics and a LOWESS calibration curve.
+def get_calibration_stats(probas, y_test):
+    """Compute calibration statistics and binned coordinates using 10% fixed risk brackets.
     
-    Calibration intercept and slope are estimated with logistic regression on
-    the logit-transformed predicted probabilities. The function also computes
-    the Brier score, the Integrated Calibration Index, and the 90th percentile
-    of the absolute calibration error.
+    Calibration intercept and slope are estimated via logistic regression on logit-transformed
+    predicted probabilities. Brier score, Integrated Calibration Index (ICI), E90, and EMax
+    are calculated directly from the fixed 10% probability bins.
     
     Args:
-        probas:
-            Predicted probabilities for the positive class.
-        y_test:
-            Binary ground-truth labels encoded as 0 and 1.
-        lowess_frac:
-            Fraction of observations used in each LOWESS neighborhood.
-        lowess_it:
-            Number of additional robust LOWESS iterations.
+        probas (array-like): Predicted probabilities for the positive class.
+        y_test (array-like): Binary ground-truth labels encoded as 0 and 1.
     
     Returns:
-        A dictionary containing calibration intercept, calibration slope,
-        Brier score, ICI, E90, and the LOWESS curve coordinates.
-    
-    Raises:
-        ValueError:
-            If the inputs are invalid, ``lowess_frac`` is outside ``(0, 1]``,
-            ``lowess_it`` is negative, or too few distinct probabilities are
-            available to estimate the LOWESS curve.
+        dict: A dictionary containing intercept, slope, brier, ici, e90, eMax,
+              the Polars binned DataFrame ('binned_df'), and bin coordinates ('x', 'obs_rate', 'pred_mean').
     """
-    probas, y_test = _validate_calibration_inputs(
-        probas,
-        y_test,
-    )
-
-    if not 0 < lowess_frac <= 1:
-        raise ValueError(
-            "lowess_frac must be strictly greater than 0 "
-            "and lower than or equal to 1."
-        )
-
-    if lowess_it < 0:
-        raise ValueError(
-            "lowess_it must be greater than or equal to 0."
-        )
+    probas = np.asarray(probas, dtype=float).ravel()
+    y_test = np.asarray(y_test, dtype=int).ravel()
 
     # ---------------------------------------------------------
-    # Calibration intercept and slope
+    # 1. Compute 10% fixed bins with Polars
+    # ---------------------------------------------------------
+    df_brier = pl.DataFrame({"y": y_test, "pred": probas})
+
+    fixed_brier_df = (
+        df_brier.with_columns(
+            (
+                pl.col("pred")
+                .clip(0, 0.999999)
+                .mul(10)
+                .floor()
+                .cast(pl.Int64)
+            ).alias("bin_fixed")
+        )
+        .group_by("bin_fixed")
+        .agg([
+            pl.len().alias("n"),
+            pl.col("pred").mean().alias("pred_mean"),
+            pl.col("y").mean().alias("obs_rate"),
+        ])
+        .sort("bin_fixed")
+        .with_columns(
+            ((pl.col("bin_fixed") + 0.5) / 10).alias("x")
+        )
+    )
+
+    fixed_brier_pd = fixed_brier_df.to_pandas()
+
+    # ---------------------------------------------------------
+    # 2. Calibration Intercept & Slope (Logistic Regression)
     # ---------------------------------------------------------
     eps = 1e-7
+    probas_clipped = np.clip(probas, eps, 1 - eps)
+    logits = np.log(probas_clipped / (1 - probas_clipped)).reshape(-1, 1)
 
-    probas_clipped = np.clip(
-        probas,
-        eps,
-        1 - eps,
-    )
-
-    logits = np.log(
-        probas_clipped
-        / (1 - probas_clipped)
-    ).reshape(-1, 1)
-
-    calibration_model = LogisticRegression(
-        C=np.inf,
-        solver="lbfgs",
-        max_iter=1000,
-    )
-
-    calibration_model.fit(
-        logits,
-        y_test,
-    )
+    calib_model = LogisticRegression(C=np.inf, solver="lbfgs", max_iter=1000)
+    calib_model.fit(logits, y_test)
 
     # ---------------------------------------------------------
-    # LOWESS curve
+    # 3. Bin-based ICI, E90, EMax
     # ---------------------------------------------------------
-    lowess_result = lowess(
-        endog=y_test,
-        exog=probas,
-        frac=lowess_frac,
-        it=lowess_it,
-        is_sorted=False,
-        return_sorted=True,
-    )
-
-    lowess_x, lowess_y = (
-        _prepare_lowess_for_interpolation(
-            lowess_result
-        )
-    )
-
-    if lowess_x.size < 2:
-        raise ValueError(
-            "Not enough distinct predicted probabilities "
-            "to estimate a LOWESS calibration curve."
-        )
-
-    # LOWESS is not constrained to the [0, 1] interval.
-    lowess_y = np.clip(
-        lowess_y,
-        0,
-        1,
-    )
-
-    # ---------------------------------------------------------
-    # ICI and E90 computation
-    # ---------------------------------------------------------
-    smooth_observed_at_predictions = np.interp(
-        probas,
-        lowess_x,
-        lowess_y,
-        left=lowess_y[0],
-        right=lowess_y[-1],
-    )
-
-    smooth_observed_at_predictions = np.clip(
-        smooth_observed_at_predictions,
-        0,
-        1,
-    )
-
-    absolute_errors = np.abs(
-        smooth_observed_at_predictions
-        - probas
-    )
+    bin_errors = np.abs(fixed_brier_pd["obs_rate"] - fixed_brier_pd["pred_mean"])
+    bin_weights = fixed_brier_pd["n"] / fixed_brier_pd["n"].sum()
 
     return {
-        "intercept": float(
-            calibration_model.intercept_[0]
-        ),
-        "slope": float(
-            calibration_model.coef_[0, 0]
-        ),
-        "brier": float(
-            brier_score_loss(
-                y_test,
-                probas,
-            )
-        ),
-        "ici": float(
-            np.mean(absolute_errors)
-        ),
-        "e90": float(
-            np.percentile(
-                absolute_errors,
-                90,
-            )
-        ),
-        "eMax": float(
-            np.percentile(
-                absolute_errors,
-                100,
-            )
-        ),
-        "x": lowess_x,
-        "y": lowess_y,
+        "intercept": float(calib_model.intercept_[0]),
+        "slope": float(calib_model.coef_[0, 0]),
+        "brier": float(brier_score_loss(y_test, probas)),
+        "ici": float(np.sum(bin_errors * bin_weights)),
+        "e90": float(np.percentile(bin_errors, 90)),
+        "eMax": float(np.max(bin_errors)),
+        "binned_df": fixed_brier_df,
+        "x": fixed_brier_pd["x"].to_numpy(),
+        "obs_rate": fixed_brier_pd["obs_rate"].to_numpy(),
+        "pred_mean": fixed_brier_pd["pred_mean"].to_numpy(),
+        "n": fixed_brier_pd["n"].to_numpy(),
     }
-
-
-def calibration_curve_advanced(
-    probas_uncalib,
-    probas_calib,
-    y_test_global,
-    model_name,
-    calibration,
-    save_figure,
-    output_dir,
-    transparent,
-    calibration_mode="Platt",
-    lowess_frac=0.10,
-    lowess_it=0,
-    n_bins_quantile=10,
-):
-    """Plot an advanced calibration assessment with summary metrics.
-    
-    The figure combines a prediction histogram, the perfect-calibration
-    diagonal, LOWESS curves, overlayed quantile-binned points, and a text box 
-    with calibration intercept, slope, Brier score, ICI, E90, and EMax.
-    
-    Args:
-        probas_uncalib:
-            Uncalibrated probabilities predicted for the positive class.
-        probas_calib:
-            Calibrated positive-class probabilities. May be ``None`` when
-            calibration is not applied.
-        y_test_global:
-            Binary ground-truth labels associated with the predictions.
-        model_name:
-            Model name displayed in the figure title.
-        calibration:
-            Whether a calibrated curve should be computed and displayed.
-        save_figure:
-            Whether the generated figure should be saved.
-        output_dir:
-            Directory in which the figure should be written.
-        transparent:
-            Whether the saved figure should use a transparent background.
-        calibration_mode:
-            Name of the calibration strategy displayed in the legend.
-        lowess_frac:
-            Fraction of observations used in each LOWESS neighborhood.
-        lowess_it:
-            Number of additional robust LOWESS iterations.
-        n_bins_quantile:
-            Number of quantile-based bins overlaid on the curves.
-    
-    Returns:
-        ``None``.
-    
-    Raises:
-        ValueError:
-            If calibration is enabled but ``probas_calib`` is not
-            provided, or if any calibration input is invalid.
-    """
-    probas_uncalib, y_test_global = (
-        _validate_calibration_inputs(
-            probas_uncalib,
-            y_test_global,
-        )
-    )
-
-    if probas_calib is not None:
-        probas_calib = np.asarray(
-            probas_calib,
-            dtype=float,
-        ).ravel()
-
-    fig, ax1 = plt.subplots(
-        figsize=(9, 7)
-    )
-
-    # ---------------------------------------------------------
-    # Background histogram
-    # ---------------------------------------------------------
-    ax1.hist(
-        probas_uncalib,
-        bins=40,
-        range=(0, 1),
-        alpha=0.10,
-        color="grey",
-        density=False,
-    )
-
-    ax1.set_xlabel(
-        "Predicted Probability / Risk"
-    )
-
-    ax1.set_ylabel(
-        "Number of Patients"
-    )
-
-    ax1.set_xlim(0, 1)
-
-    # ---------------------------------------------------------
-    # Calibration axis
-    # ---------------------------------------------------------
-    ax2 = ax1.twinx()
-
-    ax2.plot(
-        [0, 1],
-        [0, 1],
-        "k--",
-        linewidth=1.5,
-        alpha=0.5,
-        label="Perfect calibration",
-    )
-
-    # ---------------------------------------------------------
-    # Raw model (LOWESS + Quantile Bins Overlay)
-    # ---------------------------------------------------------
-    stats_raw = get_calibration_stats(
-        probas=probas_uncalib,
-        y_test=y_test_global,
-        lowess_frac=lowess_frac,
-        lowess_it=lowess_it,
-    )
-
-    # Continuous LOWESS line
-    ax2.plot(
-        stats_raw["x"],
-        stats_raw["y"],
-        color="red",
-        linewidth=2,
-        label=(
-            "Before Calibration "
-            f"(Brier: {stats_raw['brier']:.3f})"
-        ),
-    )
-
-    # Quantile-binned points overlay
-    fop_raw, mpv_raw = calibration_curve(
-        y_test_global,
-        probas_uncalib,
-        n_bins=n_bins_quantile,
-        strategy="quantile",
-    )
-    ax2.scatter(
-        mpv_raw,
-        fop_raw,
-        color="red",
-        s=80,
-        zorder=3,
-        alpha = 0.8,
-        marker = "x",
-        label = "Raw model (Quantiles)"
-    )
-
-    text_str = (
-        "[Raw Model]\n"
-        f"Intercept: {stats_raw['intercept']:.2f}\n"
-        f"Slope: {stats_raw['slope']:.2f}\n"
-        f"ICI: {stats_raw['ici']:.3f}\n"
-        f"E90: {stats_raw['e90']:.3f}\n"
-        f"EMax : {stats_raw['eMax']:.3f}\n"
-        f"Brier: {stats_raw['brier']:.3f}"
-    )
-
-    # ---------------------------------------------------------
-    # Calibrated model (LOWESS + Quantile Bins Overlay)
-    # ---------------------------------------------------------
-    if calibration:
-        if probas_calib is None:
-            raise ValueError(
-                "probas_calib must be provided when calibration "
-                "is enabled."
-            )
-
-        probas_calib, calibrated_y_test = (
-            _validate_calibration_inputs(
-                probas_calib,
-                y_test_global,
-            )
-        )
-
-        stats_calib = get_calibration_stats(
-            probas=probas_calib,
-            y_test=calibrated_y_test,
-            lowess_frac=lowess_frac,
-            lowess_it=lowess_it,
-        )
-
-        # Continuous LOWESS line
-        ax2.plot(
-            stats_calib["x"],
-            stats_calib["y"],
-            color="blue",
-            linewidth=2,
-            label=(
-                f"After {calibration_mode} "
-                f"(Brier: {stats_calib['brier']:.3f})"
-            ),
-        )
-
-        # Quantile-binned points overlay
-        fop_calib, mpv_calib = calibration_curve(
-            calibrated_y_test,
-            probas_calib,
-            n_bins=n_bins_quantile,
-            strategy="quantile",
-        )
-        ax2.scatter(
-        mpv_calib,
-        fop_calib,
-        color="blue",
-        s=80,
-        alpha = 0.8,
-        zorder=3,
-        marker = "x",
-        label=f"After {calibration_mode} (Quantiles)"
-    )
-
-        text_str += (
-            "\n\n"
-            "[Calibrated Model]\n"
-            f"Intercept: {stats_calib['intercept']:.2f}\n"
-            f"Slope: {stats_calib['slope']:.2f}\n"
-            f"ICI: {stats_calib['ici']:.3f}\n"
-            f"E90: {stats_calib['e90']:.3f}\n"
-            f"EMax: {stats_calib['eMax']:.3f}\n" 
-            f"Brier: {stats_calib['brier']:.3f}"
-        )
-
-    # ---------------------------------------------------------
-    # Metrics box
-    # ---------------------------------------------------------
-    text_box_properties = {
-        "boxstyle": "round",
-        "facecolor": "white",
-        "alpha": 0.8,
-    }
-
-    ax2.text(
-        0.05,
-        0.95,
-        text_str,
-        transform=ax2.transAxes,
-        fontsize=9,
-        verticalalignment="top",
-        bbox=text_box_properties,
-    )
-
-    ax2.set_ylabel(
-        "Observed Proportion / Mortality Rate"
-    )
-
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
-
-    ax2.legend(
-        loc="lower right"
-    )
-
-    ax2.grid(
-        True,
-        alpha=0.25,
-    )
-
-    ax2.set_title(
-        "Advanced Calibration Assessment\n"
-        f"Model: {model_name}"
-    )
-
-    fig.tight_layout()
-
-    # ---------------------------------------------------------
-    # Save figure
-    # ---------------------------------------------------------
-    if save_figure:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        output_path = (
-            output_dir
-            / "advanced_calibration_curve.png"
-        )
-
-        fig.savefig(
-            output_path,
-            dpi=300,
-            bbox_inches="tight",
-            transparent=transparent,
-        )
-
-    plt.show()
-    plt.close(fig)
 
 def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     """Plot a receiver operating characteristic curve and compute its AUC.
@@ -1117,12 +716,7 @@ def calibration_per_risk_brackets(
     transparent=False,
     model_name="Model"
 ):
-    """Plot a calibration curve aggregated by fixed 10% risk brackets and compute stats.
-
-    Creates a dual-axis plot combining a patient distribution histogram (left axis)
-    with mean predicted risk vs. observed mortality rate (right axis) for ten fixed 
-    probability intervals [0-10%, 10-20%, ..., 90-100%]. Also displays a text box
-    with calibration statistics calculated directly from the binned data.
+    """Plot a calibration curve aggregated by fixed 10% risk brackets using get_calibration_stats.
 
     Args:
         probas (array-like): Predicted probabilities for the positive class.
@@ -1130,86 +724,21 @@ def calibration_per_risk_brackets(
         save_figure (bool, optional): Whether to save the figure to disk. Defaults to False.
         output_dir (str or Path, optional): Path where the PNG will be saved. Defaults to None.
         transparent (bool, optional): Whether the background should be transparent when saved. Defaults to False.
-        model_name (str, optional): Model name displayed in figure and saved file. Defaults to "Model".
+        model_name (str, optional): Model name displayed in file name. Defaults to "Model".
 
     Returns:
-        dict: A dictionary containing the binned DataFrame and the calibration metrics.
+        dict: The dictionary containing computed calibration statistics and data.
     """
-    probas = np.asarray(probas, dtype=float).ravel()
-    y_test = np.asarray(y_test, dtype=int).ravel()
+    # 1. Refactored Call: Get all stats and binned data
+    stats = get_calibration_stats(probas, y_test)
 
-    # ---------------------------------------------------------
-    # 1. Build Polars DataFrame and compute 10% fixed bins
-    # ---------------------------------------------------------
-    df_brier = pl.DataFrame({"y": y_test, "pred": probas})
-
-    fixed_brier_df = (
-        df_brier.with_columns(
-            (
-                pl.col("pred")
-                .clip(0, 0.999999)
-                .mul(10)
-                .floor()
-                .cast(pl.Int64)
-            ).alias("bin_fixed")
-        )
-        .group_by("bin_fixed")
-        .agg([
-            pl.len().alias("n"),
-            pl.col("pred").mean().alias("pred_mean"),
-            pl.col("y").mean().alias("obs_rate"),
-        ])
-        .sort("bin_fixed")
-        .with_columns(
-            ((pl.col("bin_fixed") + 0.5) / 10).alias("x")
-        )
-    )
-
-    fixed_brier_pd = fixed_brier_df.to_pandas()
-
-    # ---------------------------------------------------------
-    # 2. Compute Calibration Stats (Bin-based)
-    # ---------------------------------------------------------
-    # Intercept & Slope via Logistic Regression on logits
-    eps = 1e-7
-    probas_clipped = np.clip(probas, eps, 1 - eps)
-    logits = np.log(probas_clipped / (1 - probas_clipped)).reshape(-1, 1)
-
-    calib_model = LogisticRegression(C=np.inf, solver="lbfgs", max_iter=1000)
-    calib_model.fit(logits, y_test)
-    intercept = float(calib_model.intercept_[0])
-    slope = float(calib_model.coef_[0, 0])
-
-    # Global Brier Score
-    brier = float(brier_score_loss(y_test, probas))
-
-    # Bin-based errors: |observed - predicted|
-    bin_errors = np.abs(fixed_brier_pd["obs_rate"] - fixed_brier_pd["pred_mean"])
-    bin_weights = fixed_brier_pd["n"] / fixed_brier_pd["n"].sum()
-
-    # Weighted ICI across bins
-    ici = float(np.sum(bin_errors * bin_weights))
-    e90 = float(np.percentile(bin_errors, 90))
-    e_max = float(np.max(bin_errors))
-
-    stats = {
-        "intercept": intercept,
-        "slope": slope,
-        "brier": brier,
-        "ici": ici,
-        "e90": e90,
-        "eMax": e_max,
-    }
-
-    # ---------------------------------------------------------
-    # 3. Setup Figure & Plots
-    # ---------------------------------------------------------
+    # 2. Setup Figure & Axes
     fig, ax1 = plt.subplots(figsize=(8, 6))
 
-    # Patient count histogram (Left axis)
+    # Patient distribution histogram (Left Axis)
     ax1.bar(
-        fixed_brier_pd["x"], 
-        fixed_brier_pd["n"], 
+        stats["x"], 
+        stats["n"], 
         width=0.08, 
         alpha=0.3, 
         color="grey", 
@@ -1220,19 +749,19 @@ def calibration_per_risk_brackets(
     ax1.set_xlim(0, 1)
     ax1.set_xticks(np.arange(0, 1.1, 0.1))
 
-    # Calibration curves (Right axis)
+    # Calibration curves (Right Axis)
     ax2 = ax1.twinx()
     ax2.plot(
-        fixed_brier_pd["x"], 
-        fixed_brier_pd["pred_mean"], 
+        stats["x"], 
+        stats["pred_mean"], 
         marker="o", 
         label="Mean predicted risk", 
         color="black", 
         linestyle="-"
     )
     ax2.plot(
-        fixed_brier_pd["x"], 
-        fixed_brier_pd["obs_rate"], 
+        stats["x"], 
+        stats["obs_rate"], 
         marker="s", 
         label="Observed mortality", 
         color="black", 
@@ -1241,20 +770,21 @@ def calibration_per_risk_brackets(
     ax2.set_ylabel("Mortality (Observed rate vs Predicted risk)")
     ax2.set_ylim(0, 1)
 
-    # Text box for metrics
+    # 3. Display Stats Box
     text_str = (
-        f"Intercept: {intercept:.2f}\n"
-        f"Slope: {slope:.2f}\n"
-        f"ICI (binned): {ici:.3f}\n"
-        f"E90: {e90:.3f}\n"
-        f"EMax: {e_max:.3f}\n"
-        f"Brier: {brier:.3f}"
+        f"Intercept: {stats['intercept']:.2f}\n"
+        f"Slope: {stats['slope']:.2f}\n"
+        f"ICI: {stats['ici']:.3f}\n"
+        f"E90: {stats['e90']:.3f}\n"
+        f"EMax: {stats['eMax']:.3f}\n"
+        f"Brier: {stats['brier']:.3f}"
     )
 
     text_box_properties = {
         "boxstyle": "round",
         "facecolor": "white",
-        "alpha": 0.8,
+        "alpha": 0.85,
+        "edgecolor": "gray"
     }
 
     ax2.text(
@@ -1267,13 +797,11 @@ def calibration_per_risk_brackets(
         bbox=text_box_properties,
     )
 
-    # Layout & Legend
+    # Legend & Layout
     fig.legend(loc="center right", bbox_to_anchor=(0.88, 0.5))
     fig.tight_layout()
 
-    # ---------------------------------------------------------
-    # 4. Save & Return
-    # ---------------------------------------------------------
+    # 4. Save & Close
     if save_figure and output_dir is not None:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -1287,10 +815,7 @@ def calibration_per_risk_brackets(
     plt.show()
     plt.close(fig)
 
-    return {
-        "binned_df": fixed_brier_df,
-        "stats": stats,
-    }
+    return stats
 
 def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, transparent):
     """Evaluate the F1 score over a grid of decision thresholds.
@@ -1753,10 +1278,14 @@ def générer_rapport_comparatif(
     """Generates a performance evaluation report and standalone collective plots.
 
     ROC, PRC, and Calibration curves are rendered as independent square figures.
-    Curves and legend entries are sorted independently for clarity:
-        - ROC: Sorted by AUC in descending order (Legend: lower right).
-        - PRC: Sorted by AUPRC in descending order (Legend: upper right).
-        - Calibration: Sorted by Slope, Intercept, then ICI (Legend: upper left).
+    Models and legend entries are strictly ordered according to a predefined list:
+        1. IGS2
+        2. Linear Regression Lasso TSFEL
+        3. SVC TSFEL
+        4. Random Forest TSFEL
+        5. XGBoost TSFEL
+        6. InceptionTimeModified
+        7. LstmTimeModified
 
     Args:
         configurations (Iterable[Tuple[str, dict]]): A collection of (name, config) 
@@ -1774,8 +1303,27 @@ def générer_rapport_comparatif(
     configurations = list(configurations)
 
     # ---------------------------------------------------------
-    # 0. Global Palette Management (Ensures Color Consistency)
+    # 0. Define Strict Order & Color Mapping
     # ---------------------------------------------------------
+    PREDEFINED_ORDER = [
+        "IGS2",
+        "Logistic_Regression_Lasso_TSFEL",
+        "SVC_TSFEL",
+        "RandomForest_TSFEL",
+        "XGBoost_TSFEL",
+        "InceptionTimeModified",
+        "LstmTimeModified",
+    ]
+
+    def get_sort_key(item):
+        model_name = item['name'] if isinstance(item, dict) else item[0]
+        if model_name in PREDEFINED_ORDER:
+            return (0, PREDEFINED_ORDER.index(model_name))
+        return (1, model_name)  # Unlisted models appear at the end alphabetically
+
+    # Sort input configurations right at the beginning
+    configurations = sorted(configurations, key=get_sort_key)
+
     num_configs = len(configurations)
     default_colors = sns.color_palette("tab10", n_colors=max(num_configs, 10))
 
@@ -1855,49 +1403,29 @@ def générer_rapport_comparatif(
     fig_cal, ax_cal = plt.subplots(figsize=(8, 8), layout="constrained")
 
     # ---------------------------------------------------------
-    # 3. Plot ROC Curves (Sorted by AUC ROC Descending)
+    # 3. Plot ROC Curves (Preserving Predefined Order)
     # ---------------------------------------------------------
-    roc_sorted = sorted(
-        plot_data_list, 
-        key=lambda x: (x['auc_roc'] if not np.isnan(x['auc_roc']) else -np.inf), 
-        reverse=True
-    )
-    for item in roc_sorted:
+    for item in plot_data_list:
         ax_roc.plot(
             item['fpr'], item['tpr'], 
-            label=f"{item['name']} (AUC = {item['auc_roc']:.3f})", 
+            label=f"{item['name']} (OOF AUC = {item['auc_roc']:.3f})", 
             color=item['color'], linestyle=item['linestyle'], lw=2
         )
 
     # ---------------------------------------------------------
-    # 4. Plot PRC Curves (Sorted by AUPRC Descending)
+    # 4. Plot PRC Curves (Preserving Predefined Order)
     # ---------------------------------------------------------
-    prc_sorted = sorted(
-        plot_data_list, 
-        key=lambda x: (x['auprc'] if not np.isnan(x['auprc']) else -np.inf), 
-        reverse=True
-    )
-    for item in prc_sorted:
+    for item in plot_data_list:
         ax_prc.plot(
             item['recall'], item['precision'], 
-            label=f"{item['name']} (AUPRC = {item['auprc']:.3f})", 
+            label=f"{item['name']} (OOF AUPRC = {item['auprc']:.3f})", 
             color=item['color'], linestyle=item['linestyle'], lw=2
         )
 
     # ---------------------------------------------------------
-    # 5. Plot Calibration Curves (Sorted by Slope, Intercept, then ICI)
+    # 5. Plot Calibration Curves (Preserving Predefined Order)
     # ---------------------------------------------------------
-    def calib_key(x):
-        # Perfect slope = 1, perfect intercept = 0, perfect ICI = 0
-        s_err = abs(1.0 - x['slope']) if not np.isnan(x['slope']) else float('inf')
-        i_err = abs(x['intercept']) if not np.isnan(x['intercept']) else float('inf')
-        ici_err = x['ici'] if not np.isnan(x['ici']) else float('inf')
-        
-        # Sort primarily by lowest ICI (most representative error)
-        return (ici_err, s_err, i_err)
-
-    calib_sorted = sorted(plot_data_list, key=calib_key)
-    for item in calib_sorted:
+    for item in plot_data_list:
         if not np.isnan(item['intercept']):
             calib_label = f"{item['name']} (Int={item['intercept']:.2f}, Slope={item['slope']:.2f}"
             if not np.isnan(item['ici']):
