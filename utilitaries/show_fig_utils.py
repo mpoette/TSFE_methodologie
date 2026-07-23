@@ -3,7 +3,6 @@ import pandas as pd
 from tabulate import tabulate
 import polars as pl
 import math
-import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 import shap
@@ -23,7 +22,6 @@ from sklearn.metrics import (
     )
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss 
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 import utilitaries.features_extraction_utils as feu
@@ -284,8 +282,10 @@ def get_calibration_stats(probas, y_test):
         dict: A dictionary containing intercept, slope, brier, ici, e90, eMax,
               the Polars binned DataFrame ('binned_df'), and bin coordinates ('x', 'obs_rate', 'pred_mean').
     """
-    probas = np.asarray(probas, dtype=float).ravel()
-    y_test = np.asarray(y_test, dtype=int).ravel()
+    probas, y_test = _validate_calibration_inputs(
+        probas,
+        y_test,
+    )
 
     # ---------------------------------------------------------
     # 1. Compute 10% fixed bins with Polars
@@ -346,6 +346,179 @@ def get_calibration_stats(probas, y_test):
         "n": fixed_brier_pd["n"].to_numpy(),
     }
 
+
+
+def compute_binary_metrics(
+    probas,
+    y_true,
+):
+    """Compute binary prediction metrics without generating figures.
+
+    Args:
+        probas:
+            Positive-class predicted probabilities.
+        y_true:
+            Binary ground-truth labels.
+
+    Returns:
+        A dictionary containing ROC AUC, AUPRC, F1 score, MCC,
+        Brier score, calibration intercept, calibration slope,
+        ICI, E90, EMax, and the fold-specific F1 threshold.
+    """
+    probas = np.asarray(
+        probas,
+        dtype=float,
+    ).reshape(-1)
+
+    y_true = np.asarray(
+        y_true,
+        dtype=int,
+    ).reshape(-1)
+
+    if len(probas) != len(y_true):
+        raise ValueError(
+            "probas and y_true must have the same length: "
+            f"{len(probas)} != {len(y_true)}."
+        )
+
+    if np.unique(y_true).size < 2:
+        raise ValueError(
+            "Both classes are required to compute fold metrics."
+        )
+
+    precision, recall, _ = precision_recall_curve(
+        y_true,
+        probas,
+    )
+
+    calibration_stats = get_calibration_stats(
+        probas,
+        y_true,
+    )
+
+    thresholds = np.linspace(
+        0.1,
+        0.9,
+        50,
+    )
+
+    fold_f1_scores = np.asarray(
+        [
+            f1_score(
+                y_true,
+                (probas >= threshold).astype(int),
+                zero_division=0,
+            )
+            for threshold in thresholds
+        ],
+        dtype=float,
+    )
+
+    best_threshold_index = int(
+        np.argmax(fold_f1_scores)
+    )
+    best_threshold = float(
+        thresholds[best_threshold_index]
+    )
+    y_pred = (
+        probas >= best_threshold
+    ).astype(int)
+
+    return {
+        "auc": float(
+            roc_auc_score(
+                y_true,
+                probas,
+            )
+        ),
+        "auprc": float(
+            auc(
+                recall,
+                precision,
+            )
+        ),
+        "f1_score": float(
+            fold_f1_scores[
+                best_threshold_index
+            ]
+        ),
+        "mcc": float(
+            matthews_corrcoef(
+                y_true,
+                y_pred,
+            )
+        ),
+        "best_threshold": best_threshold,
+        "brier": float(
+            calibration_stats["brier"]
+        ),
+        "calibration_intercept": float(
+            calibration_stats["intercept"]
+        ),
+        "calibration_slope": float(
+            calibration_stats["slope"]
+        ),
+        "ici": float(
+            calibration_stats["ici"]
+        ),
+        "e90": float(
+            calibration_stats["e90"]
+        ),
+        "eMax": float(
+            calibration_stats["eMax"]
+        ),
+    }
+
+def summarize_fold_metrics(
+    fold_metrics,
+    ddof=1,
+):
+    """Summarize metrics computed independently on multiple folds.
+
+    Args:
+        fold_metrics:
+            Sequence of dictionaries returned by
+            ``compute_binary_metrics``.
+        ddof:
+            Delta degrees of freedom used for the standard deviation.
+            ``ddof=1`` computes the sample standard deviation.
+
+    Returns:
+        A dictionary containing per-fold values, mean, and standard
+        deviation for every metric.
+    """
+    if not fold_metrics:
+        raise ValueError(
+            "fold_metrics must contain at least one fold."
+        )
+
+    metric_names = fold_metrics[0].keys()
+    summary = {}
+
+    for metric_name in metric_names:
+        values = np.asarray(
+            [
+                fold_result[metric_name]
+                for fold_result in fold_metrics
+            ],
+            dtype=float,
+        )
+
+        summary[metric_name] = {
+            "fold_values": values,
+            "mean": float(
+                np.nanmean(values)
+            ),
+            "std": float(
+                np.nanstd(
+                    values,
+                    ddof=ddof,
+                )
+            ),
+        }
+
+    return summary
+
 def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
     """Plot a receiver operating characteristic curve and compute its AUC.
     
@@ -368,11 +541,10 @@ def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
         rates, and decision thresholds.
     """
     (fpr, tpr, thresholds) = roc_curve(y_test, probas)
-    # If the AUC differs from the LSTM model metric, it is because the model AUC
-    # is computed on the validation split, whereas this value is computed on the test set.
+    # The displayed AUC is computed from pooled out-of-fold predictions.
     auc_final = roc_auc_score(y_test, probas)
     plt.figure(figsize=(6, 6))
-    plt.plot(fpr, tpr, label=f'ROC {model_name} (AUC = {auc_final:.3f})')
+    plt.plot(fpr, tpr, label=f'ROC {model_name} (OOF AUC = {auc_final:.3f})')
 
     plt.plot([0, 1], [0, 1], linestyle='--', label='Chance', color = "green")
 
@@ -425,7 +597,7 @@ def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
     
     # 4. Build the figure
     plt.figure(figsize=(6, 6))
-    plt.plot(recall, precision, label=f'PRC {model_name} (AUPRC = {auprc_final:.3f})', color='blue', linewidth=2)
+    plt.plot(recall, precision, label=f'PRC {model_name} (OOF AUPRC = {auprc_final:.3f})', color='blue', linewidth=2)
     
     # Horizontal baseline representing chance
     plt.axhline(y=baseline, linestyle='--', color='green', label=f'Chance (Ratio Positifs = {baseline:.3f})')
@@ -895,44 +1067,153 @@ def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, o
     plt.show()
     return y_pred, mcc
 
-def plot_all_figs(probas, y_test, config_models, calibration, save_figure, output_dir, transparent):
-    """Generate the standard evaluation figures and collect their metrics.
-    
+def plot_all_figs(
+    probas_uncalib,
+    y_test,
+    config_models,
+    calibration,
+    save_figure,
+    output_dir,
+    transparent,
+    probas_calib=None,
+    calibration_mode="Platt",
+):
+    """Generate standard evaluation figures and collect their metrics.
+
     Args:
-        probas:
-            Predicted probabilities for the positive class.
+        probas_uncalib:
+            Uncalibrated positive-class probabilities.
         y_test:
             Binary ground-truth labels.
         config_models:
-            Model configuration exposing ``models_name`` and
-            ``extraction_type`` attributes.
+            Model configuration exposing ``models_name``.
         calibration:
-            Whether calibration-related output should be enabled.
+            Whether calibrated predictions should be displayed.
         save_figure:
             Whether generated figures should be saved.
         output_dir:
             Directory in which figures should be written.
         transparent:
             Whether saved figures should use a transparent background.
-    
+        probas_calib:
+            Optional calibrated positive-class probabilities.
+        calibration_mode:
+            Name of the calibration method displayed in the legend.
+
     Returns:
         A tuple containing ROC metrics, Brier score, optimal F1 information,
         predicted labels, MCC, and KDE-based separation statistics.
     """
+    probas_uncalib, y_test = _validate_calibration_inputs(
+        probas_uncalib,
+        y_test,
+    )
+
+    if calibration:
+        if probas_calib is None:
+            raise ValueError(
+                "probas_calib must be provided when calibration=True."
+            )
+
+        probas_calib, y_test_calib = _validate_calibration_inputs(
+            probas_calib,
+            y_test,
+        )
+
+        if not np.array_equal(y_test, y_test_calib):
+            raise ValueError(
+                "The calibrated and uncalibrated predictions must share "
+                "the same ground-truth labels."
+            )
+
+    probabilities = (
+        probas_calib
+        if calibration and probas_calib is not None
+        else probas_uncalib
+    )
+
     cfg = {
         "save_figure": save_figure,
         "output_dir": output_dir,
-        "transparent": transparent
+        "transparent": transparent,
     }
-    calibration_curve_homemade(probas, [], y_test, config_models.models_name, 
-                               config_models.extraction_type, calibration,
-                                 **cfg)
-    auc_final, fpr, tpr, th = roc_curve_homemade(probas, y_test, config_models.models_name, **cfg)
-    non_overlap_area, asymmetric_uncertainty, mean_risk_diff, mean_p1 = kde_plot_homemade(probas, y_test, config_models.models_name, **cfg)
-    brier_score = brier_evolution(probas, y_test, **cfg)
-    best_f1, best_t = f1_score_evolution(probas, y_test, config_models.models_name, **cfg)
-    y_pred, mcc = confusion_matrix_homemade(probas, y_test, best_t, config_models.models_name, **cfg)
-    return auc_final, fpr, tpr, th, brier_score, best_f1, best_t, y_pred, mcc, non_overlap_area, asymmetric_uncertainty, mean_risk_diff, mean_p1
+
+    calibration_curve_homemade(
+        probas_uncalib=probas_uncalib,
+        probas_calib=probas_calib,
+        y_test_global=y_test,
+        model_name=config_models.models_name,
+        calibration=calibration,
+        calibration_mode=calibration_mode,
+        **cfg,
+    )
+
+    auc_final, fpr, tpr, thresholds_roc = roc_curve_homemade(
+        probabilities,
+        y_test,
+        config_models.models_name,
+        **cfg,
+    )
+
+    auprc_final, precision, recall, thresholds_prc = prc_curve_homemade(
+        probabilities,
+        y_test,
+        config_models.models_name,
+        **cfg,
+    )
+
+    (
+        non_overlap_area,
+        asymmetric_uncertainty,
+        mean_risk_diff,
+        mean_p1,
+    ) = kde_plot_homemade(
+        probabilities,
+        y_test,
+        config_models.models_name,
+        **cfg,
+    )
+
+    brier_score = brier_evolution(
+        probabilities,
+        y_test,
+        **cfg,
+    )
+
+    best_f1, best_t = f1_score_evolution(
+        probabilities,
+        y_test,
+        config_models.models_name,
+        **cfg,
+    )
+
+    y_pred, mcc = confusion_matrix_homemade(
+        probabilities,
+        y_test,
+        best_t,
+        config_models.models_name,
+        **cfg,
+    )
+
+    return (
+        auc_final,
+        fpr,
+        tpr,
+        thresholds_roc,
+        auprc_final,
+        precision,
+        recall,
+        thresholds_prc,
+        brier_score,
+        best_f1,
+        best_t,
+        y_pred,
+        mcc,
+        non_overlap_area,
+        asymmetric_uncertainty,
+        mean_risk_diff,
+        mean_p1,
+    )
 
 def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder="", savefig=True, transparent=True, seed=42):
     """Analyze and plot TSFEL feature importance with MDI and SHAP.
@@ -1270,42 +1551,34 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
     plt.show()
 
 def générer_rapport_comparatif(
-    configurations, 
-    y_true_base=None, 
-    save_dir=None, 
-    table_format='fancy_grid'
+    configurations,
+    y_true_base=None,
+    save_dir=None,
+    table_format="fancy_grid",
 ):
-    """Generates a performance evaluation report and standalone collective plots.
+    """Generate comparison tables and collective OOF figures.
 
-    ROC, PRC, and Calibration curves are rendered as independent square figures.
-    Models and legend entries are strictly ordered according to a predefined list:
-        1. IGS2
-        2. Linear Regression Lasso TSFEL
-        3. SVC TSFEL
-        4. Random Forest TSFEL
-        5. XGBoost TSFEL
-        6. InceptionTimeModified
-        7. LstmTimeModified
+    The summary table contains only fold-level ``mean ± std`` values.
+    ROC, precision-recall, and calibration figures use pooled out-of-fold
+    predictions and the corresponding stored OOF metrics.
 
     Args:
-        configurations (Iterable[Tuple[str, dict]]): A collection of (name, config) 
-            pairs, where `config` contains prediction probas and metrics.
-        y_true_base (array-like, optional): Common ground-truth labels shared across 
-            all models. If None, uses `y_true` from each configuration. Defaults to None.
-        save_dir (str or Path, optional): Directory path where generated plots and 
-            LaTeX table will be saved. Defaults to None.
-        table_format (str, optional): Formatting style passed to `tabulate` for 
-            console output display. Defaults to 'fancy_grid'.
+        configurations:
+            Iterable of ``(model_name, all_results)`` pairs.
+        y_true_base:
+            Optional common OOF labels. When omitted, ``y_true_oof`` is read
+            from each configuration.
+        save_dir:
+            Optional output directory.
+        table_format:
+            Console format passed to :func:`tabulate`.
 
     Returns:
-        pd.DataFrame: A DataFrame containing all computed performance metrics.
+        A pandas DataFrame containing formatted fold ``mean ± std`` values.
     """
     configurations = list(configurations)
 
-    # ---------------------------------------------------------
-    # 0. Define Strict Order & Color Mapping
-    # ---------------------------------------------------------
-    PREDEFINED_ORDER = [
+    predefined_order = [
         "IGS2",
         "Logistic_Regression_Lasso_TSFEL",
         "SVC_TSFEL",
@@ -1316,187 +1589,305 @@ def générer_rapport_comparatif(
     ]
 
     def get_sort_key(item):
-        model_name = item['name'] if isinstance(item, dict) else item[0]
-        if model_name in PREDEFINED_ORDER:
-            return (0, PREDEFINED_ORDER.index(model_name))
-        return (1, model_name)  # Unlisted models appear at the end alphabetically
+        model_name = item[0]
+        if model_name in predefined_order:
+            return 0, predefined_order.index(model_name)
+        return 1, model_name
 
-    # Sort input configurations right at the beginning
+    def require_key(config, key, model_name):
+        if key not in config:
+            raise KeyError(
+                f"{model_name}: required result key '{key}' is missing."
+            )
+        return config[key]
+
+    def format_mean_std(config, metric_name, model_name):
+        mean_value = float(
+            require_key(config, f"{metric_name}_mean", model_name)
+        )
+        std_value = float(
+            require_key(config, f"{metric_name}_std", model_name)
+        )
+        return f"{mean_value:.3f} ± {std_value:.3f}"
+
     configurations = sorted(configurations, key=get_sort_key)
+    default_colors = sns.color_palette(
+        "tab10",
+        n_colors=max(len(configurations), 10),
+    )
 
-    num_configs = len(configurations)
-    default_colors = sns.color_palette("tab10", n_colors=max(num_configs, 10))
-
-    # ---------------------------------------------------------
-    # 1. Collect Data & Compute Metrics
-    # ---------------------------------------------------------
     results = {}
     plot_data_list = []
-    last_y_true = None
+    reference_y = None
 
     for idx, (name, config) in enumerate(configurations):
-        probas = np.asarray(config['probas']).ravel()
-        y_true = np.asarray(y_true_base if y_true_base is not None else config['y_true']).ravel()
-        last_y_true = y_true
-        
-        # Assign a consistent color to each model
-        color = config.get('color', None)
-        if color is None:
-            color = default_colors[idx % len(default_colors)]
+        probas_oof = np.asarray(
+            require_key(config, "probas_oof", name),
+            dtype=float,
+        ).ravel()
 
-        # ROC Computation
-        fpr, tpr, _ = roc_curve(y_true, probas)
-        auc_roc = config.get('auc', np.nan) if not np.all(probas == probas[0]) else 0.5
-        if np.isnan(auc_roc):
-            auc_roc = roc_auc_score(y_true, probas) if len(np.unique(y_true)) > 1 else 0.5
+        current_y = (
+            y_true_base
+            if y_true_base is not None
+            else require_key(config, "y_true_oof", name)
+        )
 
-        # PRC Computation
-        precision, recall, _ = precision_recall_curve(y_true, probas)
-        if np.all(probas == probas[0]):
-            prevalence = np.sum(y_true) / len(y_true)
+        y_true_oof = np.asarray(
+            current_y,
+            dtype=int,
+        ).ravel()
+
+        if probas_oof.shape[0] != y_true_oof.shape[0]:
+            raise ValueError(
+                f"{name}: probas_oof and y_true_oof have different "
+                f"lengths: {len(probas_oof)} != {len(y_true_oof)}."
+            )
+
+        if reference_y is None:
+            reference_y = y_true_oof
+        elif not np.array_equal(reference_y, y_true_oof):
+            raise ValueError(
+                f"{name}: y_true_oof differs from the reference labels. "
+                "Collective curves require aligned OOF observations."
+            )
+
+        color = config.get(
+            "color",
+            default_colors[idx % len(default_colors)],
+        )
+
+        constant_predictions = np.all(probas_oof == probas_oof[0])
+
+        if constant_predictions:
+            prevalence = float(np.mean(y_true_oof))
+            fpr = np.array([0.0, 1.0])
+            tpr = np.array([0.0, 1.0])
             precision = np.array([1.0, prevalence, prevalence])
             recall = np.array([0.0, 0.0, 1.0])
-        auprc = auc(recall, precision)
-
-        # Calibration Computation
-        intercept = config.get('calibration_intercept', np.nan)
-        slope = config.get('calibration_slope', np.nan)
-        ici = config.get('ici', np.nan)
-        
-        if not np.all(probas == probas[0]):
-            fop, mpv = calibration_curve(y_true, probas, n_bins=10, strategy="uniform")
+            fop = np.array([prevalence])
+            mpv = np.array([float(probas_oof[0])])
         else:
-            fop, mpv = np.array([np.mean(y_true)]), np.array([probas[0]])
+            fpr, tpr, _ = roc_curve(
+                y_true_oof,
+                probas_oof,
+            )
+            precision, recall, _ = precision_recall_curve(
+                y_true_oof,
+                probas_oof,
+            )
+            fop, mpv = calibration_curve(
+                y_true_oof,
+                probas_oof,
+                n_bins=10,
+                strategy="uniform",
+            )
 
-        # Populate metrics dictionary for summary table
+        auc_oof = float(
+            require_key(config, "auc_oof", name)
+        )
+        auprc_oof = float(
+            require_key(config, "auprc_oof", name)
+        )
+        intercept_oof = float(
+            require_key(config, "calibration_intercept_oof", name)
+        )
+        slope_oof = float(
+            require_key(config, "calibration_slope_oof", name)
+        )
+        ici_oof = float(
+            require_key(config, "ici_oof", name)
+        )
+
         results[name] = {
-            'AUC ROC': auc_roc,
-            'AUPRC': auprc,
-            'F1-Score': config.get('f1_score', np.nan),
-            'MCC': config.get('mcc', np.nan),
-            'Brier': config.get('brier', np.nan),
-            'Intercept': intercept,
-            'Slope': slope,
-            'ICI': ici,
-            'E90': config.get('e90', np.nan),
-            'Non-Overlap Area': config.get('non_overlap_area', np.nan),
-            'Asym Incertitude': config.get('asymetric_incertitude', np.nan),
-            'Mean Risk Diff': config.get('mean_risk_diff', np.nan),
-            'Mean Deaths Pred': config.get('mean_deaths_prediction', np.nan)
+            "AUC ROC": format_mean_std(config, "auc", name),
+            "AUPRC": format_mean_std(config, "auprc", name),
+            "F1-Score": format_mean_std(
+                config,
+                "f1_score",
+                name,
+            ),
+            "MCC": format_mean_std(config, "mcc", name),
+            "Brier": format_mean_std(config, "brier", name),
+            "Intercept": format_mean_std(
+                config,
+                "calibration_intercept",
+                name,
+            ),
+            "Slope": format_mean_std(
+                config,
+                "calibration_slope",
+                name,
+            ),
+            "ICI": format_mean_std(config, "ici", name),
+            "E90": format_mean_std(config, "e90", name),
+            "EMax": format_mean_std(config, "eMax", name),
         }
 
-        # Store parameters for plotting
         plot_data_list.append({
-            'name': name,
-            'color': color,
-            'linestyle': '-',
-            'fpr': fpr, 'tpr': tpr, 'auc_roc': auc_roc,
-            'recall': recall, 'precision': precision, 'auprc': auprc,
-            'fop': fop, 'mpv': mpv, 'intercept': intercept, 'slope': slope, 'ici': ici
+            "name": name,
+            "color": color,
+            "fpr": fpr,
+            "tpr": tpr,
+            "auc_oof": auc_oof,
+            "recall": recall,
+            "precision": precision,
+            "auprc_oof": auprc_oof,
+            "fop": fop,
+            "mpv": mpv,
+            "intercept_oof": intercept_oof,
+            "slope_oof": slope_oof,
+            "ici_oof": ici_oof,
         })
 
-    # ---------------------------------------------------------
-    # 2. Setup Figures (Square Ratio: 8x8)
-    # ---------------------------------------------------------
-    fig_roc, ax_roc = plt.subplots(figsize=(8, 8), layout="constrained")
-    fig_prc, ax_prc = plt.subplots(figsize=(8, 8), layout="constrained")
-    fig_cal, ax_cal = plt.subplots(figsize=(8, 8), layout="constrained")
+    fig_roc, ax_roc = plt.subplots(
+        figsize=(8, 8),
+        layout="constrained",
+    )
+    fig_prc, ax_prc = plt.subplots(
+        figsize=(8, 8),
+        layout="constrained",
+    )
+    fig_cal, ax_cal = plt.subplots(
+        figsize=(8, 8),
+        layout="constrained",
+    )
 
-    # ---------------------------------------------------------
-    # 3. Plot ROC Curves (Preserving Predefined Order)
-    # ---------------------------------------------------------
     for item in plot_data_list:
         ax_roc.plot(
-            item['fpr'], item['tpr'], 
-            label=f"{item['name']} (OOF AUC = {item['auc_roc']:.3f})", 
-            color=item['color'], linestyle=item['linestyle'], lw=2
+            item["fpr"],
+            item["tpr"],
+            label=(
+                f"{item['name']} "
+                f"(OOF AUC = {item['auc_oof']:.3f})"
+            ),
+            color=item["color"],
+            linewidth=2,
         )
 
-    # ---------------------------------------------------------
-    # 4. Plot PRC Curves (Preserving Predefined Order)
-    # ---------------------------------------------------------
-    for item in plot_data_list:
         ax_prc.plot(
-            item['recall'], item['precision'], 
-            label=f"{item['name']} (OOF AUPRC = {item['auprc']:.3f})", 
-            color=item['color'], linestyle=item['linestyle'], lw=2
+            item["recall"],
+            item["precision"],
+            label=(
+                f"{item['name']} "
+                f"(OOF AUPRC = {item['auprc_oof']:.3f})"
+            ),
+            color=item["color"],
+            linewidth=2,
         )
 
-    # ---------------------------------------------------------
-    # 5. Plot Calibration Curves (Preserving Predefined Order)
-    # ---------------------------------------------------------
-    for item in plot_data_list:
-        if not np.isnan(item['intercept']):
-            calib_label = f"{item['name']} (Int={item['intercept']:.2f}, Slope={item['slope']:.2f}"
-            if not np.isnan(item['ici']):
-                calib_label += f", ICI={item['ici']:.3f})"
-            else:
-                calib_label += ")"
-        else:
-            calib_label = item['name']
+        calibration_label = (
+            f"{item['name']} "
+            f"(Int={item['intercept_oof']:.2f}, "
+            f"Slope={item['slope_oof']:.2f}, "
+            f"ICI={item['ici_oof']:.3f})"
+        )
 
         ax_cal.plot(
-            item['mpv'], item['fop'], "s-", 
-            label=calib_label, color=item['color'], linestyle=item['linestyle'], lw=2
+            item["mpv"],
+            item["fop"],
+            "s-",
+            label=calibration_label,
+            color=item["color"],
+            linewidth=2,
         )
 
-    # ---------------------------------------------------------
-    # 6. Finalize Plot Formatting & Legend Layouts
-    # ---------------------------------------------------------
-    # ROC Figure Settings
-    ax_roc.plot([0, 1], [0, 1], linestyle='--', label='Chance', color='gray')
-    ax_roc.set_xlabel('False Positive Rate (FPR)')
-    ax_roc.set_ylabel('True Positive Rate (TPR)')
-    ax_roc.set_xlim([0.0, 1.0])
-    ax_roc.set_ylim([0.0, 1.05])
-    ax_roc.grid(True, linestyle=':', alpha=0.6)
-    ax_roc.legend(loc='lower right', fontsize=9)
-
-    # PRC Figure Settings
-    reference_y = y_true_base if y_true_base is not None else last_y_true
-    baseline = np.sum(reference_y) / len(reference_y) if reference_y is not None else 0.5
-    ax_prc.axhline(
-        y=baseline, linestyle='--', color='green', alpha=0.7, 
-        label=f'Chance (Pos Ratio = {baseline:.3f})'
+    ax_roc.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        label="Chance",
+        color="gray",
     )
-    ax_prc.set_xlabel('Recall (Sensitivity)')
-    ax_prc.set_ylabel('Precision (PPV)')
-    ax_prc.set_xlim([0.0, 1.0])
-    ax_prc.set_ylim([0.0, 1.05])
-    ax_prc.grid(True, linestyle=':', alpha=0.6)
-    ax_prc.legend(loc='upper right', fontsize=9)
+    ax_roc.set_xlabel("False Positive Rate (FPR)")
+    ax_roc.set_ylabel("True Positive Rate (TPR)")
+    ax_roc.set_xlim(0.0, 1.0)
+    ax_roc.set_ylim(0.0, 1.05)
+    ax_roc.grid(True, linestyle=":", alpha=0.6)
+    ax_roc.legend(loc="lower right", fontsize=9)
 
-    # Calibration Figure Settings
-    ax_cal.plot([0, 1], [0, 1], "k:", alpha=0.7, label="Perfect calibration")
-    ax_cal.set_xlabel('Mean Predicted Probability')
-    ax_cal.set_ylabel('True Fraction of Positives')
-    ax_cal.set_xlim([0.0, 1.0])
-    ax_cal.set_ylim([0.0, 1.05])
-    ax_cal.grid(True, linestyle=':', alpha=0.6)
-    ax_cal.legend(loc='upper left', fontsize=9)
+    baseline = (
+        float(np.mean(reference_y))
+        if reference_y is not None
+        else 0.5
+    )
+    ax_prc.axhline(
+        y=baseline,
+        linestyle="--",
+        color="green",
+        alpha=0.7,
+        label=f"Chance (Pos Ratio = {baseline:.3f})",
+    )
+    ax_prc.set_xlabel("Recall (Sensitivity)")
+    ax_prc.set_ylabel("Precision (PPV)")
+    ax_prc.set_xlim(0.0, 1.0)
+    ax_prc.set_ylim(0.0, 1.05)
+    ax_prc.grid(True, linestyle=":", alpha=0.6)
+    ax_prc.legend(loc="upper right", fontsize=9)
 
-    # ---------------------------------------------------------
-    # 7. Save & Export Outputs
-    # ---------------------------------------------------------
+    ax_cal.plot(
+        [0, 1],
+        [0, 1],
+        "k:",
+        alpha=0.7,
+        label="Perfect calibration",
+    )
+    ax_cal.set_xlabel("Mean Predicted Probability")
+    ax_cal.set_ylabel("True Fraction of Positives")
+    ax_cal.set_xlim(0.0, 1.0)
+    ax_cal.set_ylim(0.0, 1.05)
+    ax_cal.grid(True, linestyle=":", alpha=0.6)
+    ax_cal.legend(loc="upper left", fontsize=9)
+
     results_df = pd.DataFrame(results).T
-    print("\n=== PERFORMANCE COMPARISON TABLE ===")
-    print(tabulate(results_df, headers='keys', tablefmt=table_format, floatfmt=".3f"))
 
-    if save_dir:
+    print("\n=== PERFORMANCE COMPARISON TABLE ===")
+    print(
+        tabulate(
+            results_df,
+            headers="keys",
+            tablefmt=table_format,
+            showindex=True,
+        )
+    )
+
+    if save_dir is not None:
         output_path = Path(save_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        fig_roc.savefig(output_path / "collective_roc_curve.png", dpi=300, bbox_inches="tight")
-        fig_prc.savefig(output_path / "collective_prc_curve.png", dpi=300, bbox_inches="tight")
-        fig_cal.savefig(output_path / "collective_calibration_curve.png", dpi=300, bbox_inches="tight")
+        fig_roc.savefig(
+            output_path / "collective_roc_curve.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        fig_prc.savefig(
+            output_path / "collective_prc_curve.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        fig_cal.savefig(
+            output_path / "collective_calibration_curve.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
 
-        with open(output_path / "results_table.tex", "w") as f:
-            f.write(tabulate(results_df, headers='keys', tablefmt='latex_booktabs', floatfmt=".3f"))
+        with open(
+            output_path / "results_table.tex",
+            "w",
+            encoding="utf-8",
+        ) as output_file:
+            output_file.write(
+                tabulate(
+                    results_df,
+                    headers="keys",
+                    tablefmt="latex_booktabs",
+                    showindex=True,
+                )
+            )
 
     plt.show()
-    
     plt.close(fig_roc)
     plt.close(fig_prc)
     plt.close(fig_cal)
 
     return results_df
+

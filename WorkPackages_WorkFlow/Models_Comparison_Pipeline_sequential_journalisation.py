@@ -103,7 +103,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import polars as pl
 import polars.selectors as cs
-from sklearn.metrics import classification_report
+from sklearn.metrics import brier_score_loss, classification_report, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.linear_model import LogisticRegression
 from joblib import Parallel, delayed
@@ -112,9 +112,10 @@ import utilitaries.extract_data_utils as extract
 import utilitaries.features_extraction_utils as extract_feat
 import utilitaries.marimo_utils as mo_utils
 import utilitaries.preprocessing_utils as preproc
+import utilitaries.postprocessing_utils as postproc
 import utilitaries.timestamp_sampling_utils as tsu
 import utilitaries.path_utils as path_utils
-import utilitaries.show_fig_utils as sfu
+import utilitaries.new_show_fig_utils as sfu
 import utilitaries.training_utils as training
 import utilitaries.evaluate_utils as evaluate
 import utilitaries.resampling_and_window_choice_pipeline as choice
@@ -133,9 +134,8 @@ warnings.filterwarnings(
 
 pl.Config.set_tbl_cols(-1)
 
-mode_names = ["wp1", "wp2", "wp3"]
-mode_names = ["test_robustesse"]
-
+mode_names = ["score", "wp1", "wp2", "wp3"]
+RUN_TEST = True
 RUN_COMPARISON = False
 RUN_TRAINING = True
 RUN_LASSO = True
@@ -164,7 +164,6 @@ for mode_run in mode_names:
         optuna_run_options = [False]
         feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
-        RUN_COMPARISON = True
     if mode_run == "test_imbalance":
         mode_duplicates = "prio_first"
         WINDOWING_MODE = "24h début réanimation sans remplissage"
@@ -178,11 +177,11 @@ for mode_run in mode_names:
     elif mode_run == "test_robustesse":
         mode_duplicates = "prio_first"
         target_labels = ["Survie à 28 jours"]
-        model_names = ["InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+        model_names = ["LstmTimeModified", "XGBoost TSFEL"]
         stratify_modes = ["target_col"]
         WINDOWING_MODE = "24h début réanimation sans remplissage"
-        optuna_run_options = [False, True]
-        feature_modes = ["Mode Commonly Used"]
+        optuna_run_options = [False]
+        feature_modes =["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
     elif mode_run == "wp1":
         mode_duplicates = "prio_first"
@@ -226,6 +225,8 @@ for mode_run in mode_names:
                         for optuna_choice in optuna_choices:
                             try:
                                 DATA_TYPE = "modèle"
+                                if mode_run == "score" :
+                                    DATA_TYPE = "score"
 
                                 MODEL_NAME = model_choice
                                 SCORE_NAME = "IGS2"
@@ -710,77 +711,114 @@ for mode_run in mode_names:
                                 model_name = config_models.models_name
                                 output_directory = exp.get_output_path(model_name)
                                 HYPERPARAMS_FILE = output_directory / 'best_hyperparameters.json'
+                                saved_configs = {}
 
-                                if RUN_OPTUNA:
-                                    update_progress("Running Optuna hyperparameter search")
-                                    print('Search started')
-                                    print('[OPTUNA] Search started...')
-                                    if HYPERPARAMS_FILE.exists():
-                                        with open(HYPERPARAMS_FILE, 'r') as config_file:
+                                if HYPERPARAMS_FILE.exists():
+                                    try:
+                                        with open(
+                                            HYPERPARAMS_FILE,
+                                            "r",
+                                            encoding="utf-8",
+                                        ) as config_file:
                                             saved_configs = json.load(config_file)
-                                    else:
+                                    except (json.JSONDecodeError, OSError) as error:
+                                        print(
+                                            f"[WARNING] Unable to read {HYPERPARAMS_FILE}: {error}. "
+                                            "A new Optuna search may be required."
+                                        )
                                         saved_configs = {}
-                                    save_optuna_name = (
+
+                                hyperparameters_already_available = (
+                                    model_name in saved_configs
+                                    and isinstance(saved_configs[model_name], dict)
+                                    and bool(saved_configs[model_name])
+                                )
+
+                                if RUN_OPTUNA and RUN_TRAINING:
+                                    if hyperparameters_already_available:
+                                        print(
+                                            f"[OPTUNA] Existing hyperparameters found for {model_name} "
+                                            f"in '{HYPERPARAMS_FILE}'. Search skipped."
+                                        )
+                                    else:
+                                        print("[OPTUNA] No saved configuration found.")
+                                        update_progress("Running Optuna hyperparameter search")
+                                        print('[OPTUNA] Search started...')
+                                        save_optuna_name = (
                                         f"{config_models.models_name}_{exp.shortdirname()}"
                                         f"_fresh_{datetime.now():%Y%m%d_%H%M%S_%f}"
-                                    )
-                                    print(f"[DISK-SAVE] The best parameters will be saved to '{HYPERPARAMS_FILE}'.")
-                                    if config_models.models_name == 'InceptionTimeModified':
-                                        from utilitaries.optuna.optuna_inception_utils import run_stage1_search
-                                        study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
-                                        best_parameters = study.best_params
-                                        best_parameters['out_channels'] = 2 ** best_parameters.pop('out_channels_exp')
-                                        best_parameters['bottleneck_channels'] = 2 ** best_parameters.pop('bottleneck_channels_exp')
-                                        best_parameters['batch_size'] = 2 ** best_parameters.pop('batch_size_exp')
-                                        saved_configs[config_models.models_name] = best_parameters
-                                    elif config_models.models_name == 'LstmTimeModified':
-                                        from utilitaries.optuna.optuna_lstm_utils import run_lstm_stage1_search
-                                        study = run_lstm_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
-                                        best_parameters = study.best_params
-                                        best_parameters['hidden_size'] = 2 ** best_parameters.pop('hidden_size_exp')
-                                        best_parameters['batch_size'] = 2 ** best_parameters.pop('batch_size_exp')
-                                        if best_parameters.get('clip_grad') == 0.0:
-                                            best_parameters['clip_grad'] = None
-                                        saved_configs[config_models.models_name] = best_parameters
-                                    elif config_models.models_name == 'XGBoost TSFEL':
-                                        from utilitaries.optuna.optuna_xgb_utils import run_xgb_stage1_search
-                                        study = run_xgb_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, fixed_params = {"tree_method" : "hist", "device" : "cuda"})
-                                        saved_configs[config_models.models_name] = study.best_params
-                                    elif config_models.models_name == 'SVC TSFEL':
-                                        from utilitaries.optuna.optuna_svc_utils import run_svc_stage1_search
-                                        study = run_svc_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
-                                        saved_configs[config_models.models_name] = study.best_params
-                                    elif config_models.models_name == 'RandomForest TSFEL':
-                                        from utilitaries.optuna.optuna_rf_utils import run_rf_stage1_search
-                                        study = run_rf_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
-                                        best_parameters = study.best_params
-                                        if best_parameters.get('max_depth') == 0:
-                                            best_parameters['max_depth'] = None
-                                        saved_configs[config_models.models_name] = best_parameters
-                                    with open(HYPERPARAMS_FILE, 'w') as config_file:
-                                        json.dump(saved_configs, config_file, indent=4)
-                                    print(f"[DISK-SAVE] Best parameters saved to '{HYPERPARAMS_FILE}' for {config_models.models_name}.")
+                                        )
+                                        print(f"[DISK-SAVE] The best parameters will be saved to '{HYPERPARAMS_FILE}'.")
+                                        if config_models.models_name == 'InceptionTimeModified':
+                                            from utilitaries.optuna.optuna_inception_utils import run_stage1_search
+                                            study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            best_parameters = study.best_params
+                                            best_parameters['out_channels'] = 2 ** best_parameters.pop('out_channels_exp')
+                                            best_parameters['bottleneck_channels'] = 2 ** best_parameters.pop('bottleneck_channels_exp')
+                                            best_parameters['batch_size'] = 2 ** best_parameters.pop('batch_size_exp')
+                                            saved_configs[config_models.models_name] = best_parameters
+                                        elif config_models.models_name == 'LstmTimeModified':
+                                            from utilitaries.optuna.optuna_lstm_utils import run_lstm_stage1_search
+                                            study = run_lstm_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            best_parameters = study.best_params
+                                            best_parameters['hidden_size'] = 2 ** best_parameters.pop('hidden_size_exp')
+                                            best_parameters['batch_size'] = 2 ** best_parameters.pop('batch_size_exp')
+                                            if best_parameters.get('clip_grad') == 0.0:
+                                                best_parameters['clip_grad'] = None
+                                            saved_configs[config_models.models_name] = best_parameters
+                                        elif config_models.models_name == 'XGBoost TSFEL':
+                                            from utilitaries.optuna.optuna_xgb_utils import run_xgb_stage1_search
+                                            study = run_xgb_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, fixed_params = {"tree_method" : "hist", "device" : "cuda"})
+                                            saved_configs[config_models.models_name] = study.best_params
+                                        elif config_models.models_name == 'SVC TSFEL':
+                                            from utilitaries.optuna.optuna_svc_utils import run_svc_stage1_search
+                                            study = run_svc_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            saved_configs[config_models.models_name] = study.best_params
+                                        elif config_models.models_name == 'RandomForest TSFEL':
+                                            from utilitaries.optuna.optuna_rf_utils import run_rf_stage1_search
+                                            study = run_rf_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            best_parameters = study.best_params
+                                            if best_parameters.get('max_depth') == 0:
+                                                best_parameters['max_depth'] = None
+                                            saved_configs[config_models.models_name] = best_parameters
+                                        else:
+                                            raise ValueError(
+                                                f"No Optuna search is configured for "
+                                                f"{config_models.models_name}."
+                                            )
+                                        with open(HYPERPARAMS_FILE, 'w') as config_file:
+                                            json.dump(saved_configs, config_file, indent=4)
+                                        print(f"[DISK-SAVE] Best parameters saved to '{HYPERPARAMS_FILE}' for {config_models.models_name}.")
 
                                 update_progress("Preparing training")
                                 print('Training started')
                                 parameters = {}
                                 uses_optuna_config = False
-                                if use_optuna.value and HYPERPARAMS_FILE.exists():
-                                    with open(HYPERPARAMS_FILE, 'r') as hyperparameter_file:
-                                        all_configs = json.load(hyperparameter_file)
-                                    if model_name in all_configs:
-                                        print(f'[LOAD] Optuna configuration found in {HYPERPARAMS_FILE} for {model_name}.')
-                                        parameters = all_configs[model_name]
+
+                                if use_optuna.value:
+                                    if model_name in saved_configs:
+                                        print(
+                                            f"[LOAD] Optuna configuration found in "
+                                            f"{HYPERPARAMS_FILE} for {model_name}."
+                                        )
+                                        parameters = saved_configs[model_name].copy()
                                         uses_optuna_config = True
                                     else:
-                                        print(f'[LOAD] No configuration found for {model_name} in this file. Using default values.')
-                                        parameters = DEFAULT_PARAMS.get(model_name, {})
-                                        uses_optuna_config = False
+                                        print(
+                                            f"[WARNING] No Optuna configuration found for "
+                                            f"{model_name}. Using default parameters."
+                                        )
+                                        parameters = DEFAULT_PARAMS.get(
+                                            model_name,
+                                            {},
+                                        ).copy()
                                 else:
-                                    print(f"[WARNING] No hyperparameter file found at {HYPERPARAMS_FILE}. Using default values.")
-                                    parameters = DEFAULT_PARAMS.get(model_name, {})
-                                    uses_optuna_config = False
-                                print(f'--> Applied parameters: {parameters}\n')
+                                    parameters = DEFAULT_PARAMS.get(
+                                        model_name,
+                                        {},
+                                    ).copy()
+                                print(f"--> Applied parameters: {parameters}\n")
+
                                 if len(folds_X_train) == 0:
                                     raise ValueError('The fold lists are empty')
                                 is_dl_model = config_models.extraction_type == 'time'
@@ -914,184 +952,633 @@ for mode_run in mode_names:
                                         sfu.plot_collected_learning_curve(lc_sample_sizes, lc_train_scores, lc_val_scores, config_models.models_name, savefig=save_figure.value, folder=output_dir, transparent=config_transparent)
                                     except:
                                         print("Non-blocking error: the learning curve could not be saved because it already exists.")
+                                fold_metrics = []
 
-                                all_validation_scores, all_train_scores = ([], [])
-                                all_auc_scores, all_brier_scores = ([], [])
-                                all_y_true_report, all_y_pred_report = ([], [])
-                                all_y_validation_global, all_probas_uncalib, all_probas_calib = ([], [], [])
-                                update_progress("Evaluating the 5 folds")
-                                for fold_idx in range(5):
-                                    update_progress(f"Evaluating fold {fold_idx + 1}/5")
-                                    print(f'\n─────────────────── Evaluating Fold {fold_idx + 1}/5 ───────────────────')
-                                    if is_score_mode:
-                                        X_validation = folds_X_validation[fold_idx]
-                                        y_validation = folds_y_validation[fold_idx]
+                                all_validation_scores = []
+                                all_train_scores = []
+                                all_y_true_report = []
+                                all_y_pred_report = []
 
-                                        validation_probabilities = (
-                                            np.asarray(X_validation)
-                                            .reshape(-1)
-                                        )
+                                # These remain Python lists throughout the fold loop.
+                                all_y_validation_global = []
+                                all_probas_uncalib = []
+                                all_probas_calib = []
 
-                                        validation_targets = (
-                                            np.asarray(y_validation)
-                                            .reshape(-1)
-                                        )
-
-                                        all_y_validation_global.extend(
-                                            validation_targets
-                                        )
-
-                                        # A clinical score is already a probability.
-                                        all_probas_uncalib.extend(
-                                            validation_probabilities
-                                        )
-
-                                        all_probas_calib.extend(
-                                            validation_probabilities
-                                        )
-
-
-                                        print(
-                                            f"[SCORE] Fold {fold_idx + 1}: "
-                                            f"{len(validation_targets)} patients."
-                                        )
-
-                                    else:
-                                        X_train, X_validation = (folds_X_train[fold_idx], folds_X_validation[fold_idx])
-                                        y_train, y_validation = (folds_y_train[fold_idx], folds_y_validation[fold_idx])
-                                        loaded_model = exp.get_model_path(config_models.models_name, fold_idx, extension, uses_optuna_config=uses_optuna_config)
-                                        print('Loaded model:', loaded_model)
-                                        if config_models.models_name == 'InceptionTimeModified':
-                                            evaluation_result = evaluate.evaluate_inception_fold(X_validation, y_validation, loaded_model)
-                                            all_auc_scores.append(evaluation_result['auc'])
-                                            all_brier_scores.append(evaluation_result['brier'])
-                                        elif config_models.models_name == 'LstmTimeModified':
-                                            evaluation_result = evaluate.evaluate_lstm_fold(fold_idx, X_validation, y_validation, loaded_model)
-                                            all_auc_scores.append(evaluation_result['auc'])
-                                            all_brier_scores.append(evaluation_result['brier'])
-                                        elif config_models.extraction_type == 'TSFEL':
-                                            evaluation_result = evaluate.evaluate_tsfel_fold(fold_idx, X_train, X_validation, y_train, y_validation, loaded_model, calibration.value)
-                                            all_validation_scores.append(evaluation_result['test_score'])
-                                            all_train_scores.append(evaluation_result['train_score'])
-                                            all_y_true_report.extend(evaluation_result['y_test'])
-                                            all_y_pred_report.extend(evaluation_result['y_pred_test'])
-                                        else:
-                                            raise ValueError(f"Unsupported model or extraction type: {config_models.models_name}")
-                                        # Legacy evaluation API: these keys still use the word 'test',
-                                        # but they contain the current outer validation fold.
-                                        all_y_validation_global.extend(evaluation_result['y_test'])
-                                        all_probas_uncalib.extend(evaluation_result['probas_uncalib'])
-                                        all_probas_calib.extend(evaluation_result['probas_calib'])
-                                print('\n' + '=' * 20 + ' GLOBAL CROSS-VALIDATION SUMMARY ' + '=' * 20)
-                                all_y_validation_global = np.array(all_y_validation_global)
-                                all_probas_uncalib = np.array(all_probas_uncalib)
-                                all_probas_calib = np.array(all_probas_calib)
                                 effective_calibration = (
                                     calibration.value
                                     if not is_score_mode
                                     else False
                                 )
-                                if is_score_mode:
-                                     print(
-                                        f"Score evaluation completed on "
-                                        f"{len(all_y_validation_global)} pooled validation patients."
+
+                                update_progress("Evaluating the 5 folds")
+
+                                for fold_idx in range(5):
+                                    update_progress(
+                                        f"Evaluating fold {fold_idx + 1}/5"
                                     )
-                                elif config_models.extraction_type == 'TSFEL':
-                                    mean_acc = np.mean(all_validation_scores)
-                                    std_acc = np.std(all_validation_scores)
-                                    print(f'Mean accuracy: {mean_acc:.4f} (± {std_acc:.4f})')
-                                    print("\nAggregated classification report across all 5 folds:")
-                                    print(classification_report(all_y_true_report, all_y_pred_report, target_names=['Alive', 'Deceased'], zero_division=0))
-                                else:
-                                    mean_auc, std_auc = (np.mean(all_auc_scores), np.std(all_auc_scores))
-                                    mean_brier, std_brier = (np.mean(all_brier_scores), np.std(all_brier_scores))
-                                    print(f'Mean AUC: {mean_auc:.4f} (± {std_auc:.4f})')
-                                    print(f'Mean Brier score: {mean_brier:.4f} (± {std_brier:.4f})')
-                                print('=' * 79)
-                                print('\nGenerating the pooled calibration curve...')
-                                print(f'DEBUG SIZES -> y_true: {len(all_y_validation_global)}, uncalib: {len(all_probas_uncalib)}, calib: {len(all_probas_calib)}')
-                                sfu.calibration_curve_homemade(all_probas_uncalib, all_probas_calib, all_y_validation_global, config_models.models_name, effective_calibration, save_figure.value, output_dir, config_transparent, calibration_mode.value)
-                                probabilities = all_probas_calib
-                                y_validation = all_y_validation_global
 
-                                if RUN_LASSO:
+                                    print(
+                                        f"\n─────────────────── "
+                                        f"Evaluating Fold {fold_idx + 1}/5 "
+                                        f"───────────────────"
+                                    )
+
+                                    # =========================================================
+                                    # Score mode
+                                    # =========================================================
+                                    if is_score_mode:
+                                        X_validation = folds_X_validation[fold_idx]
+                                        y_validation_fold = folds_y_validation[fold_idx]
+
+                                        fold_y_true = np.asarray(
+                                            y_validation_fold,
+                                            dtype=int,
+                                        ).reshape(-1)
+
+                                        fold_probas_uncalib = np.asarray(
+                                            X_validation,
+                                            dtype=float,
+                                        ).reshape(-1)
+
+                                        # The clinical score is already a probability.
+                                        # No additional calibration is applied.
+                                        fold_probas_calib = (
+                                            fold_probas_uncalib.copy()
+                                        )
+
+                                        print(
+                                            f"[SCORE] Fold {fold_idx + 1}: "
+                                            f"{len(fold_y_true)} patients."
+                                        )
+
+                                    # =========================================================
+                                    # Model mode
+                                    # =========================================================
+                                    else:
+                                        X_train = folds_X_train[fold_idx]
+                                        X_validation = folds_X_validation[fold_idx]
+
+                                        y_train = folds_y_train[fold_idx]
+                                        y_validation_fold = folds_y_validation[fold_idx]
+
+                                        loaded_model = exp.get_model_path(
+                                            config_models.models_name,
+                                            fold_idx,
+                                            extension,
+                                            uses_optuna_config=uses_optuna_config,
+                                        )
+
+                                        print(
+                                            "Loaded model:",
+                                            loaded_model,
+                                        )
+
+                                        if (
+                                            config_models.models_name
+                                            == "InceptionTimeModified"
+                                        ):
+                                            evaluation_result = (
+                                                evaluate.evaluate_inception_fold(
+                                                    X_validation,
+                                                    y_validation_fold,
+                                                    loaded_model,
+                                                )
+                                            )
+
+                                        elif (
+                                            config_models.models_name
+                                            == "LstmTimeModified"
+                                        ):
+                                            evaluation_result = (
+                                                evaluate.evaluate_lstm_fold(
+                                                    fold_idx,
+                                                    X_validation,
+                                                    y_validation_fold,
+                                                    loaded_model,
+                                                )
+                                            )
+
+                                        elif (
+                                            config_models.extraction_type
+                                            == "TSFEL"
+                                        ):
+                                            evaluation_result = (
+                                                evaluate.evaluate_tsfel_fold(
+                                                    fold_idx,
+                                                    X_train,
+                                                    X_validation,
+                                                    y_train,
+                                                    y_validation_fold,
+                                                    loaded_model,
+                                                    calibration.value,
+                                                )
+                                            )
+
+                                            # Kept only for the accuracy summary and
+                                            # classification report.
+                                            all_validation_scores.append(
+                                                evaluation_result["test_score"]
+                                            )
+
+                                            all_train_scores.append(
+                                                evaluation_result["train_score"]
+                                            )
+
+                                            all_y_true_report.extend(
+                                                evaluation_result["y_test"]
+                                            )
+
+                                            all_y_pred_report.extend(
+                                                evaluation_result["y_pred_test"]
+                                            )
+
+                                        else:
+                                            raise ValueError(
+                                                "Unsupported model or extraction type: "
+                                                f"{config_models.models_name}"
+                                            )
+
+                                        fold_y_true = np.asarray(
+                                            evaluation_result["y_test"],
+                                            dtype=int,
+                                        ).reshape(-1)
+
+                                        fold_probas_uncalib = np.asarray(
+                                            evaluation_result["probas_uncalib"],
+                                            dtype=float,
+                                        ).reshape(-1)
+
+                                        raw_fold_probas_calib = (
+                                            evaluation_result.get("probas_calib")
+                                        )
+
+                                        # Some evaluation functions may return None when
+                                        # calibration is disabled.
+                                        if raw_fold_probas_calib is None:
+                                            fold_probas_calib = (
+                                                fold_probas_uncalib.copy()
+                                            )
+                                        else:
+                                            fold_probas_calib = np.asarray(
+                                                raw_fold_probas_calib,
+                                                dtype=float,
+                                            ).reshape(-1)
+
+                                    # =========================================================
+                                    # Checks shared by all models and score mode
+                                    # =========================================================
+                                    if (
+                                        fold_y_true.shape[0]
+                                        != fold_probas_uncalib.shape[0]
+                                    ):
+                                        raise ValueError(
+                                            f"Fold {fold_idx + 1}: y_true and "
+                                            "uncalibrated probabilities have different "
+                                            f"lengths: {len(fold_y_true)} != "
+                                            f"{len(fold_probas_uncalib)}."
+                                        )
+
+                                    if (
+                                        fold_y_true.shape[0]
+                                        != fold_probas_calib.shape[0]
+                                    ):
+                                        raise ValueError(
+                                            f"Fold {fold_idx + 1}: y_true and "
+                                            "calibrated probabilities have different "
+                                            f"lengths: {len(fold_y_true)} != "
+                                            f"{len(fold_probas_calib)}."
+                                        )
+
+                                    # Select the probabilities corresponding to the
+                                    # configuration that will be reported.
+                                    fold_probabilities = (
+                                        fold_probas_calib
+                                        if effective_calibration
+                                        else fold_probas_uncalib
+                                    )
+
+                                    # =========================================================
+                                    # Metrics computed independently on this fold
+                                    # =========================================================
+                                    current_fold_metrics = (
+                                        sfu.compute_binary_metrics(
+                                            probas=fold_probabilities,
+                                            y_true=fold_y_true,
+                                        )
+                                    )
+
+                                    fold_metrics.append(
+                                        current_fold_metrics
+                                    )
+
+                                    print(
+                                        f"[FOLD {fold_idx + 1}] "
+                                        f"AUC={current_fold_metrics['auc']:.4f}, "
+                                        f"AUPRC={current_fold_metrics['auprc']:.4f}, "
+                                        f"Brier={current_fold_metrics['brier']:.4f}, "
+                                        f"ICI={current_fold_metrics['ici']:.4f}"
+                                    )
+
+                                    # =========================================================
+                                    # OOF pooling
+                                    # Each validation patient is appended exactly once.
+                                    # =========================================================
+                                    all_y_validation_global.extend(
+                                        fold_y_true.tolist()
+                                    )
+
+                                    all_probas_uncalib.extend(
+                                        fold_probas_uncalib.tolist()
+                                    )
+
+                                    all_probas_calib.extend(
+                                        fold_probas_calib.tolist()
+                                    )
+
+
+                                # =============================================================
+                                # End of the five-fold loop
+                                # =============================================================
+
+                                if len(fold_metrics) != 5:
+                                    raise RuntimeError(
+                                        "Five fold metric dictionaries were expected, "
+                                        f"but {len(fold_metrics)} were collected."
+                                    )
+
+                                # Mean and standard deviation across the five fold metrics.
+                                fold_metrics_summary = (
+                                    sfu.summarize_fold_metrics(
+                                        fold_metrics,
+                                        ddof=1,
+                                    )
+                                )
+
+                                print(
+                                    "\n"
+                                    + "=" * 20
+                                    + " FOLD METRICS SUMMARY "
+                                    + "=" * 20
+                                )
+
+                                for metric_name, metric_summary in (
+                                    fold_metrics_summary.items()
+                                ):
+                                    print(
+                                        f"{metric_name}: "
+                                        f"{metric_summary['mean']:.4f} "
+                                        f"(± {metric_summary['std']:.4f})"
+                                    )
+
+                                # Convert pooled OOF data only after all folds have
+                                # been appended.
+                                all_y_validation_global = np.asarray(
+                                    all_y_validation_global,
+                                    dtype=int,
+                                )
+
+                                all_probas_uncalib = np.asarray(
+                                    all_probas_uncalib,
+                                    dtype=float,
+                                )
+
+                                all_probas_calib = np.asarray(
+                                    all_probas_calib,
+                                    dtype=float,
+                                )
+
+                                if not (
+                                    len(all_y_validation_global)
+                                    == len(all_probas_uncalib)
+                                    == len(all_probas_calib)
+                                ):
+                                    raise RuntimeError(
+                                        "The pooled OOF arrays are not aligned: "
+                                        f"y_true={len(all_y_validation_global)}, "
+                                        f"uncalibrated={len(all_probas_uncalib)}, "
+                                        f"calibrated={len(all_probas_calib)}."
+                                    )
+
+                                print(
+                                    "\n"
+                                    + "=" * 20
+                                    + " GLOBAL CROSS-VALIDATION SUMMARY "
+                                    + "=" * 20
+                                )
+
+                                if is_score_mode:
+                                    print(
+                                        "Score evaluation completed on "
+                                        f"{len(all_y_validation_global)} "
+                                        "pooled validation patients."
+                                    )
+
+                                elif config_models.extraction_type == "TSFEL":
+                                    mean_acc = np.mean(
+                                        all_validation_scores
+                                    )
+
+                                    std_acc = np.std(
+                                        all_validation_scores,
+                                        ddof=1,
+                                    )
+
+                                    print(
+                                        f"Mean accuracy: {mean_acc:.4f} "
+                                        f"(± {std_acc:.4f})"
+                                    )
+
+                                    print(
+                                        "\nAggregated classification report "
+                                        "across all 5 folds:"
+                                    )
+
+                                    print(
+                                        classification_report(
+                                            all_y_true_report,
+                                            all_y_pred_report,
+                                            target_names=[
+                                                "Alive",
+                                                "Deceased",
+                                            ],
+                                            zero_division=0,
+                                        )
+                                    )
+
+                                print("=" * 79)
+
+                                print(
+                                    "\nGenerating the pooled "
+                                    "out-of-fold calibration curve..."
+                                )
+
+                                print(
+                                    "DEBUG OOF SIZES -> "
+                                    f"y_true: {len(all_y_validation_global)}, "
+                                    f"uncalib: {len(all_probas_uncalib)}, "
+                                    f"calib: {len(all_probas_calib)}"
+                                )
+
+                                sfu.calibration_curve_homemade(
+                                    all_probas_uncalib,
+                                    all_probas_calib,
+                                    all_y_validation_global,
+                                    config_models.models_name,
+                                    effective_calibration,
+                                    save_figure.value,
+                                    output_dir,
+                                    config_transparent,
+                                    calibration_mode.value,
+                                )
+
+                                # Probabilities used for all final OOF figures and metrics.
+                                probabilities = (
+                                    all_probas_calib
+                                    if effective_calibration
+                                    else all_probas_uncalib
+                                )
+
+                                y_validation = (
+                                    all_y_validation_global
+                                )
+                                if RUN_LASSO and config_models.models_name == 'Logistic Regression Lasso TSFEL':
                                     print('Lasso path started')
-                                    if config_models.models_name == 'Logistic Regression Lasso TSFEL':
-                                        print('Generating Lasso paths with warm start and multiprocessing...')
-                                        c_grid = np.logspace(-4, 4, 100)
+                                    print('Generating Lasso paths with warm start and multiprocessing...')
+                                    c_grid = np.logspace(-4, 4, 100)
 
-                                        def process_single_fold(fold_index):
-                                            file_X = exp.get_lasso_path('X', fold_index, 'parquet')
-                                            file_y = exp.get_lasso_path('y', fold_index, 'npy')
-                                            x_exact_fit = pl.read_parquet(file_X).to_numpy()
-                                            y_exact_fit = np.load(file_y)
-                                            model_path = exp.get_model_path('Logistic Regression Lasso TSFEL', fold_index, extension)
-                                            l1_model = joblib.load(model_path)
-                                            best_c = l1_model.C
-                                            lr_path_model = LogisticRegression(l1_ratio=1.0, solver='saga', max_iter=100001, random_state=seed, warm_start=True)
-                                            coefficient_list = []
-                                            sorted_Cs = np.sort(c_grid)
-                                            for c_value in sorted_Cs:
-                                                lr_path_model.set_params(C=c_value)
-                                                lr_path_model.fit(x_exact_fit, y_exact_fit)
-                                                coefficient_list.append(lr_path_model.coef_[0].copy())
-                                            return (sorted_Cs, np.array(coefficient_list), best_c, x_exact_fit.shape[1])
-                                        results = Parallel(n_jobs=-1)((delayed(process_single_fold)(f_idx) for f_idx in range(5)))
-                                        for fold_idx_L1, (sorted_Cs, coefficient_path, best_c, n_features) in enumerate(results):
-                                            plt.figure(figsize=(10, 6))
-                                            plt.plot(sorted_Cs, coefficient_path, alpha=0.7)
-                                            plt.axvline(x=best_c, color='black', linestyle='--', linewidth=2, label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_c:.4f}')
-                                            plt.xscale('log')
-                                            plt.xlabel('Paramètre de régularisation C (Log Scale)')
-                                            plt.ylabel(f'Coefficients ({n_features} features)')
-                                            plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
-                                            plt.grid(True, which='both', ls='-', alpha=0.5)
-                                            plt.legend()
-                                            if save_figure.value:
-                                                filename = f'L1_Log_path_fold_{fold_idx_L1 + 1}.png'
-                                                plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches='tight', transparent=config_transparent)
-                                            plt.show()
+                                    def process_single_fold(fold_index):
+                                        file_X = exp.get_lasso_path('X', fold_index, 'parquet')
+                                        file_y = exp.get_lasso_path('y', fold_index, 'npy')
+                                        x_exact_fit = pl.read_parquet(file_X).to_numpy()
+                                        y_exact_fit = np.load(file_y)
+                                        model_path = exp.get_model_path('Logistic Regression Lasso TSFEL', fold_index, extension)
+                                        l1_model = joblib.load(model_path)
+                                        best_c = l1_model.C
+                                        lr_path_model = LogisticRegression(l1_ratio=1.0, solver='saga', max_iter=100001, random_state=seed, warm_start=True)
+                                        coefficient_list = []
+                                        sorted_Cs = np.sort(c_grid)
+                                        for c_value in sorted_Cs:
+                                            lr_path_model.set_params(C=c_value)
+                                            lr_path_model.fit(x_exact_fit, y_exact_fit)
+                                            coefficient_list.append(lr_path_model.coef_[0].copy())
+                                        return (sorted_Cs, np.array(coefficient_list), best_c, x_exact_fit.shape[1])
+                                    results = Parallel(n_jobs=-1)((delayed(process_single_fold)(f_idx) for f_idx in range(5)))
+                                    for fold_idx_L1, (sorted_Cs, coefficient_path, best_c, n_features) in enumerate(results):
+                                        plt.figure(figsize=(10, 6))
+                                        plt.plot(sorted_Cs, coefficient_path, alpha=0.7)
+                                        plt.axvline(x=best_c, color='black', linestyle='--', linewidth=2, label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_c:.4f}')
+                                        plt.xscale('log')
+                                        plt.xlabel('Paramètre de régularisation C (Log Scale)')
+                                        plt.ylabel(f'Coefficients ({n_features} features)')
+                                        plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
+                                        plt.grid(True, which='both', ls='-', alpha=0.5)
+                                        plt.legend()
+                                        if save_figure.value:
+                                            filename = f'L1_Log_path_fold_{fold_idx_L1 + 1}.png'
+                                            plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches='tight', transparent=config_transparent)
+                                        plt.show()
+                                update_progress(
+                                    "Generating final metrics and figures"
+                                )
 
-                                update_progress("Generating final metrics and figures")
-                                auc_final, fpr, tpr, thresholds_roc = sfu.roc_curve_homemade(probabilities, y_validation, config_models.models_name, save_figure.value, output_dir, config_transparent)
+                                auc_final, fpr, tpr, thresholds_roc = (
+                                    sfu.roc_curve_homemade(
+                                        probabilities,
+                                        y_validation,
+                                        config_models.models_name,
+                                        save_figure.value,
+                                        output_dir,
+                                        config_transparent,
+                                    )
+                                )
+
                                 plt.close("all")
-                                auprc_final, precision, recall, thresholds = sfu.prc_curve_homemade(probabilities, y_validation, config_models.models_name, save_figure.value, output_dir, config_transparent)
+
+                                auprc_final, precision, recall, thresholds = (
+                                    sfu.prc_curve_homemade(
+                                        probabilities,
+                                        y_validation,
+                                        config_models.models_name,
+                                        save_figure.value,
+                                        output_dir,
+                                        config_transparent,
+                                    )
+                                )
+
                                 plt.close("all")
-                                non_overlap_area, asymmetric_uncertainty, mean_risk_diff, mean_p1 = sfu.kde_plot_homemade(probabilities, y_validation, config_models.models_name, save_figure.value, output_dir, config_transparent)
-                                plt.close("all")
-                                best_f1, best_t = sfu.f1_score_evolution(probabilities, y_validation, config_models.models_name, save_figure.value, output_dir, config_transparent)
-                                plt.close("all")
-                                y_pred, mcc = sfu.confusion_matrix_homemade(probabilities, y_validation, best_t, config_models.models_name, save_figure.value, output_dir, config_transparent)
-                                plt.close("all")
-                                global_brier = sfu.brier_evolution(probabilities, y_validation, save_figure.value, output_dir, transparent=config_transparent)
-                                plt.close("all")
-                                sfu.calibration_per_risk_brackets(probabilities, y_validation, save_figure.value, output_dir, transparent=config_transparent)
-                                calibration_stats = sfu.get_calibration_stats(
+
+                                (
+                                    non_overlap_area,
+                                    asymmetric_uncertainty,
+                                    mean_risk_diff,
+                                    mean_p1,
+                                ) = sfu.kde_plot_homemade(
                                     probabilities,
                                     y_validation,
+                                    config_models.models_name,
+                                    save_figure.value,
+                                    output_dir,
+                                    config_transparent,
+                                )
+
+                                plt.close("all")
+
+                                best_f1, best_t = (
+                                    sfu.f1_score_evolution(
+                                        probabilities,
+                                        y_validation,
+                                        config_models.models_name,
+                                        save_figure.value,
+                                        output_dir,
+                                        config_transparent,
+                                    )
+                                )
+
+                                plt.close("all")
+
+                                y_pred, mcc = (
+                                    sfu.confusion_matrix_homemade(
+                                        probabilities,
+                                        y_validation,
+                                        best_t,
+                                        config_models.models_name,
+                                        save_figure.value,
+                                        output_dir,
+                                        config_transparent,
+                                    )
+                                )
+
+                                plt.close("all")
+
+                                global_brier = sfu.brier_evolution(
+                                    probabilities,
+                                    y_validation,
+                                    save_figure.value,
+                                    output_dir,
+                                    transparent=config_transparent,
+                                )
+
+                                plt.close("all")
+
+                                sfu.calibration_per_risk_brackets(
+                                    probabilities,
+                                    y_validation,
+                                    save_figure.value,
+                                    output_dir,
+                                    transparent=config_transparent,
+                                )
+
+                                calibration_stats = (
+                                    sfu.get_calibration_stats(
+                                        probabilities,
+                                        y_validation,
+                                    )
                                 )
 
                                 all_results = {
-                                    "y_true": y_validation,
-                                    "probas": probabilities,
-                                    "preds": y_pred,
-                                    "f1_score": best_f1,
-                                    "mcc": mcc,
-                                    "auc": auc_final,
-                                    "brier": global_brier,
-                                    "calibration_intercept": calibration_stats["intercept"],
-                                    "calibration_slope": calibration_stats["slope"],
-                                    "ici": calibration_stats["ici"],
-                                    "e90": calibration_stats["e90"],
-                                    "eMax" : calibration_stats["eMax"],
+                                    # =========================================================
+                                    # Pooled OOF predictions
+                                    # =========================================================
+                                    "y_true_oof": y_validation,
+
+                                    "probas_oof": probabilities,
+
+                                    "probas_uncalib_oof": (
+                                        all_probas_uncalib
+                                    ),
+
+                                    "probas_calib_oof": (
+                                        all_probas_calib
+                                    ),
+                                    "preds_oof": y_pred,
+
+                                    # =========================================================
+                                    # Threshold-dependent OOF metrics
+                                    # =========================================================
+                                    "f1_score_oof": best_f1,
+                                    "mcc_oof": mcc,
+
+                                    # =========================================================
+                                    # Discrimination OOF metrics
+                                    # =========================================================
+                                    "auc_oof": auc_final,
+                                    "auprc_oof": auprc_final,
+
+                                    # =========================================================
+                                    # Calibration OOF metrics
+                                    # =========================================================
+                                    "brier_oof": global_brier,
+
+                                    "calibration_intercept_oof": (
+                                        calibration_stats["intercept"]
+                                    ),
+
+                                    "calibration_slope_oof": (
+                                        calibration_stats["slope"]
+                                    ),
+
+                                    "ici_oof": calibration_stats["ici"],
+
+                                    "e90_oof": calibration_stats["e90"],
+
+                                    "eMax_oof": calibration_stats["eMax"],
+
+                                    # =========================================================
+                                    # Complete fold information
+                                    # =========================================================
+                                    "fold_metrics": fold_metrics,
+                                    "fold_metrics_summary": (
+                                        fold_metrics_summary
+                                    ),
+
+                                    # =========================================================
+                                    # Other pooled OOF metrics
+                                    # =========================================================
                                     "non_overlap_area": non_overlap_area,
-                                    "asymetric_incertitude": asymmetric_uncertainty,
+
+                                    "asymetric_incertitude": (
+                                        asymmetric_uncertainty
+                                    ),
+
                                     "mean_risk_diff": mean_risk_diff,
+
                                     "mean_deaths_prediction": mean_p1,
                                 }
-                                update_progress("Saving final results")
-                                output_dir.mkdir(parents=True, exist_ok=True)
-                                joblib.dump(all_results, output_dir / 'all_res.joblib')
+
+                                # Add, for each metric:
+                                # - the five independent fold values;
+                                # - their mean;
+                                # - their sample standard deviation.
+                                for metric_name, metric_summary in (
+                                    fold_metrics_summary.items()
+                                ):
+                                    all_results[
+                                        f"{metric_name}_per_fold"
+                                    ] = metric_summary["fold_values"]
+
+                                    all_results[
+                                        f"{metric_name}_mean"
+                                    ] = metric_summary["mean"]
+
+                                    all_results[
+                                        f"{metric_name}_std"
+                                    ] = metric_summary["std"]
+
+
+                                update_progress(
+                                    "Saving final results"
+                                )
+
+                                output_dir.mkdir(
+                                    parents=True,
+                                    exist_ok=True,
+                                )
+
+                                joblib.dump(
+                                    all_results,
+                                    output_dir / "all_res.joblib",
+                                )
+
                                 if RUN_COMPARISON:
                                     # List of all candidate models to evaluate.
                                     model_candidates = [
@@ -1133,6 +1620,8 @@ for mode_run in mode_names:
                                 continue # Prevent one failed experiment from stopping all remaining experiments.
                             finally:
                                 plt.close("all")
-
 update_progress("All experiments have completed")
 print(f"[PIPELINE] Normal completion. Full log: {_LOG_PATH}", flush=True)
+
+
+
