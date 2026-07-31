@@ -16,6 +16,10 @@ from utilitaries.models.lstmTimeModified import (
     predict_proba_lstm,
     train_lstm_model,
 )
+from utilitaries.models.vanillaTransformerModified import (
+    predict_proba as predict_proba_vt,
+    train_vanilla_transformer,
+)
 
 
 class TemperatureScaledEstimator:
@@ -526,6 +530,37 @@ def fit_model_by_name(
             roc_auc_score(
                 y_val,
                 predict_proba_lstm(
+                    model,
+                    X_val,
+                    T=T,
+                ),
+            ),
+        )
+
+    elif model_name == "VanillaTransformerModified":
+        model, T, _, _ = train_vanilla_transformer(
+            X_train,
+            y_train,
+            X_val=X_val,
+            y_val=y_val,
+            save_best_path=save_path,
+            seed=seed,
+            **parameters,
+        )
+
+        return (
+            model,
+            roc_auc_score(
+                y_train,
+                predict_proba_vt(
+                    model,
+                    X_train,
+                    T=T,
+                ),
+            ),
+            roc_auc_score(
+                y_val,
+                predict_proba_vt(
                     model,
                     X_val,
                     T=T,

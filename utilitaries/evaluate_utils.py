@@ -15,6 +15,11 @@ from utilitaries.models.lstmTimeModified import (
     load_lstm_from_checkpoint,
     predict_proba_lstm,
 )
+from utilitaries.models.vanillaTransformerModified import (
+    evaluate_on_test as evaluate_vt_on_test,
+    load_model_from_checkpoint as load_vt_from_checkpoint,
+    predict_proba as predict_proba_vt,
+)
 from utilitaries.training_utils import get_root_estimator
 
 
@@ -271,6 +276,73 @@ def evaluate_lstm_fold(
         X_test,
         T=temperature,
         calibration_bias = bias
+    )
+
+    return {
+        "auc": auc,
+        "brier": brier,
+        "y_test": y_test,
+        "probas_uncalib": uncalibrated_probabilities,
+        "probas_calib": calibrated_probabilities,
+    }
+
+
+def evaluate_vanilla_transformer_fold(
+    fold_idx: int,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    loaded_model: str | Path,
+) -> dict[str, Any]:
+    """Evaluate a VanillaTransformer model on one test fold.
+
+    The checkpoint is evaluated using the project evaluation utility, then
+    reloaded to generate both uncalibrated and temperature-calibrated
+    probabilities.
+
+    Args:
+        fold_idx:
+            Zero-based fold index.
+        X_test:
+            Test time-series data.
+        y_test:
+            Ground-truth test labels.
+        loaded_model:
+            Path to the saved model checkpoint.
+
+    Returns:
+        A dictionary containing the AUC, Brier score, test labels,
+        uncalibrated probabilities, and calibrated probabilities.
+    """
+    print(
+        f"\n[DEBUG EVAL - Fold {fold_idx + 1}] "
+        f"X_test shape: {X_test.shape}"
+    )
+
+    auc, brier, _ = evaluate_vt_on_test(
+        X_test,
+        y_test,
+        loaded_model,
+    )
+
+    model, _, temperature, bias = load_vt_from_checkpoint(
+        loaded_model
+    )
+
+    # T=1.0 leaves the logits unchanged and therefore produces
+    # uncalibrated probabilities.
+    uncalibrated_probabilities = predict_proba_vt(
+        model,
+        X_test,
+        T=1.0,
+        calibration_bias=0,
+    )
+
+    # Apply the temperature learned during calibration.
+    calibrated_probabilities = predict_proba_vt(
+        model,
+        X_test,
+        T=temperature,
+        calibration_bias=bias,
     )
 
     return {
