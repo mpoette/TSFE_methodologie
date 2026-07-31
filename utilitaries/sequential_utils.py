@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-import utilitaries.marimo_utils as mo_utils
+import utilitaries.config_utils as mo_utils
 
 
 @dataclass(frozen=True)
@@ -213,7 +213,7 @@ def create_pipeline_config(
     """Create the complete pipeline configuration from interface selections.
 
     The function retrieves the corresponding immutable configuration objects
-    from ``marimo_utils``, determines the required calibration strategy, and
+    from ``config_utils``, determines the required calibration strategy, and
     configures TSFEL extraction and class weighting according to the selected
     model.
 

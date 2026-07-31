@@ -30,6 +30,333 @@ from pathlib import Path
 import utilitaries.evaluate_utils as evaluate
 
 
+def plot_collected_learning_curve(
+    sample_sizes,
+    train_matrix,
+    val_matrix,
+    model_name="Model",
+    folder="",
+    savefig=True,
+    transparent=True,
+):
+    """Plot a learning curve aggregated across multiple training folds.
+
+    The function computes mean and standard deviation of AUC-ROC scores
+    across folds at each training fraction, then plots the training and
+    validation curves with a volatility band.
+
+    Args:
+        sample_sizes:
+            Array-like of sample sizes corresponding to each training
+            fraction (e.g., [200, 400, 600, 800, 1000]).
+        train_matrix:
+            NumPy array of shape ``(n_folds, n_stages)`` containing the
+            training AUC-ROC scores at each stage for each fold.
+        val_matrix:
+            NumPy array of shape ``(n_folds, n_stages)`` containing the
+            validation (out-of-fold) AUC-ROC scores at each stage for
+            each fold.
+        model_name:
+            Model name displayed in the figure title.
+        folder:
+            Output directory for the saved figure.
+        savefig:
+            Whether to save the generated figure.
+        transparent:
+            Whether the saved figure should use a transparent background.
+
+    Returns:
+        None.
+    """
+    train_matrix = np.asarray(train_matrix, dtype=float)
+    val_matrix = np.asarray(val_matrix, dtype=float)
+    sample_sizes = np.asarray(sample_sizes, dtype=int)
+
+    train_mean = np.mean(train_matrix, axis=0)
+    val_mean = np.mean(val_matrix, axis=0)
+    val_std = np.std(val_matrix, axis=0, ddof=1)
+
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(
+        sample_sizes,
+        train_mean,
+        "o-",
+        color="crimson",
+        label="Training Score (Mean)",
+        linewidth=2,
+    )
+
+    plt.plot(
+        sample_sizes,
+        val_mean,
+        "o-",
+        color="royalblue",
+        label="Validation Score (Mean OOF)",
+        linewidth=2,
+    )
+
+    plt.fill_between(
+        sample_sizes,
+        val_mean - val_std,
+        val_mean + val_std,
+        alpha=0.15,
+        color="royalblue",
+        label="OOF Volatility (± 1 STD)",
+    )
+
+    plt.title(
+        f"Learning Curve — {model_name} (Embedded Fold Splitting)",
+        fontsize=13,
+        fontweight="bold",
+    )
+    plt.xlabel("Number of Training Samples (Aggregated)")
+    plt.ylabel("AUC-ROC Score")
+    plt.ylim(0.6, 1.0)
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+
+    if savefig and folder:
+        output_path = Path(folder)
+        output_path.mkdir(parents=True, exist_ok=True)
+        plt.savefig(
+            output_path / "learning_curve.png",
+            dpi=300,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
+
+    plt.show()
+
+
+def _format_calibration_label(
+    name,
+    stats,
+    extra_info=None,
+):
+    """Build a calibration legend entry from computed statistics.
+
+    Args:
+        name:
+            Base label (e.g. model name or dataset split).
+        stats:
+            Dictionary returned by :func:`get_calibration_stats`.
+        extra_info:
+            Optional suffix appended in parentheses, for example a
+            calibration strategy or a dataset split descriptor.
+
+    Returns:
+        A formatted string ready to be used as a matplotlib legend label.
+    """
+    suffix = f" ({extra_info})" if extra_info else ""
+
+    return (
+        f"{name}{suffix} "
+        f"(Int={stats['intercept']:.2f}, "
+        f"Slope={stats['slope']:.2f}, "
+        f"ICI={stats['ici']:.3f})"
+    )
+
+
+def plot_calibration_curves(
+    curve_specs,
+    y_true,
+    figsize=(8, 6),
+    title=None,
+    legend_loc="lower right",
+    legend_fontsize=9,
+    grid=True,
+    grid_alpha=0.6,
+    show_perfect=True,
+    save_figure=False,
+    output_dir=None,
+    filename="calibration_curve.png",
+    dpi=300,
+    transparent=False,
+    return_stats=False,
+):
+    """Plot one or more binned calibration curves on a single axes.
+
+    Each curve is described by a *specification* dictionary containing at
+    least ``"probas"`` and optionally styling hints.  Statistics are computed
+    via :func:`get_calibration_stats` using fixed 10% risk brackets, so the
+    bin centres align with :func:`calibration_per_risk_brackets`.
+
+    Args:
+        curve_specs (list[dict]):
+            List of curve specifications.  Each dictionary may contain:
+
+                - ``"probas"`` (array-like, **required**): predicted
+                  probabilities for the positive class.
+                - ``"name"`` (str, default ``"Curve N"``): base label.
+                - ``"extra_info"`` (str, optional): additional text appended
+                  to the label (e.g. ``"Platt"`` or ``"train"``).
+                - ``"color"`` (str, optional): matplotlib color specifier.
+                - ``"marker"`` (str, optional): matplotlib marker (default
+                  ``"s"``).
+                - ``"linestyle"`` (str, optional): matplotlib linestyle
+                  (default ``"-"``).
+
+        y_true (array-like):
+            Binary ground-truth labels shared across all curves.
+        figsize (tuple, optional):
+            Figure size in inches.  Defaults to ``(8, 6)``.
+        title (str, optional):
+            Figure title.  When omitted, a generic title is used.
+        legend_loc (str, optional):
+            Matplotlib legend location.  Defaults to ``"lower right"``.
+        legend_fontsize (int, optional):
+            Legend font size.  Defaults to ``9``.
+        grid (bool, optional):
+            Whether to display a grid.  Defaults to ``True``.
+        grid_alpha (float, optional):
+            Grid line transparency.  Defaults to ``0.6``.
+        show_perfect (bool, optional):
+            Whether to draw the *perfect calibration* reference line.
+            Defaults to ``True``.
+        save_figure (bool, optional):
+            Whether to save the figure to disk.  Defaults to ``False``.
+        output_dir (str | Path, optional):
+            Output directory.  Created if it does not exist.
+        filename (str, optional):
+            Output filename.  Defaults to ``"calibration_curve.png"``.
+        dpi (int, optional):
+            Resolution of the saved figure.  Defaults to ``300``.
+        transparent (bool, optional):
+            Whether to use a transparent background when saving.
+            Defaults to ``False``.
+        return_stats (bool, optional):
+            Whether to return the list of statistics dictionaries
+            (one per curve).  Defaults to ``False``.
+
+    Returns:
+        If ``return_stats`` is ``True``, a list of statistics dictionaries
+        (in the same order as ``curve_specs``).  Otherwise ``None``.
+
+    Raises:
+        ValueError:
+            If ``curve_specs`` is empty or any probability array has an
+            incompatible length.
+
+    Example:
+        Plot *uncalibrated* vs *calibrated* predictions for both a
+        **train** and a **test** split::
+
+            curves = [
+                {"probas": train_uncalib, "name": "Uncalibrated", "extra_info": "train"},
+                {"probas": train_calib,  "name": "Calibrated",   "extra_info": "train"},
+                {"probas": test_uncalib,  "name": "Uncalibrated", "extra_info": "test"},
+                {"probas": test_calib,    "name": "Calibrated",   "extra_info": "test"},
+            ]
+
+            plot_calibration_curves(
+                curves,
+                y_true=np.concatenate([train_labels, test_labels]),
+                title="Multi-split Calibration Comparison",
+            )
+    """
+    if not curve_specs:
+        raise ValueError("curve_specs must contain at least one curve.")
+
+    y_true = np.asarray(y_true, dtype=int).ravel()
+
+    # Resolve colors: assign a palette when not explicitly provided
+    provided_colors = [
+        spec.get("color")
+        for spec in curve_specs
+        if spec.get("color") is not None
+    ]
+
+    needed = len(curve_specs) - len(provided_colors)
+    palette = sns.color_palette("tab10", max(needed, 1))
+    color_iterator = iter(palette)
+
+    all_stats = []
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Perfect-calibration reference
+    if show_perfect:
+        ax.plot(
+            [0, 1],
+            [0, 1],
+            "k:",
+            label="Perfect calibration",
+        )
+
+    for idx, spec in enumerate(curve_specs):
+        probas = np.asarray(spec.get("probas"), dtype=float).ravel()
+
+        # Allow per-curve y_true when curves come from different splits
+        # (e.g. train vs holdout). Falls back to the global y_true.
+        curve_y_true = np.asarray(
+            spec.get("y_true", y_true), dtype=int
+        ).ravel()
+
+        if probas.shape[0] != curve_y_true.shape[0]:
+            raise ValueError(
+                f"Curve '{spec.get('name', idx)}': probas length "
+                f"({probas.shape[0]}) does not match y_true length "
+                f"({curve_y_true.shape[0]})."
+            )
+
+        stats = get_calibration_stats(probas, curve_y_true)
+        all_stats.append(stats)
+
+        name = spec.get("name", f"Curve {idx + 1}")
+        extra_info = spec.get("extra_info")
+        color = spec.get("color")
+        if color is None:
+            color = next(color_iterator)
+        marker = spec.get("marker", "s")
+        linestyle = spec.get("linestyle", "-")
+
+        label = _format_calibration_label(name, stats, extra_info)
+
+        ax.plot(
+            stats["x"],
+            stats["obs_rate"],
+            marker + linestyle,
+            color=color,
+            label=label,
+        )
+
+    # Axes configuration
+    ax.set_xlabel("Predicted Risk (10% brackets)")
+    ax.set_ylabel("True fraction of positives")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    ax.set_xticks(np.arange(0, 1.1, 0.1))
+
+    if title:
+        ax.set_title(title)
+
+    ax.legend(loc=legend_loc, fontsize=legend_fontsize)
+
+    if grid:
+        ax.grid(True, linestyle=":", alpha=grid_alpha)
+
+    fig.tight_layout()
+
+    # Save logic
+    if save_figure and output_dir is not None:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        fig.savefig(
+            output_path / filename,
+            dpi=dpi,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
+
+    plt.show()
+    plt.close(fig)
+
+    return all_stats if return_stats else None
+
+
 def calibration_curve_homemade(
     probas_uncalib,
     probas_calib,
@@ -41,10 +368,14 @@ def calibration_curve_homemade(
     transparent,
     calibration_mode="Platt",
 ):
-    """Plot a binned calibration curve for raw and calibrated predictions using get_calibration_stats.
+    """Plot a binned calibration curve for raw and calibrated predictions.
 
-    Points are placed on fixed 10% risk bracket centers (0.05, 0.15, ..., 0.95) to match
-    the binning strategy of calibration_per_risk_brackets.
+    .. deprecated::
+        Use :func:`plot_calibration_curves` for new code.  This wrapper
+        remains for backward compatibility.
+
+    Points are placed on fixed 10% risk bracket centers (0.05, 0.15, ..., 0.95)
+    to match the binning strategy of :func:`calibration_per_risk_brackets`.
 
     Args:
         probas_uncalib (array-like): Uncalibrated positive-class probabilities.
@@ -55,89 +386,251 @@ def calibration_curve_homemade(
         save_figure (bool): Whether to save the generated figure.
         output_dir (str or Path): Output directory for the figure.
         transparent (bool): Whether to save with a transparent background.
-        calibration_mode (str, optional): Name of calibration strategy. Defaults to "Platt".
+        calibration_mode (str, optional): Name of calibration strategy.
+            Defaults to "Platt".
 
     Returns:
         None.
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
+    curve_specs = [
+        {
+            "probas": probas_uncalib,
+            "name": f"Raw {model_name}",
+            "color": "red",
+        },
+    ]
 
-    ax.plot(
-        [0, 1],
-        [0, 1],
-        "k:",
-        label="Perfect calibration",
-    )
-
-    # 1. Compute stats & fixed bin coordinates for raw model
-    stats_uncalib = get_calibration_stats(probas_uncalib, y_test_global)
-
-    raw_label = (
-        f"Raw {model_name} "
-        f"(Int={stats_uncalib['intercept']:.2f}, "
-        f"Slope={stats_uncalib['slope']:.2f}, "
-        f"ICI={stats_uncalib['ici']:.3f})"
-    )
-
-    # Note: On utilise stats["x"] (centres des bins 0.05, 0.15...) et obs_rate
-    ax.plot(
-        stats_uncalib["x"],
-        stats_uncalib["obs_rate"],
-        "s-",
-        color="red",
-        label=raw_label,
-    )
-
-    # 2. Compute stats & fixed bin coordinates for calibrated model if requested
     if calibration and probas_calib is not None:
-        stats_calib = get_calibration_stats(probas_calib, y_test_global)
-
-        calib_label = (
-            f"Calibrated {model_name} ({calibration_mode}) "
-            f"(Int={stats_calib['intercept']:.2f}, "
-            f"Slope={stats_calib['slope']:.2f}, "
-            f"ICI={stats_calib['ici']:.3f})"
+        curve_specs.append(
+            {
+                "probas": probas_calib,
+                "name": f"Calibrated {model_name}",
+                "extra_info": calibration_mode,
+                "color": "blue",
+            }
         )
+
+    plot_calibration_curves(
+        curve_specs=curve_specs,
+        y_true=y_test_global,
+        title=(
+            "Global Calibration Curve (5-Fold Cross-Validation)\n"
+            f"Model: {model_name}"
+        ),
+        save_figure=save_figure,
+        output_dir=output_dir,
+        filename="calibration_curve.png",
+        transparent=transparent,
+    )
+
+
+def plot_collective_calibration_curves(
+    model_curves,
+    y_true,
+    n_bins=10,
+    bin_strategy="uniform",
+    figsize=(8, 8),
+    legend_loc="upper left",
+    legend_fontsize=9,
+    grid=True,
+    grid_alpha=0.6,
+    show_perfect=True,
+    save_figure=False,
+    output_dir=None,
+    filename="collective_calibration_curve.png",
+    dpi=300,
+    transparent=False,
+):
+    """Plot calibration curves for multiple models using sklearn's calibration_curve.
+
+    This function is designed for **collective / comparative** visualizations
+    where each model contributes its own out-of-fold (or hold-out) predictions
+    against a shared ground-truth vector.  Under the hood it relies on
+    :func:`sklearn.calibration.calibration_curve` rather than the homemade
+    Polars-based binning used by :func:`get_calibration_stats`.
+
+    Args:
+        model_curves (list[dict]):
+            List of model curve specifications.  Each dictionary may contain:
+
+                - ``"probas"`` (array-like, **required**): predicted
+                  probabilities for the positive class.
+                - ``"name"`` (str, default ``"Model N"``): display name.
+                - ``"color"`` (str, optional): matplotlib color specifier.
+                  When omitted, colours are drawn from ``seaborn.tab10``.
+                - ``"intercept_oof"`` (float, optional): OOF calibration
+                  intercept included in the legend label.
+                - ``"slope_oof"`` (float, optional): OOF calibration slope
+                  included in the legend label.
+                - ``"ici_oof"`` (float, optional): OOF Integrated Calibration
+                  Index included in the legend label.
+
+        y_true (array-like):
+            Shared binary ground-truth labels.
+        n_bins (int, optional):
+            Number of bins passed to :func:`sklearn.calibration_curve`.
+            Defaults to ``10``.
+        bin_strategy (str, optional):
+            Binning strategy passed to :func:`sklearn.calibration_curve`.
+            Defaults to ``"uniform"``.
+        figsize (tuple, optional):
+            Figure size in inches.  Defaults to ``(8, 8)``.
+        legend_loc (str, optional):
+            Matplotlib legend location.  Defaults to ``"upper left"``.
+        legend_fontsize (int, optional):
+            Legend font size.  Defaults to ``9``.
+        grid (bool, optional):
+            Whether to display a grid.  Defaults to ``True``.
+        grid_alpha (float, optional):
+            Grid line transparency.  Defaults to ``0.6``.
+        show_perfect (bool, optional):
+            Whether to draw the *perfect calibration* reference line.
+            Defaults to ``True``.
+        save_figure (bool, optional):
+            Whether to save the figure to disk.  Defaults to ``False``.
+        output_dir (str | Path, optional):
+            Output directory.  Created if it does not exist.
+        filename (str, optional):
+            Output filename.  Defaults to
+            ``"collective_calibration_curve.png"``.
+        dpi (int, optional):
+            Resolution of the saved figure.  Defaults to ``300``.
+        transparent (bool, optional):
+            Whether to use a transparent background when saving.
+            Defaults to ``False``.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        ValueError:
+            If ``model_curves`` is empty or any probability array has an
+            incompatible length.
+
+    Example:
+        Compare OOF calibration across several models::
+
+            models = [
+                {
+                    "probas": lr_probas_oof,
+                    "name": "Logistic_Regression_Lasso_TSFEL",
+                    "intercept_oof": 0.12,
+                    "slope_oof": 0.95,
+                    "ici_oof": 0.034,
+                },
+                {
+                    "probas": xgb_probas_oof,
+                    "name": "XGBoost_TSFEL",
+                    "intercept_oof": -0.05,
+                    "slope_oof": 1.10,
+                    "ici_oof": 0.028,
+                },
+            ]
+
+            plot_collective_calibration_curves(
+                models,
+                y_true=y_true_oof,
+                save_figure=True,
+                output_dir="outputs/comparison",
+            )
+    """
+    if not model_curves:
+        raise ValueError("model_curves must contain at least one model.")
+
+    y_true = np.asarray(y_true, dtype=int).ravel()
+
+    n_models = len(model_curves)
+    default_colors = sns.color_palette("tab10", max(n_models, 10))
+    color_idx = 0
+
+    fig, ax = plt.subplots(figsize=figsize, layout="constrained")
+
+    # Perfect-calibration reference
+    if show_perfect:
+        ax.plot(
+            [0, 1],
+            [0, 1],
+            "k:",
+            alpha=0.7,
+            label="Perfect calibration",
+        )
+
+    for idx, spec in enumerate(model_curves):
+        probas = np.asarray(spec.get("probas"), dtype=float).ravel()
+
+        if probas.shape[0] != y_true.shape[0]:
+            raise ValueError(
+                f"Model '{spec.get('name', idx)}': probas length "
+                f"({probas.shape[0]}) does not match y_true length "
+                f"({y_true.shape[0]})."
+            )
+
+        name = spec.get("name", f"Model {idx + 1}")
+        color = spec.get("color")
+        if color is None:
+            color = default_colors[color_idx % len(default_colors)]
+            color_idx += 1
+
+        intercept_oof = spec.get("intercept_oof")
+        slope_oof = spec.get("slope_oof")
+        ici_oof = spec.get("ici_oof")
+
+        # Build legend label
+        if intercept_oof is not None and slope_oof is not None and ici_oof is not None:
+            calibration_label = (
+                f"{name} "
+                f"(Int={intercept_oof:.2f}, "
+                f"Slope={slope_oof:.2f}, "
+                f"ICI={ici_oof:.3f})"
+            )
+        else:
+            calibration_label = name
+
+        # Detect constant predictions (degenerate case)
+        constant_predictions = np.all(probas == probas[0])
+
+        if constant_predictions:
+            prevalence = float(np.mean(y_true))
+            fop = np.array([prevalence])
+            mpv = np.array([float(probas[0])])
+        else:
+            fop, mpv = calibration_curve(
+                y_true,
+                probas,
+                n_bins=n_bins,
+                strategy=bin_strategy,
+            )
 
         ax.plot(
-            stats_calib["x"],
-            stats_calib["obs_rate"],
+            mpv,
+            fop,
             "s-",
-            color="blue",
-            label=calib_label,
+            label=calibration_label,
+            color=color,
+            linewidth=2,
         )
 
-    # Figure aesthetics
-    ax.set_xlabel("Predicted Risk (10% brackets)")
-    ax.set_ylabel("True fraction of positives")
+    # Axes configuration
+    ax.set_xlabel("Mean Predicted Probability")
+    ax.set_ylabel("True Fraction of Positives")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
 
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xticks(np.arange(0, 1.1, 0.1))
+    ax.legend(loc=legend_loc, fontsize=legend_fontsize)
 
-    ax.set_title(
-        "Global Calibration Curve (5-Fold Cross-Validation)\n"
-        f"Model: {model_name}"
-    )
-
-    ax.legend(loc="lower right", fontsize=9)
-    ax.grid(True, linestyle=":", alpha=0.6)
+    if grid:
+        ax.grid(True, linestyle=":", alpha=grid_alpha)
 
     fig.tight_layout()
 
     # Save logic
     if save_figure and output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        output_path = output_dir / f"calibration_curve.png"
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         fig.savefig(
-            output_path,
-            dpi=300,
+            output_path / filename,
+            dpi=dpi,
             bbox_inches="tight",
             transparent=transparent,
         )
@@ -213,59 +706,6 @@ def _validate_calibration_inputs(
         )
 
     return probas, y_test
-
-
-def _prepare_lowess_for_interpolation(
-    lowess_result,
-):
-    """Prepare LOWESS coordinates for numerical interpolation.
-    
-    Duplicate x-coordinates returned by LOWESS are grouped and their y-values
-    are averaged so that the resulting curve can safely be passed to
-    ``numpy.interp``.
-    
-    Args:
-        lowess_result:
-            Two-column array containing LOWESS x- and y-coordinates.
-    
-    Returns:
-        A tuple containing unique sorted x-coordinates and their averaged
-        y-coordinates.
-    """
-    lowess_x = lowess_result[:, 0]
-    lowess_y = lowess_result[:, 1]
-
-    unique_x, inverse_indices = np.unique(
-        lowess_x,
-        return_inverse=True,
-    )
-
-    unique_y = np.zeros(
-        unique_x.shape[0],
-        dtype=float,
-    )
-
-    counts = np.zeros(
-        unique_x.shape[0],
-        dtype=int,
-    )
-
-    np.add.at(
-        unique_y,
-        inverse_indices,
-        lowess_y,
-    )
-
-    np.add.at(
-        counts,
-        inverse_indices,
-        1,
-    )
-
-    unique_y = unique_y / counts
-
-    return unique_x, unique_y
-
 
 def get_calibration_stats(probas, y_test):
     """Compute calibration statistics and binned coordinates using 10% fixed risk brackets.
@@ -1019,6 +1459,7 @@ def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, tran
         if f1 > best_f1:
             best_f1 = f1
             best_t = t
+    plt.figure(figsize=(6, 6))
     plt.plot(_thresholds, f1s)
     plt.xlabel('Threshold')
     plt.ylabel('F1 score')

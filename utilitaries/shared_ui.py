@@ -2,7 +2,7 @@ import sys
 
 import marimo as mo
 
-import utilitaries.marimo_utils as mo_utils
+import utilitaries.config_utils as mo_utils
 
 
 def create_pipeline_widgets():

@@ -613,3 +613,25 @@ class Experiment:
         path = self._get_base_path("outputs", config_mode) / self._normalize_component(comparison_name)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def get_compare_figs_path(
+        self,
+        config_mode="",
+    ):
+        """Return the directory path for correlation comparison figures.
+
+        This path is shared across all models within the same experiment mode
+        and feature set, located at the base level (not model-specific).
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            config_mode (str): Optional preprocessing mode overriding the experiment
+                default configuration. Defaults to "".
+
+        Returns:
+            pathlib.Path: Path to the compare_figs directory.
+        """
+        path = self._get_base_path("inputs", config_mode) / "compare_figs"
+        path.mkdir(parents=True, exist_ok=True)
+        return path

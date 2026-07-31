@@ -10,23 +10,33 @@ import utilitaries.extract_data_utils as extract
 import utilitaries.features_extraction_utils as extract_feat
 
 
-def scaling(df_train: pl.DataFrame, df_test: pl.DataFrame):
+def scaling(
+    df_train: pl.DataFrame,
+    *dfs_to_transform: pl.DataFrame,
+):
     """Scale continuous numerical features using a StandardScaler.
 
     Boolean columns and numerical columns containing only binary values
     (0, 1, or null) are excluded from scaling.
 
     The scaler is fitted exclusively on the training set and then applied
-    to the test set.
+    to every additional dataset without refitting.
 
     Args:
         df_train:
-            Training DataFrame.
-        df_test:
-            Test DataFrame.
+            Training DataFrame used to fit the scaler.
+        *dfs_to_transform:
+            Validation, holdout, or other DataFrames to transform using the
+            scaler fitted on the training data.
 
     Returns:
-        A tuple containing the scaled training and test DataFrames.
+        A tuple containing the scaled training DataFrame followed by all
+        transformed DataFrames in their original argument order.
+
+    Raises:
+        ValueError:
+            If one of the additional DataFrames is missing a numerical column
+            required by the scaler fitted on the training set.
     """
     # Identify numerical columns while excluding the patient identifier.
     all_num_cols = df_train.select(
@@ -52,8 +62,21 @@ def scaling(df_train: pl.DataFrame, df_test: pl.DataFrame):
         if not is_binary:
             num_cols_to_scale.append(col)
 
+    # Return the original DataFrames when no continuous column is available.
     if not num_cols_to_scale:
-        return df_train, df_test
+        return (df_train, *dfs_to_transform)
+
+    # Ensure every dataset can be transformed with the training feature set.
+    for dataframe_index, dataframe in enumerate(dfs_to_transform):
+        missing_columns = sorted(
+            set(num_cols_to_scale) - set(dataframe.columns)
+        )
+
+        if missing_columns:
+            raise ValueError(
+                f"DataFrame {dataframe_index + 1} is missing columns required "
+                f"by the training scaler: {missing_columns}"
+            )
 
     # Fit the scaler exclusively on the training set.
     scaler = StandardScaler()
@@ -64,35 +87,40 @@ def scaling(df_train: pl.DataFrame, df_test: pl.DataFrame):
         .to_pandas()
     )
 
-    # Apply the fitted scaler to the test set.
-    test_scaled_values = scaler.transform(
-        df_test
-        .select(num_cols_to_scale)
-        .to_pandas()
-    )
-
-    # Replace the original numerical columns with their scaled values.
-    df_train_final = df_train.with_columns(
+    # Replace the original training columns with their scaled values.
+    scaled_train = df_train.with_columns(
         [
             pl.Series(
                 name,
-                train_scaled_values[:, i],
+                train_scaled_values[:, index],
             )
-            for i, name in enumerate(num_cols_to_scale)
+            for index, name in enumerate(num_cols_to_scale)
         ]
     )
 
-    df_test_final = df_test.with_columns(
-        [
-            pl.Series(
-                name,
-                test_scaled_values[:, i],
-            )
-            for i, name in enumerate(num_cols_to_scale)
-        ]
-    )
+    scaled_others = []
 
-    return df_train_final, df_test_final
+    # Apply the fitted scaler to validation, holdout, and any other dataset.
+    for dataframe in dfs_to_transform:
+        transformed_values = scaler.transform(
+            dataframe
+            .select(num_cols_to_scale)
+            .to_pandas()
+        )
+
+        scaled_dataframe = dataframe.with_columns(
+            [
+                pl.Series(
+                    name,
+                    transformed_values[:, index],
+                )
+                for index, name in enumerate(num_cols_to_scale)
+            ]
+        )
+
+        scaled_others.append(scaled_dataframe)
+
+    return (scaled_train, *scaled_others)
 
 
 def build_sequences(
@@ -518,7 +546,8 @@ def process_tsfel_fold(
 
     The pipeline performs patient selection, correlation and variance
     filtering, optional Boruta feature selection, class balancing, integrity
-    checks, and feature scaling.
+    checks, and feature scaling. The independent holdout is transformed with
+    the exact feature set and scaler learned from the current training fold.
 
     Args:
         fold_idx:
@@ -526,7 +555,7 @@ def process_tsfel_fold(
         train_idx:
             Training indices for the current fold.
         test_idx:
-            Test indices for the current fold.
+            Validation indices for the current fold.
         X:
             Dataset used to recover patient identifiers for the split.
         y:
@@ -536,16 +565,20 @@ def process_tsfel_fold(
         seed:
             Random seed used for feature selection and balancing.
         **kwargs:
-            Additional pipeline configuration values.
+            Additional pipeline configuration values, including the raw
+            independent holdout under ``holdout_init``.
 
     Returns:
-        A tuple containing training features, test features, training labels,
-        test labels, training groups, and balancing statistics.
+        A tuple containing training features, validation features, holdout
+        features, training labels, validation labels, holdout labels, training
+        groups, holdout patient identifiers, fold feature names, and balancing
+        statistics.
     """
     # Extract the fold configuration.
     patient_col = kwargs["patient_col"]
     target_col = kwargs["target_col"]
     train_init_tsfel = kwargs["train_init"]
+    holdout_init_tsfel = kwargs["holdout_init"]
     boruta_filter = kwargs["boruta_filter"]
     exp = kwargs["exp"]
     balance_method = kwargs["balance_method"]
@@ -566,47 +599,37 @@ def process_tsfel_fold(
     # Filter the precomputed TSFEL DataFrame for the current fold.
     train_fold_tsfel = (
         train_init_tsfel
-        .join(
-            train_patients,
-            on=patient_col,
-            how="inner",
-        )
+        .join(train_patients, on=patient_col, how="inner")
         .sort(patient_col)
     )
 
     test_fold_tsfel = (
         train_init_tsfel
-        .join(
-            test_patients,
-            on=patient_col,
-            how="inner",
-        )
+        .join(test_patients, on=patient_col, how="inner")
         .sort(patient_col)
     )
 
     # Remove correlated and zero-variance features.
+    corr_threshold = kwargs.get("corr_threshold", 0.9)
     train_clean, test_clean, keepVariableList_1 = (
         extract_feat.filtrage_corr_var(
             train_fold_tsfel,
             test_fold_tsfel,
             patient_col,
             target_col,
+            corr_threshold=corr_threshold,
         )
     )
 
+    # Optionally apply the fold-specific Boruta feature selection.
     if boruta_filter:
-        filename_train_boruta = (
-            exp.get_tsfel_boruta(
-                "train",
-                fold_idx,
-            )
+        filename_train_boruta = exp.get_tsfel_boruta(
+            "train",
+            fold_idx,
         )
-
-        filename_test_boruta = (
-            exp.get_tsfel_boruta(
-                "test",
-                fold_idx,
-            )
+        filename_test_boruta = exp.get_tsfel_boruta(
+            "test",
+            fold_idx,
         )
 
         if (
@@ -617,15 +640,8 @@ def process_tsfel_fold(
                 "Reading existing Boruta files for "
                 f"fold {fold_idx} (seed {seed})."
             )
-
-            train_clean = pl.read_parquet(
-                filename_train_boruta
-            )
-
-            test_clean = pl.read_parquet(
-                filename_test_boruta
-            )
-
+            train_clean = pl.read_parquet(filename_train_boruta)
+            test_clean = pl.read_parquet(filename_test_boruta)
         else:
             train_clean, test_clean, keepVariableList_2 = (
                 extract_feat.filtrage_boruta(
@@ -638,44 +654,75 @@ def process_tsfel_fold(
                 )
             )
 
-            train_clean.write_parquet(
-                filename_train_boruta
-            )
-
-            test_clean.write_parquet(
-                filename_test_boruta
-            )
+            train_clean.write_parquet(filename_train_boruta)
+            test_clean.write_parquet(filename_test_boruta)
 
             print(
                 "Saving Boruta results for "
                 f"fold {fold_idx} (seed {seed})."
             )
 
-            parent_folder2 = (
-                filename_train_boruta.parent
-            )
-
+            parent_folder = filename_train_boruta.parent
             np.save(
-                parent_folder2
-                / f"keepVariableList_1_fold_{fold_idx}.npy",
+                parent_folder / f"keepVariableList_1_fold_{fold_idx}.npy",
                 keepVariableList_1,
             )
-
             np.save(
-                parent_folder2
-                / f"keepVariableList_2_fold_{fold_idx}.npy",
+                parent_folder / f"keepVariableList_2_fold_{fold_idx}.npy",
                 keepVariableList_2,
             )
 
-    # Sort the fold data and apply class balancing.
-    train_clean = train_clean.sort(
-        patient_col
+    # Sort the fold data before alignment and balancing checks.
+    train_clean = train_clean.sort(patient_col)
+    test_clean = test_clean.sort(patient_col)
+
+    # Keep the exact final feature set selected for the current fold.
+    final_feature_names = (
+        train_clean
+        .select(pl.exclude(patient_col, target_col))
+        .columns
     )
 
-    test_clean = test_clean.sort(
-        patient_col
+    if not final_feature_names:
+        raise ValueError(
+            f"No TSFEL feature remains after filtering in fold {fold_idx}."
+        )
+
+    # Verify that the independent holdout contains every selected feature.
+    missing_holdout_columns = sorted(
+        set(final_feature_names) - set(holdout_init_tsfel.columns)
+    )
+    if missing_holdout_columns:
+        raise ValueError(
+            "The TSFEL holdout is missing fold-selected features: "
+            f"{missing_holdout_columns}"
+        )
+
+    # Select and order the holdout using the fold-specific feature set.
+    holdout_clean = (
+        holdout_init_tsfel
+        .select([patient_col, target_col, *final_feature_names])
+        .sort(patient_col)
     )
 
+    if holdout_clean.height != holdout_clean[patient_col].n_unique():
+        raise ValueError(
+            "The TSFEL holdout must contain exactly one row per patient."
+        )
+
+    # Preserve one identifier and one target value per holdout patient.
+    holdout_patient_ids = (
+        holdout_clean[patient_col]
+        .to_numpy()
+        .reshape(-1)
+    )
+    y_holdout = (
+        holdout_clean[target_col]
+        .to_numpy()
+        .reshape(-1)
+    )
+
+    # Apply class balancing only to the training fold.
     train_clean, stats = equilibrer_dataset_tabulaire(
         train_clean,
         patient_col,
@@ -686,66 +733,49 @@ def process_tsfel_fold(
 
     # Upsampling necessarily duplicates patient identifiers.
     if balance_method != "upsampling_50-50":
-        # Verify that each TSFEL row corresponds to exactly one patient.
-        assert (
-            train_clean.height
-            == train_clean[patient_col].n_unique()
-        ), (
+        assert train_clean.height == train_clean[patient_col].n_unique(), (
             "Train TSFEL alignment error in "
             f"fold {fold_idx}"
         )
-
-        assert (
-            test_clean.height
-            == test_clean[patient_col].n_unique()
-        ), (
-            "Test TSFEL alignment error in "
+        assert test_clean.height == test_clean[patient_col].n_unique(), (
+            "Validation TSFEL alignment error in "
             f"fold {fold_idx}"
         )
 
-    y_train_fold = (
-        train_clean[target_col]
-        .to_numpy()
-    )
+    # Extract labels and training patient groups before removing metadata.
+    y_train_fold = train_clean[target_col].to_numpy().reshape(-1)
+    y_test_fold = test_clean[target_col].to_numpy().reshape(-1)
+    groups_fold = train_clean[patient_col].to_numpy().reshape(-1)
 
-    y_test_fold = (
-        test_clean[target_col]
-        .to_numpy()
-    )
+    # Retain only model features in the same order for all three datasets.
+    train_features = train_clean.select(final_feature_names)
+    test_features = test_clean.select(final_feature_names)
+    holdout_features = holdout_clean.select(final_feature_names)
 
-    groups_fold = (
-        train_clean[patient_col]
-        .to_numpy()
-    )
-
-    train_clean = train_clean.select(
-        pl.exclude(
-            patient_col,
-            target_col,
-        )
-    )
-
-    test_clean = test_clean.select(
-        pl.exclude(
-            patient_col,
-            target_col,
-        )
-    )
-
-    # Apply final feature scaling.
-    X_train_fold, X_test_fold = scaling(
-        train_clean,
-        test_clean,
+    # Fit scaling on the training fold and transform validation and holdout.
+    (
+        X_train_fold,
+        X_test_fold,
+        X_holdout_fold,
+    ) = scaling(
+        train_features,
+        test_features,
+        holdout_features,
     )
 
     return (
         X_train_fold,
         X_test_fold,
+        X_holdout_fold,
         y_train_fold,
         y_test_fold,
+        y_holdout,
         groups_fold,
+        holdout_patient_ids,
+        final_feature_names,
         stats,
     )
+
 
 
 def process_time_fold(
@@ -759,7 +789,9 @@ def process_time_fold(
 
     The pipeline extracts fold-specific patient data, optionally balances the
     training set, scales numerical features, builds fixed-length 3D sequences,
-    replaces remaining missing values, and saves the resulting arrays.
+    replaces remaining missing values, and saves the resulting arrays. The
+    independent holdout is transformed using the scaler fitted exclusively on
+    the current training fold.
 
     Args:
         fold_idx:
@@ -767,51 +799,36 @@ def process_time_fold(
         train_idx:
             Training indices for the current fold.
         test_idx:
-            Test indices for the current fold.
+            Validation indices for the current fold.
         seed:
             Random seed used during balancing.
         **kwargs:
-            Additional pipeline configuration values.
+            Additional pipeline configuration values, including the raw
+            independent holdout under ``holdout_init``.
 
     Returns:
-        A tuple containing training sequences, test sequences, training labels,
-        test labels, training groups, and balancing statistics.
+        A tuple containing training sequences, validation sequences, holdout
+        sequences, training labels, validation labels, holdout labels, training
+        groups, holdout patient identifiers, ordered feature names, and
+        balancing statistics.
     """
-    # Extract the fold configuration.
     patient_col = kwargs["patient_col"]
     time_col = kwargs["time_col"]
     target_col = kwargs["target_col"]
     train_init_df = kwargs["train_init"]
+    holdout_init_df = kwargs["holdout_init"]
     final_features = kwargs["final_features"]
     balance_method = kwargs["balance_method"]
     expected_length = kwargs["expected_length"]
     exp = kwargs["exp"]
 
-    train_df = (
-        train_init_df[train_idx]
-        .sort(
-            [
-                patient_col,
-                time_col,
-            ]
-        )
-    )
-
-    test_df = (
-        train_init_df[test_idx]
-        .sort(
-            [
-                patient_col,
-                time_col,
-            ]
-        )
-    )
+    # Extract and sort train, validation, and holdout observations.
+    train_df = train_init_df[train_idx].sort([patient_col, time_col])
+    test_df = train_init_df[test_idx].sort([patient_col, time_col])
+    holdout_df = holdout_init_df.sort([patient_col, time_col])
 
     # Apply custom patient-level balancing before sequence construction.
-    if balance_method in [
-        "downsampling_homemade",
-        "",
-    ]:
+    if balance_method in ["downsampling_homemade", ""]:
         train_df, _ = equilibrer_dataset_tabulaire(
             train_df,
             patient_col,
@@ -820,177 +837,131 @@ def process_time_fold(
             seed=seed,
         )
 
-    # Scale numerical features and convert patient data into 3D sequences.
-    train_df, test_df = scaling(
+    # Fit scaling on training rows and transform validation and holdout rows.
+    train_df, test_df, holdout_df = scaling(
         train_df,
         test_df,
+        holdout_df,
     )
 
+    # Guarantee the same alphabetical feature order for every sequence.
+    ordered_feature_names = sorted(list(final_features))
+
+    # Convert patient observations into fixed-length 3D sequences.
     X_train_fold, y_train_fold = build_sequences(
         train_df,
         patient_col,
         target_col,
         expected_length,
-        final_features,
+        ordered_feature_names,
     )
-
     X_test_fold, y_test_fold = build_sequences(
         test_df,
         patient_col,
         target_col,
         expected_length,
-        final_features,
+        ordered_feature_names,
+    )
+    X_holdout_fold, y_holdout = build_sequences(
+        holdout_df,
+        patient_col,
+        target_col,
+        expected_length,
+        ordered_feature_names,
     )
 
+    # Preserve the patient order used by the sequence builder.
     patients_time_fold = (
         train_df[patient_col]
         .unique()
         .sort()
         .to_numpy()
+        .reshape(-1)
+    )
+    holdout_patient_ids = (
+        holdout_df[patient_col]
+        .unique()
+        .sort()
+        .to_numpy()
+        .reshape(-1)
     )
 
-    # Apply imbalanced-learn sampling using flattened sequence indices.
-    if balance_method not in [
-        "downsampling_homemade",
-        "",
-    ]:
-        n_sains_avant = int(
-            np.sum(
-                y_train_fold == 0
-            )
-        )
+    # Apply imbalanced-learn sampling using patient-sequence indices.
+    if balance_method not in ["downsampling_homemade", ""]:
+        n_sains_avant = int(np.sum(y_train_fold == 0))
+        n_malades_avant = int(np.sum(y_train_fold == 1))
 
-        n_malades_avant = int(
-            np.sum(
-                y_train_fold == 1
-            )
-        )
-
-        n_samples, n_timesteps, n_feats = (
-            X_train_fold.shape
-        )
-
-        X_train_fold_2d = (
-            X_train_fold.reshape(
-                n_samples,
-                n_timesteps * n_feats,
-            )
+        n_samples, n_timesteps, n_feats = X_train_fold.shape
+        X_train_fold_2d = X_train_fold.reshape(
+            n_samples,
+            n_timesteps * n_feats,
         )
 
         if balance_method == "downsampling_50-50":
             from imblearn.under_sampling import RandomUnderSampler
-
-            rs = RandomUnderSampler(
-                random_state=seed
-            )
-
+            rs = RandomUnderSampler(random_state=seed)
         elif balance_method == "upsampling_50-50":
             from imblearn.over_sampling import RandomOverSampler
-
-            rs = RandomOverSampler(
-                random_state=seed
-            )
-
+            rs = RandomOverSampler(random_state=seed)
         else:
             raise ValueError(
                 f"Balancing method {balance_method!r} is not implemented."
             )
 
-        indices_arr = np.arange(
-            n_samples
-        ).reshape(
-            -1,
-            1,
+        indices_arr = np.arange(n_samples).reshape(-1, 1)
+        indices_resampled, y_train_fold = rs.fit_resample(
+            indices_arr,
+            y_train_fold,
         )
-
-        indices_resampled, y_train_fold = (
-            rs.fit_resample(
-                indices_arr,
-                y_train_fold,
-            )
-        )
-
-        indices_resampled = (
-            indices_resampled.flatten()
-        )
+        indices_resampled = indices_resampled.flatten()
 
         X_train_fold = (
-            X_train_fold_2d[
-                indices_resampled
-            ]
-            .reshape(
-                -1,
-                n_timesteps,
-                n_feats,
-            )
+            X_train_fold_2d[indices_resampled]
+            .reshape(-1, n_timesteps, n_feats)
         )
-
-        groups_fold = (
-            patients_time_fold[
-                indices_resampled
-            ]
-        )
+        groups_fold = patients_time_fold[indices_resampled]
 
         stats = {
             "n_sains_avant": n_sains_avant,
             "n_malades_avant": n_malades_avant,
-            "n_sains_apres": int(
-                np.sum(
-                    y_train_fold == 0
-                )
-            ),
-            "n_malades_apres": int(
-                np.sum(
-                    y_train_fold == 1
-                )
-            ),
+            "n_sains_apres": int(np.sum(y_train_fold == 0)),
+            "n_malades_apres": int(np.sum(y_train_fold == 1)),
         }
-
     else:
         stats = None
         groups_fold = patients_time_fold
 
-    # Count and replace remaining NaN values before training.
-    total_nan = np.isnan(
-        X_train_fold
-    ).sum()
-
+    # Count and replace remaining NaN values before training and inference.
     print(
-        "Total number of NaN values: "
-        f"{total_nan}"
+        "Total number of NaN values in the training fold: "
+        f"{np.isnan(X_train_fold).sum()}"
     )
 
-    X_train_fold = np.nan_to_num(
-        X_train_fold,
-        nan=0.0,
-    )
+    X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)
+    X_test_fold = np.nan_to_num(X_test_fold, nan=0.0)
+    X_holdout_fold = np.nan_to_num(X_holdout_fold, nan=0.0)
 
-    X_test_fold = np.nan_to_num(
-        X_test_fold,
-        nan=0.0,
-    )
-
+    # Save the fold-specific train and validation arrays as before.
     np.save(
-        exp.get_time_path(
-            mode="train",
-            fold_idx=fold_idx,
-        ),
+        exp.get_time_path(mode="train", fold_idx=fold_idx),
         X_train_fold,
     )
-
     np.save(
-        exp.get_time_path(
-            mode="test",
-            fold_idx=fold_idx,
-        ),
+        exp.get_time_path(mode="test", fold_idx=fold_idx),
         X_test_fold,
     )
 
     return (
         X_train_fold,
         X_test_fold,
+        X_holdout_fold,
         y_train_fold,
         y_test_fold,
+        y_holdout,
         groups_fold,
+        holdout_patient_ids,
+        ordered_feature_names,
         stats,
     )
+
+

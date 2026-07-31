@@ -53,29 +53,24 @@ def make_objective_svc_stage1(
 
     def objective(trial):
         """Evaluate one SVC hyperparameter trial."""
-        # 1. Select the kernel.
+        # 1. Select the kernel (kept poly for completeness, but constrained for speed).
         kernel = trial.suggest_categorical("kernel", ["rbf", "linear", "poly"])
-        
+
         params = {
-            "C": trial.suggest_float("C", 1e-3, 1e3, log=True),
+            "C": trial.suggest_float("C", 0.1, 100, log=True),
             "kernel": kernel,
-            "probability": fixed_params.get("probability", False), # Required for evaluation.
+            "probability": fixed_params.get("probability", False),
             "class_weight": trial.suggest_categorical("class_weight", ["balanced", None]),
             "random_state": fixed_params.get("random_state", 42),
         }
 
-        # 2. Suggest gamma only for kernels that use it (RBF and polynomial).
+        # 2. Gamma fixed to 'scale' for baseline speed (RBF and poly kernels only).
         if kernel in ["rbf", "poly"]:
-            # Suggest either 'scale'/'auto' or a continuous numeric value on a log scale.
-            gamma_type = trial.suggest_categorical("gamma_type", ["scale", "auto", "value"])
-            if gamma_type == "value":
-                params["gamma"] = trial.suggest_float("gamma_value", 1e-4, 1e1, log=True)
-            else:
-                params["gamma"] = gamma_type
-        
-        # 3. Suggest the degree only for the polynomial kernel.
+            params["gamma"] = "scale"
+
+        # 3. Degree fixed to 2 for polynomial kernel (baseline constraint).
         if kernel == "poly":
-            params["degree"] = trial.suggest_int("degree", 2, 5)
+            params["degree"] = 2
 
         clf = SVC(**params)
 
@@ -115,7 +110,7 @@ def run_svc_stage1_search(
     X_train,
     y_train,
     study_name="svc_stage1",
-    n_trials=35, # Fewer trials because SVC training can be slow.
+    n_trials=20, # Reduced for baseline speed.
     storage=OPTUNA_STORAGE,
     metric_name="balanced_accuracy",
     fixed_params=None,

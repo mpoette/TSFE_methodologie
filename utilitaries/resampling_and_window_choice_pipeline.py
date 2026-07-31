@@ -7,7 +7,7 @@ import polars as pl
 import utilitaries.extract_data_utils as extract
 import utilitaries.resampling_utils as resampling
 import utilitaries.timestamp_sampling_utils as tsu
-import utilitaries.marimo_utils as config_dataclass
+import utilitaries.config_utils as config_dataclass
 
 def _compute_median_target_length(
     df: pl.DataFrame,

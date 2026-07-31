@@ -23,6 +23,7 @@ __pycache__/
 # Dossiers de sortie et modèles
 */outputs*/**
 */models*/**
+*/*logs*/**
 !/utilitaries/models/**  # Pour garder les modèles dans utilitaries
 
 # Dossiers spécifiques à ignorer
@@ -46,7 +47,8 @@ brouillon*
 *.jpg
 *.jpeg
 *.ipynb
-
+*.xlsx
+*.tex
 # Autres
 *.code-workspace
 *.pt
