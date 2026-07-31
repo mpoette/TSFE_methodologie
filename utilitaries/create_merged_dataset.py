@@ -180,6 +180,35 @@ def create_merged_dataset(
     # Remove the temporary column before merging the datasets.
     df_static = df_static.drop("temp_lower")
 
+    # Retain only patients with at least one valid spo2 measurement.
+    patients_with_spo2 = (
+        df_dynamic
+        .filter((pl.col("spo2").is_not_null()) & (pl.col("spo2") != 0))
+        .select(extract.ID_COL)
+        .unique()
+    )
+    
+    df_dynamic = df_dynamic.join(
+        patients_with_spo2,
+        on=extract.ID_COL,
+        how="inner",
+    )
+
+    # Retain only patient with at least 24h of stay
+    patients_with_gt_24h = (
+        df_dynamic
+        .group_by("encounterId")
+        .agg(pl.col("delta_hour").max().alias("delta_max"))
+        .filter(pl.col("delta_max") >= 23)
+        .select("encounterId")
+)
+
+    df_dynamic = df_dynamic.join(
+        patients_with_gt_24h,
+        on = extract.ID_COL,
+        how = "inner",
+    )
+
     # Merge static and time-series data using the patient identifier.
     df_merged = df_dynamic.join(
         df_static,
