@@ -1,3 +1,5 @@
+"""Dataset merging utilities for combining static and dynamic patient data."""
+
 import os
 
 import polars as pl
@@ -5,6 +7,20 @@ import polars as pl
 import utilitaries.extract_data_utils as extract
 
 
+def _count_unique_encounters(df: pl.LazyFrame) -> int:
+    """Return the number of unique encounterIds in a LazyFrame.
+
+    Args:
+        df: LazyFrame containing patient data with an encounter identifier
+            column (``ID_COL``).
+
+    Returns:
+        The count of unique encounter identifiers.
+    """
+    return df.select(extract.ID_COL).unique().collect().shape[0]
+
+
+# Regex patterns for categorizing patients by primary diagnosis.
 patterns = {
     "Oncology": (
         r"tumeur maligne|cancer|carcinome|lymphome|leucémie|métastase|"
@@ -48,6 +64,7 @@ patterns = {
 }
 
 
+# List of ICU unit identifiers used when filtering by admission unit.
 ICU_UNITS = [
     "RANGUEIL DECHO. REA.",
     "NEURO-CHIR REA",
@@ -64,6 +81,9 @@ def create_merged_dataset(
     main_diagnosis: str = "all_diseases",
     save: bool = False,
     folder: str = "",
+    keep_duplicates: bool = False,
+    mode_duplicates: str = "prio_first",
+    df_static_full_clean: pl.DataFrame | pl.LazyFrame | None = None,
 ) -> pl.LazyFrame:
     """Merge static and time-series patient data.
 
@@ -74,6 +94,10 @@ def create_merged_dataset(
 
     Slightly negative death delays between -1 and 0 days are replaced with
     zero, while rows containing lower invalid values are removed.
+
+    When ``keep_duplicates`` is False, patient duplicates are removed after
+    all filters have been applied, using ``df_static_full_clean`` to identify
+    which encounters to retain.
 
     Args:
         df_static:
@@ -93,6 +117,16 @@ def create_merged_dataset(
             Whether to save the merged dataset as a Parquet file.
         folder:
             Destination directory used when ``save`` is enabled.
+        keep_duplicates:
+            Whether to keep duplicate patient encounters. When False,
+            duplicates are removed using the strategy defined by
+            ``mode_duplicates``.
+        mode_duplicates:
+            Duplicate removal strategy. ``"prio_first"`` retains the first
+            encounter, ``"prio_last"`` retains the last encounter.
+        df_static_full_clean:
+            Optional static dataset without anomalies, used to identify
+            which patient encounters to retain when removing duplicates.
 
     Returns:
         The merged dataset, sorted by patient identifier and ``delta_hour``.
@@ -113,13 +147,12 @@ def create_merged_dataset(
         pl.col(extract.ID_COL).cast(pl.Int32)
     )
 
-    # Retain only patients admitted to the selected ICU units.
-    if restrict_to_icu_units:
-        df_static = df_static.filter(
-            pl.col("adm_unit").is_in(ICU_UNITS)
-        )
+    # Log initial encounter count.
+    initial_static = _count_unique_encounters(df_static)
+    initial_dynamic = _count_unique_encounters(df_dynamic)
+    print(f"[LOG] Initial encounters - static: {initial_static}, dynamic: {initial_dynamic}")
 
-    # Replace slightly negative death delays with zero and remove invalid rows.
+    # Replace slightly negative death delays with zero (transformation only).
     df_static = (
         df_static
         .with_columns(
@@ -129,10 +162,6 @@ def create_merged_dataset(
             .then(0)
             .otherwise(pl.col("deces_datediff_days"))
             .alias("deces_datediff_days")
-        )
-        .filter(
-            (pl.col("deces_datediff_days") >= 0)
-            | pl.col("deces_datediff_days").is_null()
         )
     )
 
@@ -167,54 +196,104 @@ def create_merged_dataset(
         pl.coalesce(category_expressions).alias("category")
     )
 
-    # Filter patients according to the requested primary diagnosis.
-    if main_diagnosis in {"sepsis", "Sepsis_Infection"}:
-        df_static = df_static.filter(
-            pl.col("category") == "Sepsis_Infection"
-        )
-    elif main_diagnosis != "all_diseases":
-        raise ValueError(
-            f"Diagnosis category {main_diagnosis!r} is not currently supported."
-        )
-
-    # Remove the temporary column before merging the datasets.
+    # Remove the temporary column before merging.
     df_static = df_static.drop("temp_lower")
 
-    # Retain only patients with at least one valid spo2 measurement.
-    patients_with_spo2 = (
-        df_dynamic
-        .filter((pl.col("spo2").is_not_null()) & (pl.col("spo2") != 0))
-        .select(extract.ID_COL)
-        .unique()
-    )
-    
-    df_dynamic = df_dynamic.join(
-        patients_with_spo2,
-        on=extract.ID_COL,
-        how="inner",
-    )
-
-    # Retain only patient with at least 24h of stay
-    patients_with_gt_24h = (
-        df_dynamic
-        .group_by("encounterId")
-        .agg(pl.col("delta_hour").max().alias("delta_max"))
-        .filter(pl.col("delta_max") >= 23)
-        .select("encounterId")
-)
-
-    df_dynamic = df_dynamic.join(
-        patients_with_gt_24h,
-        on = extract.ID_COL,
-        how = "inner",
-    )
-
     # Merge static and time-series data using the patient identifier.
+    static_before_merge = _count_unique_encounters(df_static)
+    dynamic_before_merge = _count_unique_encounters(df_dynamic)
     df_merged = df_dynamic.join(
         df_static,
         on=extract.ID_COL,
         how="inner",
     )
+    after_merge = _count_unique_encounters(df_merged)
+    print(f"[LOG] Inner merge - static: {static_before_merge}, dynamic: {dynamic_before_merge}, after merge: {after_merge}")
+
+    # ---- All filters applied on the merged dataset for traceability ----
+
+    # Retain only patients admitted to the selected ICU units.
+    if restrict_to_icu_units:
+        before_filter = _count_unique_encounters(df_merged)
+        df_merged = df_merged.filter(
+            pl.col("adm_unit").is_in(ICU_UNITS)
+        )
+        after_filter = _count_unique_encounters(df_merged)
+        print(f"[LOG] ICU unit filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+
+    # Remove patients with invalid death delays.
+    before_filter = _count_unique_encounters(df_merged)
+    df_merged = df_merged.filter(
+        (pl.col("deces_datediff_days") >= 0)
+        | pl.col("deces_datediff_days").is_null()
+    )
+    after_filter = _count_unique_encounters(df_merged)
+    print(f"[LOG] Death delay filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+
+    # Filter patients according to the requested primary diagnosis.
+    if main_diagnosis in {"sepsis", "Sepsis_Infection"}:
+        before_filter = _count_unique_encounters(df_merged)
+        df_merged = df_merged.filter(
+            pl.col("category") == "Sepsis_Infection"
+        )
+        after_filter = _count_unique_encounters(df_merged)
+        print(f"[LOG] Diagnosis filter (Sepsis_Infection) - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+    elif main_diagnosis != "all_diseases":
+        raise ValueError(
+            f"Diagnosis category {main_diagnosis!r} is not currently supported."
+        )
+
+    # Retain only patients with a valid Glasgow score.
+    before_filter = _count_unique_encounters(df_merged)
+    df_merged = df_merged.filter(
+        pl.col("score_glasgow").is_between(3, 15)
+    )
+    after_filter = _count_unique_encounters(df_merged)
+    print(f"[LOG] Glasgow score filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+
+    # Retain only patients with valid gender and non-PIE entry mode.
+    before_filter = _count_unique_encounters(df_merged)
+    df_merged = df_merged.filter(
+        pl.col("gender").is_not_null()
+        & (pl.col("gender") != "Inconnu")
+        & (pl.col("gender") != "None")
+        & ~pl.col("icu_mode_entree").is_in(["PIE"]).fill_null(False)
+    )
+    after_filter = _count_unique_encounters(df_merged)
+    print(f"[LOG] Gender/entry mode filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+
+    # Retain only patients with at least one valid SpO2 measurement.
+    before_filter = _count_unique_encounters(df_merged)
+    patients_with_spo2 = (
+        df_merged
+        .filter((pl.col("spo2").is_not_null()) & (pl.col("spo2") != 0))
+        .select(extract.ID_COL)
+        .unique()
+    )
+    df_merged = df_merged.join(
+        patients_with_spo2,
+        on=extract.ID_COL,
+        how="inner",
+    )
+    after_filter = _count_unique_encounters(df_merged)
+    print(f"[LOG] SpO2 filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
+
+    # Retain only patients with at least 24 hours of stay.
+    before_filter = _count_unique_encounters(df_merged)
+    patients_with_gt_24h = (
+        df_merged
+        .group_by(extract.ID_COL)
+        .agg(pl.col("delta_hour").max().alias("delta_max"))
+        .filter(pl.col("delta_max") >= 23)
+        .select(extract.ID_COL)
+    )
+    df_merged = df_merged.join(
+        patients_with_gt_24h,
+        on=extract.ID_COL,
+        how="inner",
+    )
+    after_filter = _count_unique_encounters(df_merged)
+    print(f"[LOG] 24h stay filter - before: {before_filter}, after: {after_filter}, dropped: {before_filter - after_filter}")
 
     # Ensure a consistent patient and chronological order.
     df_merged = df_merged.sort(
