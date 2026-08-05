@@ -841,8 +841,8 @@ def remove_null_values(
     ]
     required_columns = {
         *boolean_columns,
-        "taille",
-        "poids_admission",
+        # "taille",
+        # "poids_admission",
     }
 
     missing_columns = required_columns - set(df.columns)
@@ -863,8 +863,8 @@ def remove_null_values(
                 for column in boolean_columns
             ]
         )
-        .filter(
-            pl.col("taille").is_not_null()
-            & pl.col("poids_admission").is_not_null()
-        )
+        # .filter(
+        #     pl.col("taille").is_not_null()
+        #     & pl.col("poids_admission").is_not_null()
+        # )
     )
