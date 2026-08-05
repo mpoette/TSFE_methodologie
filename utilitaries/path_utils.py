@@ -632,6 +632,6 @@ class Experiment:
         Returns:
             pathlib.Path: Path to the compare_figs directory.
         """
-        path = self._get_base_path("inputs", config_mode) / "compare_figs"
+        path = self._get_base_path("outputs", config_mode) / "compare_figs"
         path.mkdir(parents=True, exist_ok=True)
         return path

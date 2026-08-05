@@ -1,8 +1,12 @@
+"""Feature extraction, selection, and correlation analysis utilities."""
+
 from collections.abc import Sequence
 from typing import TypeAlias
 
+import gc
 import os
 import re
+import resource
 import warnings
 
 import matplotlib.pyplot as plt
@@ -11,6 +15,7 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 import tsfel
+import pywt
 from tsfel.feature_extraction.calc_features import calc_window_features
 from boruta import BorutaPy
 from joblib import Parallel, delayed
@@ -19,6 +24,8 @@ from sklearn.feature_selection import VarianceThreshold
 from tqdm.auto import tqdm
 
 
+# Explainability scores for TSFEL feature families, organized by tier.
+# Higher scores indicate more clinically interpretable features.
 explainability_scores = {
     # --- TIER 1: Highly explainable (90 - 100) ---
     "max": 100,
@@ -27,6 +34,9 @@ explainability_scores = {
     "median": 95,
     "peak to peak distance": 90,
     "area under the curve": 85,
+    # ECDF percentiles are empirical quantiles and remain directly
+    # interpretable in the original measurement unit.
+    "ecdf percentile": 85,
 
     # --- TIER 2: Moderately explainable (70 - 85) ---
     "average power": 80,
@@ -48,6 +58,9 @@ explainability_scores = {
     "interquartile range": 70,
     "neighbourhood peaks": 70,
     "sum absolute diff": 70,
+    # Number of observations below an ECDF percentile threshold. This remains
+    # interpretable, but depends more strongly on the window length.
+    "ecdf percentile count": 75,
 
     # --- TIER 3: Poorly explainable (50 - 65) ---
     "distance": 65,
@@ -65,7 +78,11 @@ explainability_scores = {
     "multiscale entropy": 40,
     "maximum frequency": 40,
     "max power spectrum": 35,
+    # Keep both TSFEL spellings and historical aliases. TSFEL-generated
+    # columns use "coefficient", not only the abbreviated "coeff".
+    "fft mean coefficient": 35,
     "fft mean coeff": 35,
+    "spectrogram mean coefficient": 35,
     "spectrogram mean coeff": 35,
     "human range energy": 30,
 
@@ -96,29 +113,338 @@ explainability_scores = {
 }
 
 
-def _get_explainability(tsfel_column_name: str) -> int:
-    """Retrieve the explainability score of a TSFEL feature by column name.
+def _validate_regular_sampling(
+    df: pl.DataFrame,
+    patient_col: str,
+    time_col: str,
+    expected_interval_hours: float,
+    tolerance: float = 1e-9,
+) -> None:
+    """Check that observations follow a regular temporal grid.
 
     Args:
-        tsfel_column_name:
-            Name of the TSFEL feature column.
+        df: Patient time-series DataFrame.
+        patient_col: Patient or stay identifier column.
+        time_col: Temporal ordering column.
+        expected_interval_hours: Expected time between consecutive rows, in
+            hours.
+        tolerance: Acceptable deviation from the expected interval. Defaults to
+            1e-9.
+
+    Raises:
+        ValueError: If irregular sampling is detected.
+    """
+
+    time_diffs = (
+        df.sort([patient_col, time_col])
+        .with_columns(
+            pl.col(time_col)
+            .diff()
+            .over(patient_col)
+            .alias("__time_diff")
+        )
+        .filter(pl.col("__time_diff").is_not_null())
+    )
+
+    irregular = time_diffs.filter(
+        (
+            pl.col("__time_diff") - expected_interval_hours
+        ).abs() > tolerance
+    )
+
+    if irregular.height > 0:
+        examples = irregular.select(
+            patient_col,
+            time_col,
+            "__time_diff",
+        ).head(10)
+
+        raise ValueError(
+            "Irregular temporal sampling detected. "
+            f"Expected {expected_interval_hours} hour(s) between rows.\n"
+            f"Examples:\n{examples}"
+        )
+    
+def _log_memory(label: str) -> None:
+    """Print the process peak resident memory with immediate flushing.
+
+    On Linux, ``ru_maxrss`` is reported in KiB. This helper deliberately uses
+    only the standard library so it remains available in constrained jobs.
+
+    Args:
+        label: Short label prefixed in the log line.
+    """
+    max_rss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(
+        f"[MEMORY] {label}: pid={os.getpid()}, "
+        f"peak_rss={max_rss_kib / 1024:.1f} MiB",
+        flush=True,
+    )
+
+
+def _safe_save_figure(
+    fig: plt.Figure,
+    path: str,
+    dpi: int = 120,
+) -> None:
+    """Save a Matplotlib figure without the expensive tight-bbox pass.
+
+    Args:
+        fig: The Matplotlib figure to save.
+        path: Output file path.
+        dpi: Image resolution in dots per inch.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fig.savefig(path, dpi=dpi)
+    print(f"Saved: {path} (dpi={dpi})", flush=True)
+
+
+def _compute_numeric_correlation(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Sanitize numeric data and compute one reusable Pearson matrix.
+
+    Args:
+        df: DataFrame containing numerical features.
 
     Returns:
-        Explainability score in [0, 100]. Returns -1 for unknown features.
+        A tuple of the sanitized numeric DataFrame and the Pearson correlation
+        matrix.
+
+    Raises:
+        ValueError: If fewer than two usable numeric columns remain.
     """
-    col_lower = tsfel_column_name.lower()
+    print("[CORR] Sanitizing numeric data...", flush=True)
+    _log_memory("before numeric sanitization")
 
-    for feature_name, score in explainability_scores.items():
-        if col_lower.endswith(feature_name):
-            return score
+    numeric_df = (
+        df
+        .apply(pd.to_numeric, errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+    )
 
-    return -1
+    empty_columns = numeric_df.columns[~numeric_df.notna().any(axis=0)]
+    if len(empty_columns):
+        print(
+            f"[CORR] Dropping {len(empty_columns)} all-NaN column(s).",
+            flush=True,
+        )
+        numeric_df = numeric_df.drop(columns=empty_columns)
+
+    if numeric_df.shape[1] < 2:
+        raise ValueError(
+            "At least two usable numeric columns are required for correlation."
+        )
+
+    _log_memory("after numeric sanitization")
+    print(
+        f"[CORR] Computing Pearson matrix for "
+        f"{numeric_df.shape[0]} rows x {numeric_df.shape[1]} features...",
+        flush=True,
+    )
+    corr_matrix = numeric_df.corr(method="pearson")
+    print(f"[CORR] Matrix ready: {corr_matrix.shape}", flush=True)
+    _log_memory("after correlation computation")
+    return numeric_df, corr_matrix
 
 
-# ---------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------
 
+_EXPLAINABILITY_ALIASES = {
+    # Explicit aliases are normalized before matching. Keeping this registry
+    # separate avoids silently falling back to generic tokens such as "mean".
+    "spectrogram mean coefficient": "spectrogram mean coefficient",
+    "spectrogram mean coeff": "spectrogram mean coefficient",
+    "fft mean coefficient": "fft mean coefficient",
+    "fft mean coeff": "fft mean coefficient",
+    "ecdf percentile count": "ecdf percentile count",
+    "ecdf percentile": "ecdf percentile",
+}
+
+
+def _normalize_feature_text(value: str) -> str:
+    """Normalize TSFEL feature names while preserving word boundaries.
+
+    Args:
+        value: Raw feature name string.
+
+    Returns:
+        Lowercase, stripped string with normalized internal whitespace.
+    """
+    return re.sub(r"[_\s]+", " ", str(value).lower()).strip()
+
+
+def _build_explainability_matchers() -> list[tuple[str, str, int]]:
+    """Build deterministic longest-first aliases for explainability matching.
+
+    Returns:
+        Sorted list of ``(alias, canonical_family, score)`` tuples, ordered
+        by descending alias length.
+    """
+    matchers: list[tuple[str, str, int]] = []
+
+    for alias, canonical_name in _EXPLAINABILITY_ALIASES.items():
+        if canonical_name not in explainability_scores:
+            raise KeyError(
+                "Explainability alias references an unknown canonical family: "
+                f"{canonical_name!r}."
+            )
+        matchers.append(
+            (
+                _normalize_feature_text(alias),
+                canonical_name,
+                explainability_scores[canonical_name],
+            )
+        )
+
+    # Every configured family is also its own alias.
+    for family_name, score in explainability_scores.items():
+        matchers.append(
+            (
+                _normalize_feature_text(family_name),
+                family_name,
+                score,
+            )
+        )
+
+    # Deduplicate aliases, preferring the explicit registry entry above.
+    unique_matchers: dict[str, tuple[str, str, int]] = {}
+    for alias, family_name, score in matchers:
+        unique_matchers.setdefault(alias, (alias, family_name, score))
+
+    return sorted(
+        unique_matchers.values(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+
+
+_EXPLAINABILITY_MATCHERS = _build_explainability_matchers()
+
+
+def _get_explainability_details(
+    feature_column_name: str,
+    static_features: Sequence[str] | None = None,
+) -> tuple[int, str]:
+    """Return an explainability score and the matched feature family.
+
+    Matching is longest-first and uses explicit TSFEL aliases. This prevents
+    generic words such as ``mean`` from stealing compound families such as
+    ``Spectrogram mean coefficient`` or ``Wavelet absolute mean``.
+
+    Raw static variables receive score 100 because they are not transformed.
+
+    Args:
+        feature_column_name: The TSFEL-generated feature column name.
+        static_features: Optional list of static feature names.
+
+    Returns:
+        A tuple of ``(score, canonical_family)``.
+    """
+    column = str(feature_column_name)
+
+    if static_features is not None and column in set(static_features):
+        return 100, "raw/static feature"
+
+    normalized_column = _normalize_feature_text(column)
+
+    for alias, canonical_family, score in _EXPLAINABILITY_MATCHERS:
+        pattern = (
+            r"(?:^|[^a-z0-9])"
+            + re.escape(alias)
+            + r"(?:$|[^a-z0-9])"
+        )
+        if re.search(pattern, normalized_column):
+            return score, canonical_family
+
+    return -1, "unknown"
+
+def _get_explainability(
+    tsfel_column_name: str,
+    static_features: Sequence[str] | None = None,
+) -> int:
+    """Return only the explainability score for backward compatibility.
+
+    Args:
+        tsfel_column_name: The TSFEL-generated feature column name.
+        static_features: Optional list of static feature names.
+
+    Returns:
+        The explainability score.
+    """
+    score, _ = _get_explainability_details(
+        feature_column_name=tsfel_column_name,
+        static_features=static_features,
+    )
+    return score
+
+
+
+
+def audit_explainability_recognition(
+    columns: Sequence[str],
+    static_features: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Summarize how every feature name is classified.
+
+    This is useful before correlation filtering to detect unexpected generic
+    matches or unknown TSFEL families.
+
+    Args:
+        columns: Feature column names to classify.
+        static_features: Optional list of static feature names.
+
+    Returns:
+        DataFrame with ``feature``, ``matched_family``, and ``score`` columns.
+    """
+    records = []
+    for column in columns:
+        score, family = _get_explainability_details(
+            feature_column_name=str(column),
+            static_features=static_features,
+        )
+        records.append({
+            "feature": str(column),
+            "matched_family": family,
+            "score": score,
+        })
+
+    audit_df = pd.DataFrame(records)
+    summary = (
+        audit_df
+        .groupby(["matched_family", "score"], dropna=False)
+        .size()
+        .reset_index(name="feature_count")
+        .sort_values(
+            ["score", "matched_family"],
+            ascending=[False, True],
+        )
+    )
+
+    print("[EXPLAINABILITY AUDIT]", flush=True)
+    for row in summary.itertuples(index=False):
+        print(
+            f"  - {row.matched_family}: score={row.score}, "
+            f"features={row.feature_count}",
+            flush=True,
+        )
+
+    unknown = audit_df.loc[
+        audit_df["matched_family"] == "unknown",
+        "feature",
+    ].tolist()
+    if unknown:
+        print(
+            f"[EXPLAINABILITY AUDIT] {len(unknown)} unknown feature(s). "
+            f"Examples: {unknown[:20]}",
+            flush=True,
+        )
+
+    return audit_df
+
+
+# Type aliases.
 PolarsFrame: TypeAlias = pl.DataFrame | pl.LazyFrame
 
 
@@ -277,7 +603,7 @@ def assainir_et_filtrer_variance(
     else:
         test_features_input = pd.DataFrame(columns=train_features.columns)
 
-    # 1. Sanitization (Imputation des Inf / NaN)
+    # 1. Sanitize infinite and missing values.
     try:
         clean_train, clean_test = _sanitize_numeric_dataframes(
             train_features,
@@ -293,7 +619,7 @@ def assainir_et_filtrer_variance(
         else:
             clean_test = None
 
-    # 2. Fit & Transform de la Variance
+    # 2. Fit and apply variance threshold selector.
     selector = VarianceThreshold(threshold=threshold)
     train_array = selector.fit_transform(clean_train)
 
@@ -326,25 +652,31 @@ def assainir_et_filtrer_variance(
 def drop_correlated_by_explainability(
     df: pd.DataFrame,
     threshold: float = 0.9,
+    static_features: Sequence[str] | None = None,
+    log_decisions: bool = True,
+    decision_log_path: str | None = None,
 ) -> pd.DataFrame:
-    """Remove correlated features, keeping the most explainable one.
+    """Remove correlated features while logging each keep/drop decision.
 
-    For each pair of features with absolute Pearson correlation greater than
-    or equal to ``threshold``, the feature with the higher explainability
-    score (from ``explainability_scores``) is retained. When scores are equal
-    or both unknown (``-1``), the feature whose name sorts first alphabetically
-    is kept to ensure deterministic behavior.
+    For every pair with ``abs(correlation) >= threshold``, the most
+    explainable feature is retained. Equal scores are resolved
+    deterministically by alphabetical order. Already-dropped features are not
+    reconsidered, preserving the original greedy behavior.
 
     Args:
-        df:
-            Pandas DataFrame containing numerical TSFEL features.
-        threshold:
-            Absolute correlation threshold above which a pair is considered
-            redundant. Must be in ``(0, 1]``.
+        df: DataFrame containing numerical features.
+        threshold: Absolute correlation threshold above which a feature pair is
+            considered redundant. Defaults to 0.9.
+        static_features: Optional list of static feature names. These receive a
+            maximum explainability score during tie-breaking.
+        log_decisions: Whether to print each correlation keep/drop decision.
+        decision_log_path: Optional file path to persist the decision log.
 
     Returns:
-        The input DataFrame with the less explainable feature from each
-        highly-correlated pair removed.
+        A DataFrame with correlated features removed.
+
+    Raises:
+        ValueError: If threshold is not in (0, 1].
     """
     if threshold <= 0 or threshold > 1:
         raise ValueError(
@@ -354,42 +686,253 @@ def drop_correlated_by_explainability(
     corr_matrix = df.corr(method="pearson")
     columns = list(df.columns)
     drop_set: set[str] = set()
+    decision_lines: list[str] = []
 
     for i in range(len(columns)):
         for j in range(i + 1, len(columns)):
             col_a = columns[i]
             col_b = columns[j]
 
-            # Skip if one of the pair is already marked for removal.
             if col_a in drop_set or col_b in drop_set:
                 continue
 
             corr_value = corr_matrix.loc[col_a, col_b]
 
-            if abs(corr_value) >= threshold:
-                score_a = _get_explainability(col_a)
-                score_b = _get_explainability(col_b)
+            if pd.isna(corr_value) or abs(corr_value) < threshold:
+                continue
 
-                # Keep the feature with the higher explainability score.
-                if score_a > score_b:
-                    drop_set.add(col_b)
-                elif score_b > score_a:
-                    drop_set.add(col_a)
+            score_a, family_a = _get_explainability_details(
+                col_a,
+                static_features=static_features,
+            )
+            score_b, family_b = _get_explainability_details(
+                col_b,
+                static_features=static_features,
+            )
+
+            if score_a > score_b:
+                kept, dropped = col_a, col_b
+                kept_score, dropped_score = score_a, score_b
+                kept_family, dropped_family = family_a, family_b
+                reason = f"{score_a} > {score_b}"
+            elif score_b > score_a:
+                kept, dropped = col_b, col_a
+                kept_score, dropped_score = score_b, score_a
+                kept_family, dropped_family = family_b, family_a
+                reason = f"{score_b} > {score_a}"
+            else:
+                kept = min(col_a, col_b)
+                dropped = max(col_a, col_b)
+                if kept == col_a:
+                    kept_family, dropped_family = family_a, family_b
                 else:
-                    # Equal or both unknown - drop alphabetically last one.
-                    if col_a >= col_b:
-                        drop_set.add(col_a)
-                    else:
-                        drop_set.add(col_b)
+                    kept_family, dropped_family = family_b, family_a
+                kept_score = dropped_score = score_a
+                reason = (
+                    f"equal scores ({score_a}); alphabetical tie-break"
+                )
 
-    if drop_set:
+            drop_set.add(dropped)
+
+            line = (
+                f"[CORR DECISION] |corr|={abs(float(corr_value)):.6f} "
+                f"(corr={float(corr_value):+.6f}) :: "
+                f"KEEP '{kept}' [{kept_family}, score={kept_score}] "
+                f"vs DROP '{dropped}' "
+                f"[{dropped_family}, score={dropped_score}] "
+                f"because {reason}"
+            )
+            decision_lines.append(line)
+
+            if log_decisions:
+                print(line, flush=True)
+
+    if decision_log_path is not None:
+        parent = os.path.dirname(decision_log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(decision_log_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(decision_lines))
+            if decision_lines:
+                handle.write("\n")
         print(
-            f"Dropped {len(drop_set)} correlated feature(s) "
-            f"(threshold={threshold:.2f}, kept most explainable): "
-            f"{sorted(drop_set)}"
+            f"[CORR DECISION] Saved {len(decision_lines)} decision(s) to "
+            f"{decision_log_path}",
+            flush=True,
         )
 
+    print(
+        f"Dropped {len(drop_set)} correlated feature(s) "
+        f"at threshold={threshold:.2f}; "
+        f"logged {len(decision_lines)} decision(s).",
+        flush=True,
+    )
+
     return df.loc[:, [col for col in columns if col not in drop_set]]
+
+
+
+
+# Regex to match TSFEL wavelet column names with lossy Hz frequency labels.
+_WAVELET_COLUMN_RE = re.compile(
+    r"^(?P<prefix>.+_Wavelet "
+    r"(?:absolute mean|energy|standard deviation|variance))_"
+    r"[^_]+Hz$",
+    flags=re.IGNORECASE,
+)
+
+
+def _rename_wavelet_columns_in_cycles_per_hour(
+    columns: Sequence[str],
+    sampling_frequency_hz: float,
+    wavelet: str = "mexh",
+) -> list[str]:
+    """Replace lossy TSFEL wavelet frequency labels with unique CPH labels.
+
+    TSFEL rounds wavelet frequencies to two decimal places in hertz when it
+    builds output names. For slowly sampled clinical series, several distinct
+    wavelet scales therefore receive the same ``0.0Hz`` label.
+
+    The values themselves remain ordered by wavelet width. This function
+    reconstructs that width within each variable/feature group and names each
+    output with both its scale and its frequency in cycles per hour.
+
+    Args:
+        columns: TSFEL output column names.
+        sampling_frequency_hz: Sampling frequency in hertz.
+        wavelet: Wavelet family used by PyWavelets. Defaults to ``"mexh"``.
+
+    Returns:
+        Renamed column list with CPH-based wavelet labels.
+    """
+    group_occurrences: dict[str, int] = {}
+    renamed: list[str] = []
+    samples_per_hour = sampling_frequency_hz * 3600.0
+
+    for raw_column in columns:
+        column = str(raw_column)
+        match = _WAVELET_COLUMN_RE.match(column)
+
+        if match is None:
+            renamed.append(column)
+            continue
+
+        prefix = match.group("prefix")
+        scale = group_occurrences.get(prefix, 0) + 1
+        group_occurrences[prefix] = scale
+
+        # PyWavelets returns a normalized frequency in cycles/sample.
+        # Multiplying by samples/hour yields cycles/hour.
+        frequency_cph = float(
+            pywt.scale2frequency(wavelet, scale) * samples_per_hour
+        )
+
+        renamed.append(
+            f"{prefix}_scale_{scale:02d}_{frequency_cph:.12g}cph"
+        )
+
+    return renamed
+
+
+
+# Regex to match TSFEL spectrogram column names with lossy Hz frequency labels.
+_SPECTROGRAM_COLUMN_RE = re.compile(
+    r"^(?P<prefix>.+_Spectrogram mean coefficient)_"
+    r"[^_]+Hz$",
+    flags=re.IGNORECASE,
+)
+
+
+def _rename_spectrogram_columns_in_cycles_per_hour(
+    columns: Sequence[str],
+    sampling_frequency_hz: float,
+) -> list[str]:
+    """Replace lossy TSFEL spectrogram labels with exact CPH bin labels.
+
+    TSFEL computes ``N`` one-sided spectrogram frequency bins and rounds their
+    labels to two decimals in hertz. With hourly sampling, many distinct bins
+    are consequently named ``0.0Hz``. For a group containing ``N`` outputs,
+    bin ``i`` has frequency ``i * fs / (2 * (N - 1))``.
+
+    A two-pass implementation is used so the total number of bins is known
+    before labels are generated. The bin index is included to guarantee stable
+    and unique names even at very small sampling frequencies.
+
+    Args:
+        columns: TSFEL output column names.
+        sampling_frequency_hz: Sampling frequency in hertz.
+
+    Returns:
+        Renamed column list with CPH-based spectrogram labels.
+    """
+    raw_columns = [str(column) for column in columns]
+    group_sizes: dict[str, int] = {}
+
+    for column in raw_columns:
+        match = _SPECTROGRAM_COLUMN_RE.match(column)
+        if match is not None:
+            prefix = match.group("prefix")
+            group_sizes[prefix] = group_sizes.get(prefix, 0) + 1
+
+    group_indices: dict[str, int] = {}
+    renamed: list[str] = []
+    samples_per_hour = sampling_frequency_hz * 3600.0
+
+    for column in raw_columns:
+        match = _SPECTROGRAM_COLUMN_RE.match(column)
+        if match is None:
+            renamed.append(column)
+            continue
+
+        prefix = match.group("prefix")
+        bin_index = group_indices.get(prefix, 0)
+        group_indices[prefix] = bin_index + 1
+        n_bins = group_sizes[prefix]
+
+        if n_bins <= 1:
+            frequency_cph = 0.0
+        else:
+            frequency_cph = (
+                bin_index * samples_per_hour / (2.0 * (n_bins - 1))
+            )
+
+        renamed.append(
+            f"{prefix}_bin_{bin_index:02d}_{frequency_cph:.12g}cph"
+        )
+
+    return renamed
+
+def _make_unique_column_names(
+    columns: Sequence[str],
+) -> list[str]:
+    """Return deterministic unique column names.
+
+    The first occurrence of a name is preserved. Later occurrences receive a
+    ``_duplicate_<n>`` suffix, where ``n`` starts at 1.
+
+    Args:
+        columns:
+            Column names to make unique.
+
+    Returns:
+        Unique column names in their original order.
+    """
+    occurrence_counts: dict[str, int] = {}
+    unique_columns: list[str] = []
+
+    for column in columns:
+        occurrence = occurrence_counts.get(column, 0)
+
+        if occurrence == 0:
+            unique_columns.append(column)
+        else:
+            unique_columns.append(
+                f"{column}_duplicate_{occurrence}"
+            )
+
+        occurrence_counts[column] = occurrence + 1
+
+    return unique_columns
 
 
 def _process_single_patient(
@@ -398,8 +941,17 @@ def _process_single_patient(
     feature_cols: list[str],
     patient_col: str,
     target_col: str,
+    sampling_frequency_hz: float,
 ) -> pl.DataFrame:
     """Extract TSFEL features for one patient or ICU stay.
+
+    Column names are passed explicitly through ``header_names`` because
+    ``calc_window_features`` converts the input window to a NumPy array and
+    cannot infer DataFrame column names by itself. This preserves descriptive
+    output names such as ``fio2_corr_Mean`` instead of ``0_Mean``.
+
+    Duplicate names generated internally by TSFEL are made deterministic by
+    appending a ``_duplicate_<n>`` suffix.
 
     Args:
         patient_df:
@@ -412,6 +964,9 @@ def _process_single_patient(
             Patient or stay identifier column.
         target_col:
             Prediction target column.
+        sampling_frequency_hz:
+            Sampling frequency passed to TSFEL, expressed in hertz. For one
+            observation per hour, this value is ``1 / 3600``.
 
     Returns:
         A one-row Polars DataFrame containing the extracted TSFEL features,
@@ -419,20 +974,27 @@ def _process_single_patient(
 
     Raises:
         ValueError:
-            If the patient group is empty or does not contain exactly one
-            patient identifier.
+            If the patient group is empty, contains more than one patient
+            identifier, or no dynamic feature is available.
     """
     if patient_df.is_empty():
-        raise ValueError("Cannot extract TSFEL features from an empty patient group.")
+        raise ValueError(
+            "Cannot extract TSFEL features from an empty patient group."
+        )
 
     patient_ids = patient_df[patient_col].unique().to_list()
+
     if len(patient_ids) != 1:
-        raise ValueError("Each TSFEL group must contain exactly one patient identifier.")
+        raise ValueError(
+            "Each TSFEL group must contain exactly one patient identifier."
+        )
 
-    patient_id = patient_ids[0]
-
-    # 1. Deduplicate input columns
     unique_feature_cols = list(dict.fromkeys(feature_cols))
+
+    if not unique_feature_cols:
+        raise ValueError(
+            "At least one dynamic feature is required for TSFEL extraction."
+        )
 
     feature_data = (
         patient_df
@@ -441,59 +1003,77 @@ def _process_single_patient(
         .apply(pd.to_numeric, errors="coerce")
     )
 
-    # 2. Temporary neutral aliasing (F0, F1...)
-    alias_map = {col: f"F{i}" for i, col in enumerate(unique_feature_cols)}
-    reverse_alias_map = {f"F{i}": col for i, col in enumerate(unique_feature_cols)}
-
-    feature_data_tsfel = feature_data.rename(columns=alias_map)
-
-    # 3. Use calc_window_features directly to BYPASS tsfel's broken .reindex() call
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message="Precision loss occurred in moment calculation.*",
             category=RuntimeWarning,
         )
+
         extracted_features = calc_window_features(
-            config,
-            feature_data_tsfel,
-            fs=1,
+            config=config,
+            window=feature_data,
+            fs=sampling_frequency_hz,
             verbose=0,
             single_window=True,
+            header_names=unique_feature_cols,
         )
 
-    # 4. FIX TSFEL BUG: Handle internal spectral duplicate column names if TSFEL produced any
-    if extracted_features.columns.duplicated().any():
-        # Disambiguate duplicate columns by appending _dup1, _dup2, etc.
-        cols = pd.Series(extracted_features.columns)
-        for dup in cols[cols.duplicated()].unique():
-            dup_mask = cols == dup
-            dup_indices = cols[dup_mask].index
-            for count, idx in enumerate(dup_indices[1:], start=1):
-                cols.iloc[idx] = f"{dup}_dup{count}"
-        extracted_features.columns = cols
+    # TSFEL rounds CWT frequencies to 2 decimals in Hz. With hourly data,
+    # distinct scales collapse to labels such as ``0.0Hz``. Reconstruct the
+    # scale order and express the names in cycles/hour before checking for
+    # any remaining duplicates.
+    extracted_features.columns = _rename_wavelet_columns_in_cycles_per_hour(
+        extracted_features.columns,
+        sampling_frequency_hz=sampling_frequency_hz,
+        wavelet="mexh",
+    )
 
-    # 5. Restore original variable names safely
-    new_columns = []
-    for col in extracted_features.columns:
-        parts = col.split("_", 1)
-        if len(parts) == 2 and parts[0] in reverse_alias_map:
-            orig_col = reverse_alias_map[parts[0]]
-            feature_name = parts[1]
-            new_columns.append(f"{orig_col}_{feature_name}")
-        else:
-            new_columns.append(col)
+    # TSFEL applies the same lossy 2-decimal Hz rounding to spectrogram
+    # frequency labels. Reconstruct exact bin frequencies in cycles/hour.
+    extracted_features.columns = (
+        _rename_spectrogram_columns_in_cycles_per_hour(
+            extracted_features.columns,
+            sampling_frequency_hz=sampling_frequency_hz,
+        )
+    )
 
-    extracted_features.columns = new_columns
+    duplicate_columns = (
+        extracted_features.columns[
+            extracted_features.columns.duplicated(keep=False)
+        ]
+        .unique()
+        .tolist()
+    )
 
-    # 6. Attach metadata
-    target_value = patient_df[target_col].drop_nulls().unique().last()
+    if duplicate_columns:
+        warnings.warn(
+            "Residual duplicate TSFEL names remained after wavelet and spectrogram renaming. "
+            "Deterministic suffixes were added to: "
+            f"{duplicate_columns}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    extracted_features.columns = _make_unique_column_names(
+        extracted_features.columns,
+    )
+
+    target_values = (
+        patient_df[target_col]
+        .drop_nulls()
+        .unique()
+        .to_list()
+    )
+    target_value = target_values[-1] if target_values else None
+
+    extracted_features[patient_col] = patient_ids[0]
     extracted_features[target_col] = target_value
-    extracted_features[patient_col] = patient_id
 
     feature_output_columns = [
-        col for col in extracted_features.columns
-        if col not in {patient_col, target_col}
+        column
+        for column in extracted_features.columns
+        if column not in {patient_col, target_col}
     ]
 
     extracted_features[feature_output_columns] = (
@@ -502,7 +1082,11 @@ def _process_single_patient(
         .astype(float)
     )
 
-    return pl.from_pandas(extracted_features, include_index=False)
+    return pl.from_pandas(
+        extracted_features,
+        include_index=False,
+    )
+
 
 
 def extract_tsfel_per_patient(
@@ -512,6 +1096,7 @@ def extract_tsfel_per_patient(
     feature_cols: list[str],
     target_col: str,
     n_jobs: int = -1,
+    sampling_interval_hours: float = 1.0,
 ) -> pl.DataFrame:
     """Extract TSFEL features independently for each patient or ICU stay.
 
@@ -533,6 +1118,10 @@ def extract_tsfel_per_patient(
         n_jobs:
             Number of parallel Joblib workers. ``-1`` uses all available
             logical CPU cores.
+        sampling_interval_hours:
+            Time between two consecutive observations, in hours. The default
+            is ``1.0`` (one observation per hour). It is converted to hertz
+            before being passed to TSFEL: ``fs = 1 / (hours * 3600)``.
 
     Returns:
         A DataFrame containing one row per patient and one column per
@@ -555,6 +1144,24 @@ def extract_tsfel_per_patient(
             "At least one dynamic feature column is required."
         )
 
+    if not np.isfinite(sampling_interval_hours) or sampling_interval_hours <= 0:
+        raise ValueError(
+            "sampling_interval_hours must be a finite, strictly positive "
+            f"number, got {sampling_interval_hours!r}."
+        )
+
+    sampling_interval_seconds = sampling_interval_hours * 3600.0
+    sampling_frequency_hz = 1.0 / sampling_interval_seconds
+    sampling_frequency_per_hour = sampling_frequency_hz * 3600.0
+
+    print(
+        "TSFEL sampling configuration: "
+        f"interval={sampling_interval_hours:.12g} hour(s), "
+        f"fs={sampling_frequency_hz:.15g} Hz, "
+        f"sampling_rate={sampling_frequency_per_hour:.12g} sample/hour",
+        flush=True,
+    )
+
     _validate_columns(
         df,
         [
@@ -564,6 +1171,13 @@ def extract_tsfel_per_patient(
             *feature_cols,
         ],
         context="TSFEL extraction",
+    )
+
+    _validate_regular_sampling(
+        df=df,
+        patient_col=patient_col,
+        time_col=time_col,
+        expected_interval_hours=sampling_interval_hours,
     )
 
     df = df.sort(
@@ -591,7 +1205,8 @@ def extract_tsfel_per_patient(
 
     print(
         "Starting parallel TSFEL extraction for "
-        f"{len(patient_groups)} patients..."
+        f"{len(patient_groups)} patients...",
+        flush=True,
     )
 
     results = Parallel(n_jobs=n_jobs)(
@@ -601,6 +1216,7 @@ def extract_tsfel_per_patient(
             feature_cols=feature_cols,
             patient_col=patient_col,
             target_col=target_col,
+            sampling_frequency_hz=sampling_frequency_hz,
         )
         for patient_group in tqdm(
             patient_groups,
@@ -626,13 +1242,21 @@ def filtrage_corr_var(
     patient_col: str,
     target_col: str,
     corr_threshold: float = 0.9,
+    static_features: Sequence[str] | None = None,
+    log_correlation_decisions: bool = True,
+    correlation_decision_log_path: str | None = None,
+    keep_static: bool = True,
 ) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
     """Remove correlated and zero-variance TSFEL features.
 
     Correlation filtering uses explainability scores to keep the most
     interpretable feature from each redundant pair. Variance selection and
     correlation filtering are fitted exclusively on the training set, and the
-    same selected columns are then applied to the test set.
+    same selected columns are then applied to the test data.
+
+    When ``keep_static`` is True, static features are excluded from the
+    variance and correlation filtering pipeline and always retained in the
+    output, regardless of statistical redundancy.
 
     Infinite and missing values are imputed using medians computed from the
     training data.
@@ -649,6 +1273,18 @@ def filtrage_corr_var(
         corr_threshold:
             Absolute correlation threshold above which a feature pair is
             considered redundant and one member is dropped. Defaults to 0.9.
+        static_features:
+            Optional list of static feature names. These receive a maximum
+            explainability score during correlation tie-breaking. When
+            ``keep_static`` is True, they are preserved unconditionally.
+        log_correlation_decisions:
+            Whether to print each correlation keep/drop decision.
+        correlation_decision_log_path:
+            Optional file path to persist the decision log.
+        keep_static:
+            When True, static features are excluded from variance and
+            correlation filtering and always kept in the final result.
+            Defaults to True.
 
     Returns:
         A tuple containing:
@@ -716,6 +1352,18 @@ def filtrage_corr_var(
             f"{sorted(missing_test_features)}"
         )
 
+    static_set = set(static_features) if static_features else set()
+
+    # Separate static features that should be preserved from filtering.
+    if keep_static and static_set:
+        static_in_features = sorted(static_set.intersection(feature_columns))
+        dynamic_features = [
+            col for col in feature_columns if col not in static_set
+        ]
+    else:
+        static_in_features = []
+        dynamic_features = list(feature_columns)
+
     train_features = (
         dataset_train
         .select(feature_columns)
@@ -728,17 +1376,38 @@ def filtrage_corr_var(
         .to_pandas()
     )
 
-    # Step 1: Sanitize and filter zero-variance features.
+    # Extract static columns to preserve them aside.
+    if static_in_features:
+        train_static = train_features[static_in_features]
+        test_static = test_features[static_in_features]
+        train_dynamic = train_features[dynamic_features]
+        test_dynamic = test_features[dynamic_features]
+    else:
+        train_static = None
+        test_static = None
+        train_dynamic = train_features
+        test_dynamic = test_features
+
+    # Step 1: Sanitize and filter zero-variance features (dynamic only).
     train_var, test_var, var_features = assainir_et_filtrer_variance(
-        train_features=train_features,
-        test_features=test_features,
+        train_features=train_dynamic,
+        test_features=test_dynamic,
         threshold=0.0,
     )
 
-    # Step 2: Drop correlated features using explainability scores.
+    # Step 2: Audit feature-family recognition before making decisions.
+    audit_explainability_recognition(
+        columns=train_var.columns,
+        static_features=static_features,
+    )
+
+    # Step 3: Drop correlated features using explainability scores.
     train_uncorrelated = drop_correlated_by_explainability(
         train_var,
         threshold=corr_threshold,
+        static_features=static_features,
+        log_decisions=log_correlation_decisions,
+        decision_log_path=correlation_decision_log_path,
     )
 
     if train_uncorrelated.shape[1] == 0:
@@ -751,24 +1420,30 @@ def filtrage_corr_var(
         train_uncorrelated.columns,
     ]
 
-    selected_features = train_uncorrelated.columns.tolist()
+    dynamic_selected = train_uncorrelated.columns.tolist()
 
-    if not selected_features:
+    # Reinject preserved static features at the end.
+    all_selected_features = [*static_in_features, *dynamic_selected]
+
+    if not all_selected_features:
         raise ValueError(
             "No feature remains after variance filtering."
         )
 
     train_selected = pd.DataFrame(
-        train_uncorrelated,
-        columns=selected_features,
         index=train_metadata.index,
     )
-
     test_selected = pd.DataFrame(
-        test_uncorrelated,
-        columns=selected_features,
         index=test_metadata.index,
     )
+
+    if static_in_features:
+        train_selected[static_in_features] = train_static[static_in_features]
+        test_selected[static_in_features] = test_static[static_in_features]
+
+    if dynamic_selected:
+        train_selected[dynamic_selected] = train_uncorrelated[dynamic_selected]
+        test_selected[dynamic_selected] = test_uncorrelated[dynamic_selected]
 
     train_final = pd.concat(
         [
@@ -792,7 +1467,7 @@ def filtrage_corr_var(
     )
     print(
         "Number of remaining features: "
-        f"{len(selected_features)}"
+        f"{len(all_selected_features)}"
     )
 
     return (
@@ -804,7 +1479,7 @@ def filtrage_corr_var(
             test_final,
             include_index=False,
         ),
-        selected_features,
+        all_selected_features,
     )
 
 
@@ -816,12 +1491,18 @@ def filtrage_boruta(
     max_iter: int = 100,
     seed: int = 42,
     include_tentative: bool = False,
+    static_features: Sequence[str] | None = None,
+    keep_static: bool = True,
 ) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
     """Select informative TSFEL features with the Boruta algorithm.
 
     Missing and infinite values are imputed with medians computed exclusively
     from the training set. Boruta is fitted only on the training data, and the
     resulting feature subset is then applied to the test data.
+
+    When ``keep_static`` is True, static features are excluded from the Boruta
+    selection and always retained in the output, regardless of the algorithm
+    assessment.
 
     Args:
         Dataset_train:
@@ -839,6 +1520,12 @@ def filtrage_boruta(
         include_tentative:
             Whether to retain tentative Boruta features in addition to
             confirmed features.
+        static_features:
+            Optional list of static feature names. When ``keep_static`` is
+            True, they are preserved unconditionally.
+        keep_static:
+            When True, static features are excluded from Boruta selection
+            and always kept in the final result. Defaults to True.
 
     Returns:
         A tuple containing:
@@ -892,6 +1579,18 @@ def filtrage_boruta(
             f"{sorted(missing_test_features)}"
         )
 
+    static_set = set(static_features) if static_features else set()
+
+    # Separate static features that should be preserved from Boruta selection.
+    if keep_static and static_set:
+        static_in_features = sorted(static_set.intersection(feature_columns))
+        dynamic_features = [
+            col for col in feature_columns if col not in static_set
+        ]
+    else:
+        static_in_features = []
+        dynamic_features = list(feature_columns)
+
     train_features_pd = (
         dataset_train
         .select(feature_columns)
@@ -904,10 +1603,22 @@ def filtrage_boruta(
         .to_pandas()
     )
 
-    train_features_pd, test_features_pd = (
+    # Extract static columns to preserve them aside.
+    if static_in_features:
+        train_static = train_features_pd[static_in_features]
+        test_static = test_features_pd[static_in_features]
+        train_dynamic = train_features_pd[dynamic_features]
+        test_dynamic = test_features_pd[dynamic_features]
+    else:
+        train_static = None
+        test_static = None
+        train_dynamic = train_features_pd
+        test_dynamic = test_features_pd
+
+    train_dynamic, test_dynamic = (
         _sanitize_numeric_dataframes(
-            train_features_pd,
-            test_features_pd,
+            train_dynamic,
+            test_dynamic,
         )
     )
 
@@ -940,7 +1651,7 @@ def filtrage_boruta(
     )
 
     feature_selector.fit(
-        train_features_pd.to_numpy(dtype=float),
+        train_dynamic.to_numpy(dtype=float),
         target,
     )
 
@@ -949,37 +1660,71 @@ def filtrage_boruta(
     if include_tentative:
         selected_mask |= feature_selector.support_weak_
 
-    selected_features = [
+    dynamic_selected = [
         column
         for column, selected
         in zip(
-            train_features_pd.columns,
+            train_dynamic.columns,
             selected_mask,
             strict=True,
         )
         if selected
     ]
 
-    if not selected_features:
+    # Reinject preserved static features at the beginning.
+    all_selected_features = [*static_in_features, *dynamic_selected]
+
+    if not all_selected_features:
         raise ValueError(
-            "Boruta did not select any feature."
+            "Boruta did not select any feature and no static feature is available."
         )
 
+    # Build the final feature DataFrames with static + dynamic columns.
     train_selected_features = pl.from_pandas(
-        train_features_pd.loc[
-            :,
-            selected_features,
-        ],
+        pd.DataFrame(
+            index=dataset_train.select(patient_col).to_pandas().index,
+        ),
+        include_index=False,
+    )
+    test_selected_features = pl.from_pandas(
+        pd.DataFrame(
+            index=dataset_test.select(patient_col).to_pandas().index,
+        ),
         include_index=False,
     )
 
-    test_selected_features = pl.from_pandas(
-        test_features_pd.loc[
-            :,
-            selected_features,
-        ],
-        include_index=False,
-    )
+    if static_in_features:
+        train_selected_features = pl.from_pandas(
+            train_static,
+            include_index=False,
+        )
+        test_selected_features = pl.from_pandas(
+            test_static,
+            include_index=False,
+        )
+
+    if dynamic_selected:
+        train_dyn_pl = pl.from_pandas(
+            train_dynamic.loc[:, dynamic_selected],
+            include_index=False,
+        )
+        test_dyn_pl = pl.from_pandas(
+            test_dynamic.loc[:, dynamic_selected],
+            include_index=False,
+        )
+
+        if static_in_features:
+            train_selected_features = pl.concat(
+                [train_selected_features, train_dyn_pl],
+                how="horizontal",
+            )
+            test_selected_features = pl.concat(
+                [test_selected_features, test_dyn_pl],
+                how="horizontal",
+            )
+        else:
+            train_selected_features = train_dyn_pl
+            test_selected_features = test_dyn_pl
 
     # Horizontal concatenation is explicit and preserves row alignment.
     train_final = pl.concat(
@@ -1000,13 +1745,15 @@ def filtrage_boruta(
 
     print(
         "Boruta completed: "
-        f"{len(selected_features)} features retained."
+        f"{len(all_selected_features)} features retained "
+        f"({len(static_in_features)} static + "
+        f"{len(dynamic_selected)} dynamic)."
     )
 
     return (
         train_final,
         test_final,
-        selected_features,
+        all_selected_features,
     )
 
 
@@ -1071,9 +1818,13 @@ def extraire_racine(
         # TSFEL replaces spaces with underscores in output column names.
         escaped_suffix = re.escape(suffix.replace(" ", "_"))
 
-        pattern = (
-            rf"_{escaped_suffix}(?:_\d+)?$"
-        )
+        if suffix.lower().startswith("wavelet "):
+            pattern = (
+                rf"_{escaped_suffix}"
+                rf"(?:_scale_\d+_[0-9.eE+-]+cph|_\d+)?$"
+            )
+        else:
+            pattern = rf"_{escaped_suffix}(?:_\d+)?$"
 
         match = re.search(
             pattern,
@@ -1086,6 +1837,142 @@ def extraire_racine(
 
     return None
 
+
+
+def extraire_variable_source(
+    column_name: str,
+    source_features: Sequence[str],
+) -> str | None:
+    """Identify the original signal behind a TSFEL feature column.
+
+    The longest matching source name is retained so overlapping names such as
+    ``fio2`` and ``fio2_corr`` are handled deterministically.
+
+    Args:
+        column_name:
+            Complete TSFEL-generated feature name.
+        source_features:
+            Original dynamic variables passed to TSFEL.
+
+    Returns:
+        The matching source variable, or ``None`` when no source matches.
+    """
+    candidates = [
+        source
+        for source in source_features
+        if column_name == source
+        or column_name.startswith(f"{source}_")
+    ]
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=len)
+
+
+def grouper_colonnes_par_variable_source(
+    columns: Sequence[str],
+    source_features: Sequence[str],
+    strict: bool = True,
+) -> dict[str, list[str]]:
+    """Group TSFEL feature columns by their original dynamic variable.
+
+    Args:
+        columns:
+            TSFEL feature column names.
+        source_features:
+            Original dynamic variables supplied to TSFEL.
+        strict:
+            Raise an error when a column cannot be assigned to a source.
+
+    Returns:
+        Mapping from original variable name to its derived TSFEL columns.
+    """
+    unique_sources = list(dict.fromkeys(source_features))
+
+    if not unique_sources:
+        raise ValueError(
+            "source_features must contain at least one original variable."
+        )
+
+    root_map: dict[str, list[str]] = {}
+    unmatched_columns: list[str] = []
+
+    for column in columns:
+        source = extraire_variable_source(
+            column_name=column,
+            source_features=unique_sources,
+        )
+
+        if source is None:
+            unmatched_columns.append(column)
+            continue
+
+        root_map.setdefault(source, []).append(column)
+
+    if unmatched_columns:
+        message = (
+            f"{len(unmatched_columns)} TSFEL column(s) could not be assigned "
+            "to an original source variable. Examples: "
+            f"{unmatched_columns[:10]}"
+        )
+
+        if strict:
+            raise ValueError(message)
+
+        print(f"[WARNING] {message}", flush=True)
+
+    empty_sources = [
+        source
+        for source in unique_sources
+        if source not in root_map
+    ]
+
+    if empty_sources:
+        print(
+            "[WARNING] No TSFEL output found for source feature(s): "
+            f"{empty_sources}",
+            flush=True,
+        )
+
+    return root_map
+
+
+def _log_source_feature_groups(
+    root_map: dict[str, list[str]],
+    source_features: Sequence[str],
+    total_columns: int,
+) -> list[str]:
+    """Log source-variable groups and return them in pipeline order.
+
+    Args:
+        root_map: Mapping from original variable name to TSFEL columns.
+        source_features: Original dynamic variables supplied to TSFEL.
+        total_columns: Total number of TSFEL feature columns.
+
+    Returns:
+        Ordered list of source variable names present in ``root_map``.
+    """
+    ordered_sources = [
+        source
+        for source in dict.fromkeys(source_features)
+        if source in root_map
+    ]
+
+    print(
+        "[BLOCK GROUPING] "
+        f"{total_columns} TSFEL feature(s) grouped into "
+        f"{len(ordered_sources)} source variable(s):",
+        flush=True,
+    )
+
+    for source in ordered_sources:
+        print(
+            f"  - {source}: {len(root_map[source])} TSFEL feature(s)",
+            flush=True,
+        )
+
+    return ordered_sources
 
 def calculer_matrice_correlation(
     df: PolarsFrame,
@@ -1201,462 +2088,796 @@ def calculer_matrice_correlation(
     return corr_pl, correlated_pairs
 
 
-def afficher_correlation_par_blocs(
-    df: PolarsFrame,
-    exclude_cols: Sequence[str] | None = None,
-    threshold: float = 0.5,
-    figsize_per_block: tuple[int, int] = (10, 8),
-    cmap: str = "RdBu_r",
-    output_dir: str | None = "comparison_figs",
-) -> None:
-    """Display and save correlation matrix as block heatmaps by variable.
-
-    Features are grouped by their original variable name (root). The full
-    correlation matrix is displayed as a single heatmap with grid lines
-    separating each block. For each pair of variable groups with at least
-    one correlation above the threshold, a dedicated sub-heatmap is shown.
-
-    All figures are saved to ``output_dir`` (default: ``comparison_figs/``).
+def _compute_block_figure_size(
+    n_rows: int,
+    n_cols: int,
+    min_size: float = 12.0,
+    max_size: float = 26.0,
+    inches_per_feature: float = 0.18,
+) -> tuple[float, float]:
+    """Return a large but bounded figure size for a correlation block.
 
     Args:
-        df:
-            DataFrame containing TSFEL features.
-        exclude_cols:
-            Columns to exclude from the visualization.
-        threshold:
-            Minimum absolute correlation to display a cross-block heatmap.
-        figsize_per_block:
-            Figure size (width, height) for each sub-heatmap.
-        cmap:
-            Matplotlib colormap name for the heatmaps.
-        output_dir:
-            Directory to save figures. Set to ``None`` to disable saving.
+        n_rows: Number of rows in the correlation matrix.
+        n_cols: Number of columns in the correlation matrix.
+        min_size: Minimum figure dimension in inches.
+        max_size: Maximum figure dimension in inches.
+        inches_per_feature: Inches allocated per feature dimension.
+
+    Returns:
+        A ``(width, height)`` tuple in inches.
+    """
+    width = min(max_size, max(min_size, n_cols * inches_per_feature))
+    height = min(max_size, max(min_size, n_rows * inches_per_feature))
+    return width, height
+
+
+def _short_feature_label(
+    feature_name: str,
+    source_name: str,
+) -> str:
+    """Remove the repeated source prefix from a derived feature label.
+
+    Args:
+        feature_name: Full TSFEL feature name.
+        source_name: Original source variable name.
+
+    Returns:
+        The feature name with the source prefix removed.
+    """
+    prefix = f"{source_name}_"
+    return (
+        feature_name[len(prefix):]
+        if feature_name.startswith(prefix)
+        else feature_name
+    )
+
+
+def _render_cross_block(
+    sub_corr: pd.DataFrame,
+    path: str,
+    cmap: str,
+    dpi: int,
+    source_a: str,
+    source_b: str,
+    source_a_is_static: bool,
+    source_b_is_static: bool,
+    threshold: float | None = None,
+    show_colorbar: bool = True,
+) -> None:
+    """Render one cross-source correlation block.
+
+    Dynamic x dynamic blocks remain label-free for readability. For a
+    static x dynamic block, the singleton static axis displays its source
+    name and the dynamic axis displays the associated TSFEL feature names.
+
+    Args:
+        sub_corr: Sub-matrix of correlations between two source groups.
+        path: Output image file path.
+        cmap: Matplotlib colormap name.
+        dpi: Image resolution.
+        source_a: Name of the row source variable.
+        source_b: Name of the column source variable.
+        source_a_is_static: Whether ``source_a`` is a static feature.
+        source_b_is_static: Whether ``source_b`` is a static feature.
+        threshold: Optional absolute correlation threshold for masking.
+        show_colorbar: Whether to include a colorbar.
+    """
+    matrix = sub_corr.to_numpy(dtype=np.float32, copy=True)
+
+    if threshold is not None:
+        matrix = np.ma.masked_where(
+            ~np.isfinite(matrix) | (np.abs(matrix) < threshold),
+            matrix,
+        )
+    else:
+        matrix = np.ma.masked_invalid(matrix)
+
+    if source_a_is_static or source_b_is_static:
+        # A singleton static row/column benefits from a wide, shallow figure.
+        width = min(34.0, max(16.0, sub_corr.shape[1] * 0.24))
+        height = min(18.0, max(5.0, sub_corr.shape[0] * 0.24))
+    else:
+        width, height = _compute_block_figure_size(
+            n_rows=sub_corr.shape[0],
+            n_cols=sub_corr.shape[1],
+        )
+
+    fig, ax = plt.subplots(figsize=(width, height))
+    image = ax.imshow(
+        matrix,
+        cmap=cmap,
+        vmin=-1,
+        vmax=1,
+        aspect="auto",
+        interpolation="nearest",
+        rasterized=True,
+    )
+
+    if source_a_is_static:
+        ax.set_yticks(np.arange(sub_corr.shape[0]))
+        ax.set_yticklabels([source_a] * sub_corr.shape[0], fontsize=11)
+    else:
+        ax.set_yticks([])
+
+    if source_b_is_static:
+        ax.set_xticks(np.arange(sub_corr.shape[1]))
+        ax.set_xticklabels([source_b] * sub_corr.shape[1], fontsize=11)
+    elif source_a_is_static:
+        ax.set_xticks(np.arange(sub_corr.shape[1]))
+        ax.set_xticklabels(
+            [
+                _short_feature_label(column, source_b)
+                for column in sub_corr.columns
+            ],
+            rotation=90,
+            fontsize=7,
+        )
+    else:
+        ax.set_xticks([])
+
+    if source_b_is_static and not source_a_is_static:
+        ax.set_yticks(np.arange(sub_corr.shape[0]))
+        ax.set_yticklabels(
+            [
+                _short_feature_label(index, source_a)
+                for index in sub_corr.index
+            ],
+            fontsize=7,
+        )
+
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_title("")
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    if show_colorbar:
+        colorbar = fig.colorbar(
+            image,
+            ax=ax,
+            fraction=0.03,
+            pad=0.02,
+            ticks=[-1.0, -0.5, 0.0, 0.5, 1.0],
+        )
+        colorbar.set_label("Pearson correlation", fontsize=10)
+        colorbar.ax.tick_params(labelsize=9)
+
+    # Avoid tight_layout on dense labels; reserve explicit margins instead.
+    if source_a_is_static:
+        fig.subplots_adjust(
+            left=0.08, right=0.93, bottom=0.38, top=0.98
+        )
+    elif source_b_is_static:
+        fig.subplots_adjust(
+            left=0.38, right=0.93, bottom=0.08, top=0.98
+        )
+    else:
+        fig.subplots_adjust(
+            left=0.01, right=0.93, bottom=0.01, top=0.99
+        )
+
+    _safe_save_figure(fig, path, dpi=dpi)
+    plt.close(fig)
+    del fig, ax, image, matrix
+    gc.collect()
+
+
+
+def _build_static_temporal_summary(
+    corr_matrix: pd.DataFrame,
+    root_map: dict[str, list[str]],
+    static_roots: Sequence[str],
+    temporal_roots: Sequence[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Aggregate static-to-temporal correlations by source variable.
+
+    Each cell contains the signed correlation belonging to the TSFEL feature
+    pair with the largest absolute correlation for the corresponding
+    ``static source x temporal source`` pair. A detail table records the exact
+    columns responsible for every displayed cell.
+
+    Args:
+        corr_matrix: Full Pearson correlation matrix.
+        root_map: Mapping from source variable to TSFEL columns.
+        static_roots: Static source variable names.
+        temporal_roots: Temporal source variable names.
+
+    Returns:
+        A tuple of the summary matrix and the detail DataFrame.
+    """
+    summary = pd.DataFrame(
+        index=list(static_roots),
+        columns=list(temporal_roots),
+        dtype=float,
+    )
+    details: list[dict[str, object]] = []
+
+    for static_source in static_roots:
+        for temporal_source in temporal_roots:
+            sub_corr = corr_matrix.loc[
+                root_map[static_source],
+                root_map[temporal_source],
+            ]
+            values = sub_corr.to_numpy(dtype=float, copy=False)
+
+            if values.size == 0 or np.isnan(values).all():
+                summary.loc[static_source, temporal_source] = np.nan
+                details.append({
+                    "static_feature": static_source,
+                    "temporal_feature": temporal_source,
+                    "static_column": None,
+                    "temporal_tsfel_column": None,
+                    "correlation": np.nan,
+                    "absolute_correlation": np.nan,
+                })
+                continue
+
+            flat_index = int(np.nanargmax(np.abs(values)))
+            row_index, column_index = np.unravel_index(
+                flat_index, values.shape
+            )
+            correlation = float(values[row_index, column_index])
+            static_column = str(sub_corr.index[row_index])
+            temporal_column = str(sub_corr.columns[column_index])
+
+            summary.loc[static_source, temporal_source] = correlation
+            details.append({
+                "static_feature": static_source,
+                "temporal_feature": temporal_source,
+                "static_column": static_column,
+                "temporal_tsfel_column": temporal_column,
+                "correlation": correlation,
+                "absolute_correlation": abs(correlation),
+            })
+
+    return summary, pd.DataFrame(details)
+
+
+def _render_static_temporal_summary(
+    summary: pd.DataFrame,
+    path: str,
+    cmap: str,
+    dpi: int,
+    threshold: float | None = None,
+    show_colorbar: bool = True,
+    annotate_values: bool = True,
+) -> None:
+    """Render one compact static-features x temporal-sources matrix.
+
+    Args:
+        summary: Aggregated static x temporal correlation matrix.
+        path: Output image file path.
+        cmap: Matplotlib colormap name.
+        dpi: Image resolution.
+        threshold: Optional absolute correlation threshold for masking.
+        show_colorbar: Whether to include a colorbar.
+        annotate_values: Whether to overlay numeric values on cells.
+    """
+    matrix = summary.to_numpy(dtype=np.float32, copy=True)
+    invalid_mask = ~np.isfinite(matrix)
+
+    if threshold is not None:
+        matrix = np.ma.masked_where(
+            invalid_mask | (np.abs(matrix) < threshold),
+            matrix,
+        )
+    else:
+        matrix = np.ma.masked_where(invalid_mask, matrix)
+
+    n_rows, n_cols = summary.shape
+    width = min(30.0, max(10.0, 1.35 * n_cols + 3.0))
+    height = min(20.0, max(5.0, 0.72 * n_rows + 3.0))
+
+    fig, ax = plt.subplots(figsize=(width, height))
+    image = ax.imshow(
+        matrix,
+        cmap=cmap,
+        vmin=-1,
+        vmax=1,
+        aspect="auto",
+        interpolation="nearest",
+        rasterized=True,
+    )
+
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_xticklabels(
+        summary.columns.tolist(), rotation=45, ha="right", fontsize=10
+    )
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_yticklabels(summary.index.tolist(), fontsize=10)
+    ax.set_xlabel("Temporal source features", fontsize=11)
+    ax.set_ylabel("Static features", fontsize=11)
+
+    if annotate_values:
+        raw_values = summary.to_numpy(dtype=float, copy=False)
+        for row in range(n_rows):
+            for column in range(n_cols):
+                value = raw_values[row, column]
+                if not np.isfinite(value):
+                    continue
+                if threshold is not None and abs(value) < threshold:
+                    continue
+                ax.text(
+                    column, row, f"{value:.2f}",
+                    ha="center", va="center", fontsize=8,
+                )
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    if show_colorbar:
+        colorbar = fig.colorbar(
+            image,
+            ax=ax,
+            fraction=0.035,
+            pad=0.03,
+            ticks=[-1.0, -0.5, 0.0, 0.5, 1.0],
+        )
+        colorbar.set_label("Pearson correlation", fontsize=10)
+        colorbar.ax.tick_params(labelsize=9)
+
+    fig.subplots_adjust(
+        left=0.18, right=0.93, bottom=0.25, top=0.97
+    )
+    _safe_save_figure(fig, path, dpi=dpi)
+    plt.close(fig)
+    del fig, ax, image, matrix
+    gc.collect()
+
+def afficher_correlation_par_blocs(
+    df: PolarsFrame,
+    source_features: Sequence[str],
+    static_features: Sequence[str] | None = None,
+    exclude_cols: Sequence[str] | None = None,
+    threshold: float = 0.5,
+    cmap: str = "RdBu_r",
+    output_dir: str | None = "comparison_figs",
+    corr_matrix: pd.DataFrame | None = None,
+    max_cross_heatmaps: int | None = None,
+    block_heatmap_dpi: int = 160,
+    show_colorbar: bool = True,
+    annotate_static_summary: bool = True,
+) -> None:
+    """Generate temporal cross-blocks and one static-temporal summary.
+
+    Dynamic x dynamic source pairs are rendered as detailed TSFEL blocks.
+    Static x static pairs are omitted. All static x temporal relationships are
+    condensed into one matrix whose rows are the original static features and
+    whose columns are the original temporal source features. Each summary cell
+    is the signed correlation of the strongest underlying TSFEL pair.
+
+    Args:
+        df: DataFrame containing TSFEL feature columns.
+        source_features: Original dynamic and static variable names.
+        static_features: Optional list of static feature names.
+        exclude_cols: Columns to exclude from correlation computation.
+        threshold: Absolute correlation threshold for threshold-mode output.
+        cmap: Matplotlib colormap name.
+        output_dir: Base directory for output images.
+        corr_matrix: Optional precomputed Pearson correlation matrix.
+        max_cross_heatmaps: Maximum number of temporal cross-blocks to render.
+        block_heatmap_dpi: Image resolution for block heatmaps.
+        show_colorbar: Whether to include colorbars on heatmaps.
+        annotate_static_summary: Whether to annotate the static summary cells.
 
     Raises:
         ValueError:
-            If the input is empty or contains fewer than two numeric columns.
+            If the input is empty, the threshold is invalid, or static
+            features are not present in source features.
     """
     df = _ensure_dataframe(df)
-
     if df.is_empty():
         raise ValueError(
             "Cannot display correlation blocks for an empty DataFrame."
         )
+    if not (0 < threshold <= 1):
+        raise ValueError(
+            f"Threshold must be in (0, 1], got {threshold}."
+        )
+
+    static_set = set(static_features or [])
+    unknown_static = static_set - set(source_features)
+    if unknown_static:
+        raise ValueError(
+            "static_features contains values absent from source_features: "
+            f"{sorted(unknown_static)}"
+        )
 
     exclude_set = set(exclude_cols) if exclude_cols else set()
-
     numeric_cols = [
-        col
-        for col in df.columns
+        col for col in df.columns
         if col not in exclude_set
         and df[col].dtype in (
-            pl.Float32,
-            pl.Float64,
-            pl.Int32,
-            pl.Int64,
+            pl.Float32, pl.Float64, pl.Int32, pl.Int64
         )
     ]
-
     if len(numeric_cols) < 2:
-        raise ValueError(
-            "At least two numeric columns are required."
-        )
+        raise ValueError("At least two numeric columns are required.")
 
-    # Create output directory.
-    if output_dir is not None:
-        os.makedirs(output_dir, exist_ok=True)
-
-    # Extract roots and group columns by variable.
-    suffixes = generer_suffixes_tsfel()
-
-    root_map: dict[str, list[str]] = {}
-    for col in numeric_cols:
-        root = extraire_racine(col, suffixes)
-        if root is None:
-            root = col  # Fallback: feature is its own root
-        root_map.setdefault(root, []).append(col)
-
-    # Sort roots alphabetically for deterministic ordering.
-    sorted_roots = sorted(root_map.keys())
-
-    # Build ordered column list: all features of root 1, then root 2, etc.
+    root_map = grouper_colonnes_par_variable_source(
+        columns=numeric_cols,
+        source_features=source_features,
+        strict=True,
+    )
+    sorted_roots = _log_source_feature_groups(
+        root_map=root_map,
+        source_features=source_features,
+        total_columns=len(numeric_cols),
+    )
     ordered_cols = [
-        col
-        for root in sorted_roots
-        for col in root_map[root]
+        column
+        for source in sorted_roots
+        for column in root_map[source]
     ]
 
-    # Compute correlation matrix on ordered columns.
-    numeric_df = (
-        df.select(ordered_cols)
-        .to_pandas()
-        .apply(pd.to_numeric, errors="coerce")
-    )
-
-    corr_matrix = numeric_df.corr(method="pearson")
-
-    # Build block boundaries for grid lines.
-    block_sizes = [len(root_map[root]) for root in sorted_roots]
-    boundaries = np.cumsum(block_sizes).tolist()
-
-    # --- Full block heatmap ---
-    # Limit DPI for large feature sets to avoid memory exhaustion.
-    n_cols = len(ordered_cols)
-    save_dpi = min(300, max(72, 15000 // n_cols))
-
-    fig, ax = plt.subplots(
-        figsize=(
-            max(12, len(sorted_roots) * 1.5),
-            max(10, n_cols // 3),
+    if corr_matrix is None:
+        _, corr_matrix = _compute_numeric_correlation(
+            df.select(ordered_cols).to_pandas()
         )
+    else:
+        missing = set(ordered_cols) - set(corr_matrix.columns)
+        if missing:
+            raise ValueError(
+                "Precomputed correlation matrix is missing columns: "
+                f"{sorted(missing)}"
+            )
+        corr_matrix = corr_matrix.loc[ordered_cols, ordered_cols]
+        print(
+            "[STEP 2.1] Reusing precomputed correlation matrix.",
+            flush=True,
+        )
+
+    normal_dir = (
+        os.path.join(output_dir, "Normal_Mode")
+        if output_dir is not None else None
     )
-
-    sns.heatmap(
-        corr_matrix,
-        cmap=cmap,
-        center=0,
-        vmin=-1,
-        vmax=1,
-        square=True,
-        cbar_kws={"shrink": 0.5},
-        ax=ax,
-        linewidths=0.5,
-        linecolor="lightgray",
+    threshold_dir = (
+        os.path.join(output_dir, "Threshold_Mode")
+        if output_dir is not None else None
     )
+    for directory in (normal_dir, threshold_dir):
+        if directory is not None:
+            os.makedirs(directory, exist_ok=True)
 
-    # Draw block separator lines.
-    for bound in boundaries:
-        ax.axhline(y=bound, color="black", linewidth=2)
-        ax.axvline(x=bound, color="black", linewidth=2)
+    static_roots = [
+        source for source in sorted_roots if source in static_set
+    ]
+    temporal_roots = [
+        source for source in sorted_roots if source not in static_set
+    ]
 
-    # Set tick labels at block midpoints (root names).
-    mid_points = []
-    cumulative = 0
-    for i, root in enumerate(sorted_roots):
-        cumulative += block_sizes[i]
-        mid_points.append(cumulative)
+    if static_roots and temporal_roots:
+        static_summary, static_details = _build_static_temporal_summary(
+            corr_matrix=corr_matrix,
+            root_map=root_map,
+            static_roots=static_roots,
+            temporal_roots=temporal_roots,
+        )
+        print(
+            "[STATIC SUMMARY] Rendering one matrix with "
+            f"{len(static_roots)} static feature(s) x "
+            f"{len(temporal_roots)} temporal source feature(s).",
+            flush=True,
+        )
 
-    ax.set_xticks(
-        [mp - block_sizes[i] // 2 for i, mp in enumerate(mid_points)]
-    )
-    ax.set_xticklabels(
-        sorted_roots,
-        rotation=45,
-        ha="right",
-        fontsize=8,
-    )
-    ax.set_yticks(
-        [mp - block_sizes[i] // 2 for i, mp in enumerate(mid_points)]
-    )
-    ax.set_yticklabels(
-        sorted_roots,
-        fontsize=8,
-    )
-
-    ax.set_title(
-        "Correlation Matrix (grouped by variable root)\n"
-        f"{n_cols} features, {len(sorted_roots)} variable groups",
-        fontsize=12,
-    )
-
-    plt.tight_layout()
-
-    if output_dir is not None:
-        path = os.path.join(output_dir, "corr_full_blocks.png")
-        fig.savefig(path, dpi=save_dpi, bbox_inches="tight")
-        print(f"Saved: {path} (dpi={save_dpi})")
-
-    plt.show()
-    plt.close(fig)
-
-    # --- Cross-block heatmaps for highly correlated pairs ---
-    print(f"Cross-block heatmaps (|corr| >= {threshold}):")
-
-    for i, root_a in enumerate(sorted_roots):
-        cols_a = root_map[root_a]
-        for j, root_b in enumerate(sorted_roots):
-            if j <= i:
-                continue
-
-            cols_b = root_map[root_b]
-
-            # Extract sub-matrix between the two groups.
-            sub_corr = corr_matrix.loc[cols_a, cols_b]
-            max_abs = float(sub_corr.abs().max().max())
-
-            if max_abs < threshold:
-                continue
-
-            fig2, ax2 = plt.subplots(figsize=figsize_per_block)
-
-            sns.heatmap(
-                sub_corr,
+        if normal_dir is not None:
+            _render_static_temporal_summary(
+                summary=static_summary,
+                path=os.path.join(
+                    normal_dir, "static_vs_temporal_summary.png"
+                ),
                 cmap=cmap,
-                center=0,
-                vmin=-1,
-                vmax=1,
-                square=True,
-                cbar_kws={"shrink": 0.8},
-                ax=ax2,
-                annot=False,
-                linewidths=0.3,
-                linecolor="gray",
+                dpi=block_heatmap_dpi,
+                threshold=None,
+                show_colorbar=show_colorbar,
+                annotate_values=annotate_static_summary,
+            )
+            static_details.to_csv(
+                os.path.join(
+                    normal_dir, "static_vs_temporal_details.csv"
+                ),
+                index=False,
             )
 
-            ax2.set_title(
-                f"{root_a}  x  {root_b}\n"
-                f"Max |corr| = {max_abs:.3f}",
-                fontsize=11,
+        if threshold_dir is not None:
+            _render_static_temporal_summary(
+                summary=static_summary,
+                path=os.path.join(
+                    threshold_dir, "static_vs_temporal_summary.png"
+                ),
+                cmap=cmap,
+                dpi=block_heatmap_dpi,
+                threshold=threshold,
+                show_colorbar=show_colorbar,
+                annotate_values=annotate_static_summary,
+            )
+            static_details.loc[
+                static_details["absolute_correlation"] >= threshold
+            ].to_csv(
+                os.path.join(
+                    threshold_dir,
+                    "static_vs_temporal_details.csv",
+                ),
+                index=False,
             )
 
-            plt.tight_layout()
+        for detail in static_details.itertuples(index=False):
+            print(
+                "[STATIC CORR] "
+                f"{detail.static_feature} x {detail.temporal_feature}: "
+                f"corr={detail.correlation:+.6f}, "
+                f"via {detail.temporal_tsfel_column!r}",
+                flush=True,
+            )
 
-            if output_dir is not None:
-                safe_a = root_a.replace(" ", "_").replace("/", "_")
-                safe_b = root_b.replace(" ", "_").replace("/", "_")
-                path = os.path.join(
-                    output_dir,
-                    f"cross_block_{safe_a}_x_{safe_b}.png",
+    # Individual images are now reserved for temporal x temporal blocks.
+    candidates: list[tuple[float, str, str]] = []
+    for index_a, source_a in enumerate(temporal_roots):
+        for source_b in temporal_roots[index_a + 1:]:
+            sub_corr = corr_matrix.loc[
+                root_map[source_a],
+                root_map[source_b],
+            ]
+            values = sub_corr.to_numpy(dtype=float, copy=False)
+            max_abs = (
+                float(np.nanmax(np.abs(values)))
+                if values.size and not np.isnan(values).all()
+                else float("nan")
+            )
+            candidates.append((max_abs, source_a, source_b))
+
+    candidates.sort(
+        key=lambda item: -np.nan_to_num(item[0], nan=-1.0)
+    )
+    if max_cross_heatmaps is not None:
+        candidates = candidates[:max_cross_heatmaps]
+
+    print(
+        f"[STEP 2.2] Rendering {len(candidates)} temporal x temporal "
+        "cross-block pair(s).",
+        flush=True,
+    )
+
+    normal_count = 0
+    threshold_count = 0
+    for rank, (max_abs, source_a, source_b) in enumerate(
+        candidates, start=1
+    ):
+        sub_corr = corr_matrix.loc[
+            root_map[source_a], root_map[source_b]
+        ]
+        safe_a = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_a)
+        safe_b = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_b)
+        filename = (
+            f"cross_block_{rank:03d}_{safe_a}_x_{safe_b}.png"
+        )
+
+        render_kwargs = {
+            "sub_corr": sub_corr,
+            "cmap": cmap,
+            "dpi": block_heatmap_dpi,
+            "source_a": source_a,
+            "source_b": source_b,
+            "source_a_is_static": False,
+            "source_b_is_static": False,
+            "show_colorbar": show_colorbar,
+        }
+
+        if normal_dir is not None:
+            _render_cross_block(
+                path=os.path.join(normal_dir, filename),
+                threshold=None,
+                **render_kwargs,
+            )
+        normal_count += 1
+
+        if np.isfinite(max_abs) and max_abs >= threshold:
+            if threshold_dir is not None:
+                _render_cross_block(
+                    path=os.path.join(threshold_dir, filename),
+                    threshold=threshold,
+                    **render_kwargs,
                 )
-                fig2.savefig(path, dpi=300, bbox_inches="tight")
-                print(f"Saved: {path}")
+            threshold_count += 1
 
-            plt.show()
-            plt.close(fig2)
+        print(
+            f"[BLOCK {rank}/{len(candidates)}] "
+            f"{source_a} x {source_b}: "
+            f"{len(root_map[source_a])} x "
+            f"{len(root_map[source_b])}, "
+            f"max |corr|={max_abs:.4f}",
+            flush=True,
+        )
+        del sub_corr
 
-    print("Done.")
-
+    print(
+        "[STEP 2] Correlation figures complete: "
+        f"Normal temporal blocks={normal_count}, "
+        f"Threshold temporal blocks={threshold_count}, "
+        f"static summary={'generated' if static_roots and temporal_roots else 'not generated'}.",
+        flush=True,
+    )
 
 def generer_map_correlation_complete(
     df: PolarsFrame,
+    source_features: Sequence[str],
     exclude_cols: Sequence[str] | None = None,
     cmap: str = "RdBu_r",
     output_path: str | None = "comparison_figs/corr_complete_map.png",
+    corr_matrix: pd.DataFrame | None = None,
+    max_full_heatmap_features: int = 300,
+    max_block_heatmaps: int = 100,
+    full_heatmap_dpi: int = 120,
+    block_heatmap_dpi: int = 150,
 ) -> pl.DataFrame:
-    """Generate a single large correlation heatmap grouped by variable root.
-
-    All features are ordered by their original variable name (root), and a
-    single heatmap is displayed and optionally saved. Block separator lines
-    and root labels make it easy to identify correlated groups.
+    """Generate a bounded-memory complete map or a capped set of blocks.
 
     Args:
-        df:
-            DataFrame containing TSFEL features.
-        exclude_cols:
-            Columns to exclude from the visualization.
-        cmap:
-            Matplotlib colormap name for the heatmap.
-        output_path:
-            Path to save the figure. Set to ``None`` to disable saving.
+        df: DataFrame containing TSFEL feature columns.
+        source_features: Original dynamic and static variable names.
+        exclude_cols: Columns to exclude from correlation computation.
+        cmap: Matplotlib colormap name.
+        output_path: Output image file path for the complete map.
+        corr_matrix: Optional precomputed Pearson correlation matrix.
+        max_full_heatmap_features: Maximum feature count before switching to
+            block mode.
+        max_block_heatmaps: Maximum number of block maps to generate.
+        full_heatmap_dpi: Image resolution for the complete map.
+        block_heatmap_dpi: Image resolution for individual blocks.
 
     Returns:
         The correlation matrix as a Polars DataFrame.
 
     Raises:
         ValueError:
-            If the input is empty or contains fewer than two numeric columns.
+            If the input is empty or fewer than two numeric columns remain.
     """
     df = _ensure_dataframe(df)
-
     if df.is_empty():
-        raise ValueError(
-            "Cannot generate correlation map for an empty DataFrame."
-        )
+        raise ValueError("Cannot generate correlation map for an empty DataFrame.")
 
     exclude_set = set(exclude_cols) if exclude_cols else set()
-
     numeric_cols = [
-        col
-        for col in df.columns
+        col for col in df.columns
         if col not in exclude_set
-        and df[col].dtype in (
-            pl.Float32,
-            pl.Float64,
-            pl.Int32,
-            pl.Int64,
-        )
+        and df[col].dtype in (pl.Float32, pl.Float64, pl.Int32, pl.Int64)
     ]
-
     if len(numeric_cols) < 2:
-        raise ValueError(
-            "At least two numeric columns are required."
-        )
+        raise ValueError("At least two numeric columns are required.")
 
-    # Extract roots and group columns by variable.
-    suffixes = generer_suffixes_tsfel()
-
-    root_map: dict[str, list[str]] = {}
-    for col in numeric_cols:
-        root = extraire_racine(col, suffixes)
-        if root is None:
-            root = col
-        root_map.setdefault(root, []).append(col)
-
-    sorted_roots = sorted(root_map.keys())
-
+    root_map = grouper_colonnes_par_variable_source(
+        columns=numeric_cols,
+        source_features=source_features,
+        strict=True,
+    )
+    sorted_roots = _log_source_feature_groups(
+        root_map=root_map,
+        source_features=source_features,
+        total_columns=len(numeric_cols),
+    )
     ordered_cols = [
-        col
-        for root in sorted_roots
-        for col in root_map[root]
+        column
+        for source in sorted_roots
+        for column in root_map[source]
     ]
 
-    # Compute correlation matrix.
-    numeric_df = (
-        df.select(ordered_cols)
-        .to_pandas()
-        .apply(pd.to_numeric, errors="coerce")
-    )
-
-    corr_matrix = numeric_df.corr(method="pearson")
-
-    block_sizes = [len(root_map[root]) for root in sorted_roots]
-    boundaries = np.cumsum(block_sizes).tolist()
-
-    # Determine figure size based on number of features.
-    n_features = len(ordered_cols)
-    fig_size = max(14, n_features // 4)
-
-    # Limit DPI for large feature sets to avoid memory exhaustion.
-    save_dpi = min(300, max(72, 15000 // n_features))
-    dpi_threshold = 100  # Below this, the full map is considered unreadable.
-
-    # Build index mapping: root -> row/col slice in corr_matrix.
-    root_slices: list[tuple[str, slice]] = []
-    cumulative = 0
-    for root in sorted_roots:
-        size = len(root_map[root])
-        root_slices.append((root, slice(cumulative, cumulative + size)))
-        cumulative += size
-
-    if save_dpi < dpi_threshold:
-        # DPI too low — generate individual block heatmaps instead.
-        blocks_dir = os.path.join(
-            os.path.dirname(output_path) if output_path else "comparison_figs",
-            "all_correlations",
+    if corr_matrix is None:
+        _, corr_matrix = _compute_numeric_correlation(
+            df.select(ordered_cols).to_pandas()
         )
-        os.makedirs(blocks_dir, exist_ok=True)
-
-        print(
-            f"Full map DPI ({save_dpi}) is below {dpi_threshold}. "
-            f"Generating individual block heatmaps to: {blocks_dir}/"
-        )
-
-        saved_count = 0
-        for i, (root_a, sl_a) in enumerate(root_slices):
-            for j, (root_b, sl_b) in enumerate(root_slices):
-                if j < i:
-                    continue
-
-                sub_corr = corr_matrix.iloc[sl_a, sl_b]
-
-                fig_b, ax_b = plt.subplots(
-                    figsize=(max(6, len(root_b) * 0.6), max(5, len(root_a) * 0.6))
-                )
-
-                sns.heatmap(
-                    sub_corr,
-                    cmap=cmap,
-                    center=0,
-                    vmin=-1,
-                    vmax=1,
-                    square=True,
-                    cbar_kws={"shrink": 0.8},
-                    ax=ax_b,
-                    linewidths=0.3,
-                    linecolor="gray",
-                )
-
-                if i == j:
-                    ax_b.set_title(
-                        f"{root_a}  (self-block)\n"
-                        f"{len(root_map[root_a])} features",
-                        fontsize=10,
-                    )
-                else:
-                    max_abs = float(sub_corr.abs().max().max())
-                    ax_b.set_title(
-                        f"{root_a}  x  {root_b}\n"
-                        f"Max |corr| = {max_abs:.3f}",
-                        fontsize=10,
-                    )
-
-                plt.tight_layout()
-
-                safe_a = root_a.replace(" ", "_").replace("/", "_")
-                safe_b = root_b.replace(" ", "_").replace("/", "_")
-                path = os.path.join(
-                    blocks_dir,
-                    f"block_{safe_a}_x_{safe_b}.png",
-                )
-                fig_b.savefig(path, dpi=200, bbox_inches="tight")
-                saved_count += 1
-                plt.close(fig_b)
-
-        print(f"Saved {saved_count} block heatmap(s) to {blocks_dir}/")
     else:
-        # DPI high enough — generate full heatmap normally.
-        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+        missing = set(ordered_cols) - set(corr_matrix.columns)
+        if missing:
+            raise ValueError(
+                "Precomputed correlation matrix is missing columns: "
+                f"{sorted(missing)}"
+            )
+        corr_matrix = corr_matrix.loc[ordered_cols, ordered_cols]
+        print("[STEP 3.1] Reusing precomputed correlation matrix.", flush=True)
 
+    n_features = len(ordered_cols)
+    if n_features <= max_full_heatmap_features:
+        print(
+            f"[STEP 3.2] Rendering complete map ({n_features} features)...",
+            flush=True,
+        )
+        fig, ax = plt.subplots(figsize=(16, 14))
         sns.heatmap(
             corr_matrix,
             cmap=cmap,
             center=0,
             vmin=-1,
             vmax=1,
-            square=True,
+            square=False,
             cbar_kws={"shrink": 0.6},
             ax=ax,
-            linewidths=0.3,
-            linecolor="lightgray",
+            linewidths=0,
             xticklabels=False,
             yticklabels=False,
         )
-
-        # Draw block separator lines.
-        for bound in boundaries:
-            ax.axhline(y=bound, color="black", linewidth=2.5)
-            ax.axvline(x=bound, color="black", linewidth=2.5)
-
-        # Set root labels at block midpoints.
-        mid_points = []
         cumulative = 0
-        for i in range(len(sorted_roots)):
-            cumulative += block_sizes[i]
-            mid_points.append(cumulative - block_sizes[i] // 2)
-
-        ax.set_xticks([mp + 0.5 for mp in mid_points])
-        ax.set_xticklabels(
-            sorted_roots,
-            rotation=45,
-            ha="right",
-            fontsize=max(6, min(10, 200 // len(sorted_roots))),
-        )
-        ax.set_yticks([mp + 0.5 for mp in mid_points])
-        ax.set_yticklabels(
-            sorted_roots,
-            fontsize=max(6, min(10, 200 // len(sorted_roots))),
-        )
-
+        for root in sorted_roots[:-1]:
+            cumulative += len(root_map[root])
+            ax.axhline(y=cumulative, color="black", linewidth=1.2)
+            ax.axvline(x=cumulative, color="black", linewidth=1.2)
         ax.set_title(
             f"Complete Correlation Map\n"
-            f"{n_features} features across {len(sorted_roots)} variable groups",
-            fontsize=14,
-            pad=15,
+            f"{n_features} features across {len(sorted_roots)} groups"
+        )
+        fig.tight_layout()
+        if output_path is not None:
+            _safe_save_figure(fig, output_path, dpi=full_heatmap_dpi)
+        plt.close(fig)
+        del fig, ax
+        gc.collect()
+    else:
+        blocks_dir = os.path.join(
+            os.path.dirname(output_path) if output_path else "comparison_figs",
+            "all_correlations",
+        )
+        os.makedirs(blocks_dir, exist_ok=True)
+        print(
+            f"[STEP 3.2] Complete map skipped: {n_features} features exceed "
+            f"the safe limit of {max_full_heatmap_features}. "
+            f"Generating at most {max_block_heatmaps} block map(s).",
+            flush=True,
         )
 
-        plt.tight_layout()
+        candidates: list[tuple[float, str, str]] = []
+        for i, root_a in enumerate(sorted_roots):
+            for root_b in sorted_roots[i:]:
+                sub_corr = corr_matrix.loc[root_map[root_a], root_map[root_b]]
+                values = sub_corr.abs().to_numpy()
+                max_abs = 1.0 if root_a == root_b else (
+                    float(np.nanmax(values))
+                    if values.size and not np.isnan(values).all()
+                    else float("nan")
+                )
+                candidates.append((max_abs, root_a, root_b))
 
-        if output_path is not None:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            fig.savefig(output_path, dpi=save_dpi, bbox_inches="tight")
-            print(f"Saved: {output_path} (dpi={save_dpi})")
+        candidates.sort(
+            key=lambda item: -np.nan_to_num(item[0], nan=-1.0)
+        )
+        for rank, (max_abs, root_a, root_b) in enumerate(
+            candidates[:max_block_heatmaps], start=1
+        ):
+            sub_corr = corr_matrix.loc[root_map[root_a], root_map[root_b]]
+            width = min(16, max(6, 0.35 * len(root_map[root_b])))
+            height = min(14, max(5, 0.35 * len(root_map[root_a])))
+            fig_b, ax_b = plt.subplots(figsize=(width, height))
+            sns.heatmap(
+                sub_corr,
+                cmap=cmap,
+                center=0,
+                vmin=-1,
+                vmax=1,
+                square=False,
+                cbar_kws={"shrink": 0.8},
+                ax=ax_b,
+                linewidths=0,
+                xticklabels=False,
+                yticklabels=False,
+            )
+            title_suffix = "self-block" if root_a == root_b else f"max |corr|={max_abs:.3f}"
+            ax_b.set_title(f"{root_a} x {root_b}\n{title_suffix}")
+            fig_b.tight_layout()
+            safe_a = re.sub(r"[^A-Za-z0-9_.-]+", "_", root_a)
+            safe_b = re.sub(r"[^A-Za-z0-9_.-]+", "_", root_b)
+            _safe_save_figure(
+                fig_b,
+                os.path.join(
+                    blocks_dir,
+                    f"block_{rank:03d}_{safe_a}_x_{safe_b}.png",
+                ),
+                dpi=block_heatmap_dpi,
+            )
+            plt.close(fig_b)
+            del fig_b, ax_b, sub_corr
+            gc.collect()
 
-        plt.show()
-        plt.close(fig)
-
-    corr_pl = pl.from_pandas(corr_matrix, include_index=False)
-
-    return corr_pl
+    return pl.from_pandas(corr_matrix, include_index=False)
 
 
 def _manual_elbow(
@@ -1693,51 +2914,46 @@ def estimate_correlation_threshold(
     threshold_step: float = 0.05,
     use_kneed: bool = True,
     save_path: str | None = None,
+    corr_matrix: pd.DataFrame | None = None,
 ) -> tuple[float, pd.DataFrame]:
-    """Estimate the optimal correlation threshold using the elbow method.
-
-    Generates a curve showing the number of remaining variables as a function
-    of the correlation threshold, and automatically identifies the elbow point
-    that maximizes the trade-off between the number of variables and the
-    threshold value.
+    """Estimate a correlation threshold from one reusable correlation matrix.
 
     Args:
-        df:
-            DataFrame containing numeric features.
-        threshold_step:
-            Step size between tested threshold values.
-        use_kneed:
-            Whether to use the kneed library for elbow detection. Falls back
-            to a manual method if the library is not available.
-        save_path:
-            Optional path to save the figure as a PNG file.
+        df: DataFrame containing numerical features.
+        threshold_step: Step size for the threshold grid search.
+        use_kneed: Whether to use the kneed library for elbow detection when
+            available.
+        save_path: Optional output path for the elbow curve figure.
+        corr_matrix: Optional precomputed Pearson correlation matrix.
 
     Returns:
-        A tuple ``(optimal_threshold, results_df)`` where ``results_df``
-        contains the columns ``'threshold'`` and ``'vars_remaining'``.
-    """
-    # Compute full Pearson correlation matrix.
-    corr_matrix = df.corr(method="pearson")
-    thresholds = np.arange(0.05, 1.0, threshold_step)
-    vars_remaining = []
+        A tuple of the estimated threshold and the elbow curve DataFrame.
 
+    Raises:
+        ValueError: If ``threshold_step`` is not in (0, 1).
+    """
+    if not (0 < threshold_step < 1):
+        raise ValueError("threshold_step must be in (0, 1).")
+
+    if corr_matrix is None:
+        _, corr_matrix = _compute_numeric_correlation(df)
+    else:
+        print("[STEP 1.1] Reusing precomputed correlation matrix.", flush=True)
+
+    thresholds = np.arange(0.05, 1.0, threshold_step)
+    vars_remaining: list[int] = []
+    abs_corr = np.abs(corr_matrix.to_numpy(dtype=float))
+    np.fill_diagonal(abs_corr, np.nan)
 
     for thresh in thresholds:
-        # Identify pairs with |correlation| >= threshold.
-        mask = (np.abs(corr_matrix) >= thresh).to_numpy().copy()
-        np.fill_diagonal(mask, False)
-
-        # A variable is "correlated" if it has at least one strong pair.
-        correlated_vars = mask.any(axis=1)
-        remaining = int((~correlated_vars).sum())
-        vars_remaining.append(remaining)
+        correlated_vars = np.nan_to_num(abs_corr >= thresh, nan=False).any(axis=1)
+        vars_remaining.append(int((~correlated_vars).sum()))
 
     results_df = pd.DataFrame({
         "threshold": thresholds,
         "vars_remaining": vars_remaining,
     })
 
-    # Detect the elbow point.
     if use_kneed:
         try:
             from kneed import KneeLocator
@@ -1747,142 +2963,387 @@ def estimate_correlation_threshold(
                 curve="convex",
                 direction="decreasing",
             )
-            elbow_threshold = kl.elbow or thresholds[len(thresholds) // 2]
+            elbow_threshold = float(
+                kl.elbow if kl.elbow is not None else thresholds[len(thresholds) // 2]
+            )
         except ImportError:
-            elbow_threshold = _manual_elbow(thresholds, vars_remaining)
+            elbow_threshold = float(_manual_elbow(thresholds, vars_remaining))
     else:
-        elbow_threshold = _manual_elbow(thresholds, vars_remaining)
+        elbow_threshold = float(_manual_elbow(thresholds, vars_remaining))
 
-    # Plot the elbow curve.
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(
-        thresholds, vars_remaining, "o-",
-        linewidth=2, markersize=8, label="Curve",
-    )
+    ax.plot(thresholds, vars_remaining, "o-", linewidth=2, markersize=6, label="Curve")
     ax.axvline(
-        x=elbow_threshold, color="red", linestyle="--", alpha=0.7,
+        x=elbow_threshold,
+        linestyle="--",
+        alpha=0.7,
         label=f"Estimated elbow (t={elbow_threshold:.2f})",
     )
     elbow_idx = int(np.argmin(np.abs(thresholds - elbow_threshold)))
-    ax.plot(
-        elbow_threshold, vars_remaining[elbow_idx],
-        "r*", markersize=20,
-    )
-    ax.set_xlabel("Correlation threshold", fontsize=12)
-    ax.set_ylabel("Number of remaining variables", fontsize=12)
-    ax.set_title(
-        "Elbow curve — Correlation threshold selection", fontsize=14
-    )
-    ax.legend(fontsize=11)
+    ax.plot(elbow_threshold, vars_remaining[elbow_idx], "*", markersize=16)
+    ax.set_xlabel("Correlation threshold")
+    ax.set_ylabel("Number of remaining variables")
+    ax.set_title("Elbow curve — Correlation threshold selection")
+    ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.set_xticks(thresholds)
-    plt.tight_layout()
-
+    fig.tight_layout()
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        print(f"Saved: {save_path}")
-
-    plt.show()
+        _safe_save_figure(fig, save_path, dpi=150)
     plt.close(fig)
+    del fig, ax
+    gc.collect()
 
-    print(f"Estimated optimal threshold: {elbow_threshold:.2f}")
-    print(f"Remaining variables at this threshold: {vars_remaining[elbow_idx]}")
-
+    print(f"Estimated optimal threshold: {elbow_threshold:.2f}", flush=True)
+    print(
+        f"Remaining variables at this threshold: {vars_remaining[elbow_idx]}",
+        flush=True,
+    )
     return elbow_threshold, results_df
 
 
 def generate_correlation_analysis(
     df: pd.DataFrame,
+    source_features: Sequence[str],
+    static_features: Sequence[str] | None = None,
     output_folder: str = "comparison_figs",
     threshold_step: float = 0.05,
     use_kneed: bool = True,
     corr_threshold: float | None = None,
-) -> tuple[float, pd.DataFrame, pl.DataFrame]:
-    """Run a full correlation analysis pipeline on a feature DataFrame.
-
-    Combines threshold estimation, block heatmaps, and a complete correlation
-    map into a single workflow. All figures are saved to ``output_folder``.
-
-    If ``corr_threshold`` is provided, it overrides the automatically estimated
-    threshold for the heatmap generation steps, while the elbow curve is still
-    generated for reference.
+    max_cross_heatmaps: int | None = None,
+    block_heatmap_dpi: int = 160,
+    show_colorbar: bool = True,
+    annotate_static_summary: bool = True,
+    max_full_heatmap_features: int = 300,
+    full_heatmap_dpi: int = 140,
+) -> dict[str, object]:
+    """Run dual-mode correlation analysis with static-aware block output.
 
     Args:
-        df:
-            DataFrame containing numeric TSFEL features.
+        df: DataFrame containing numerical features.
+        source_features: Original dynamic and static variable names.
+        static_features: Optional list of static feature names.
+        output_folder: Directory for output figures.
+        threshold_step: Step size for the elbow threshold estimation.
+        use_kneed: Whether to use the kneed library for elbow detection.
+        corr_threshold: Optional fixed correlation threshold. Estimated from
+            data when None.
+        max_cross_heatmaps: Maximum number of temporal cross-blocks.
+        block_heatmap_dpi: Image resolution for block heatmaps.
+        show_colorbar: Whether to include colorbars.
+        annotate_static_summary: Whether to annotate the static summary.
+        max_full_heatmap_features: Maximum feature count for the full map.
+        full_heatmap_dpi: Image resolution for the complete map.
+
+    Returns:
+        Dictionary containing ``optimal_threshold``, ``elbow_results``, and
+        ``corr_matrix``.
+
+    Raises:
+        ValueError: If the final correlation threshold is not in (0, 1].
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    print("=" * 60, flush=True)
+    print("Preparing reusable correlation matrix...", flush=True)
+    print("=" * 60, flush=True)
+    numeric_df, corr_matrix_pd = _compute_numeric_correlation(df)
+
+    print("=" * 60, flush=True)
+    print(
+        "Step 1: Estimating optimal correlation threshold...",
+        flush=True,
+    )
+    print("=" * 60, flush=True)
+    estimated_threshold, elbow_results = estimate_correlation_threshold(
+        df=numeric_df,
+        threshold_step=threshold_step,
+        use_kneed=use_kneed,
+        save_path=os.path.join(output_folder, "elbow_curve.png"),
+        corr_matrix=corr_matrix_pd,
+    )
+
+    final_threshold = (
+        float(corr_threshold)
+        if corr_threshold is not None
+        else estimated_threshold
+    )
+    if not (0 < final_threshold <= 1):
+        raise ValueError(
+            "Correlation threshold must be in (0, 1], "
+            f"got {final_threshold}."
+        )
+
+    print("\n" + "=" * 60, flush=True)
+    print(
+        "Step 2: Generating Normal_Mode and Threshold_Mode blocks...",
+        flush=True,
+    )
+    print("=" * 60, flush=True)
+
+    df_pl = pl.from_pandas(numeric_df, include_index=False)
+    afficher_correlation_par_blocs(
+        df=df_pl,
+        source_features=source_features,
+        static_features=static_features,
+        threshold=final_threshold,
+        output_dir=output_folder,
+        corr_matrix=corr_matrix_pd,
+        max_cross_heatmaps=max_cross_heatmaps,
+        block_heatmap_dpi=block_heatmap_dpi,
+        show_colorbar=show_colorbar,
+        annotate_static_summary=annotate_static_summary,
+    )
+
+    # Keep the global map only when its size remains safe. Produce both an
+    # unmasked and a threshold-masked version in the corresponding folders.
+    n_features = corr_matrix_pd.shape[0]
+    if n_features <= max_full_heatmap_features:
+        print(
+            f"[GLOBAL MAP] {n_features} features <= "
+            f"{max_full_heatmap_features}: rendering both modes.",
+            flush=True,
+        )
+        for mode, threshold_value in (
+            ("Normal_Mode", None),
+            ("Threshold_Mode", final_threshold),
+        ):
+            matrix = corr_matrix_pd.to_numpy(
+                dtype=np.float32, copy=True
+            )
+            if threshold_value is not None:
+                matrix = np.ma.masked_where(
+                    ~np.isfinite(matrix)
+                    | (np.abs(matrix) < threshold_value),
+                    matrix,
+                )
+            else:
+                matrix = np.ma.masked_invalid(matrix)
+
+            fig, ax = plt.subplots(figsize=(18, 16))
+            image = ax.imshow(
+                matrix,
+                cmap="RdBu_r",
+                vmin=-1,
+                vmax=1,
+                aspect="auto",
+                interpolation="nearest",
+                rasterized=True,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            colorbar = fig.colorbar(
+                image,
+                ax=ax,
+                fraction=0.03,
+                pad=0.02,
+                ticks=[-1.0, -0.5, 0.0, 0.5, 1.0],
+            )
+            colorbar.set_label("Pearson correlation")
+            fig.subplots_adjust(
+                left=0.01, right=0.93, bottom=0.01, top=0.99
+            )
+            _safe_save_figure(
+                fig,
+                os.path.join(
+                    output_folder, mode, "corr_complete_map.png"
+                ),
+                dpi=full_heatmap_dpi,
+            )
+            plt.close(fig)
+            del fig, ax, image, matrix
+            gc.collect()
+    else:
+        print(
+            f"[GLOBAL MAP] Skipped: {n_features} > "
+            f"{max_full_heatmap_features}.",
+            flush=True,
+        )
+
+    print("\n" + "=" * 60, flush=True)
+    print("Analysis complete!", flush=True)
+    print(f"  Threshold used: {final_threshold:.2f}", flush=True)
+    print(
+        f"  Normal maps: {output_folder}/Normal_Mode/",
+        flush=True,
+    )
+    print(
+        f"  Threshold maps: {output_folder}/Threshold_Mode/",
+        flush=True,
+    )
+    _log_memory("analysis complete")
+    print("=" * 60, flush=True)
+
+    return {
+        "optimal_threshold": final_threshold,
+        "elbow_results": elbow_results,
+        "corr_matrix": pl.from_pandas(
+            corr_matrix_pd, include_index=False
+        ),
+    }
+
+
+def estimate_boruta_frequency_threshold(
+    fold_feature_lists: list[list[str]],
+    n_folds: int,
+    output_folder: str | None = None,
+) -> tuple[float, pd.DataFrame]:
+    """Estimate the optimal Boruta frequency threshold by elbow analysis.
+
+    Given the list of Boruta-selected features for each fold, this function
+    computes how often each feature appears across all folds, then finds the
+    optimal frequency threshold using the elbow method (maximum distance to
+    the chord between the first and last points).
+
+    Args:
+        fold_feature_lists:
+            A list of length ``n_folds``, where each element is the list of
+            feature names selected by Boruta for that fold.
+        n_folds:
+            Total number of folds used in cross-validation.
         output_folder:
-            Directory to save all generated figures.
-        threshold_step:
-            Step size between tested threshold values for elbow detection.
-        use_kneed:
-            Whether to use the kneed library for elbow detection.
-        corr_threshold:
-            Optional fixed correlation threshold to use for heatmap generation.
-            When set to None (default), the elbow-estimated threshold is used.
+            Directory in which to save the elbow curve figure. If None, no
+            figure is saved.
 
     Returns:
         A tuple containing:
 
-        - The correlation threshold used for heatmaps.
-        - The elbow curve results DataFrame.
-        - The complete correlation matrix as a Polars DataFrame.
+        - The optimal frequency threshold (value in [0, 1]).
+        - A DataFrame with columns ``frequency``, ``vars_remaining``, and
+          ``n_folds`` for each threshold step.
     """
-    os.makedirs(output_folder, exist_ok=True)
+    if len(fold_feature_lists) != n_folds:
+        raise ValueError(
+            f"Expected {n_folds} fold feature lists, "
+            f"got {len(fold_feature_lists)}."
+        )
 
-    print("=" * 60)
-    print("Step 1: Estimating optimal correlation threshold...")
-    print("=" * 60)
+    # Count how many folds each feature was selected in.
+    feature_counts: dict[str, int] = {}
+    for fold_features in fold_feature_lists:
+        for feature in fold_features:
+            feature_counts[feature] = feature_counts.get(feature, 0) + 1
 
-    elbow_path = os.path.join(output_folder, "elbow_curve.png")
-    estimated_threshold, elbow_results = estimate_correlation_threshold(
-        df=df,
-        threshold_step=threshold_step,
-        use_kneed=use_kneed,
-        save_path=elbow_path,
+    if not feature_counts:
+        raise ValueError(
+            "No feature was selected by Boruta in any fold."
+        )
+
+    # Build frequency bins: thresholds from 1/n_folds to 1.0.
+    threshold_step = 1.0 / n_folds
+    thresholds = np.arange(threshold_step, 1.0 + threshold_step, threshold_step)
+
+    # For each threshold, count how many features have frequency >= threshold.
+    vars_remaining: list[int] = []
+    for thresh in thresholds:
+        count = sum(
+            1 for freq in feature_counts.values() if freq / n_folds >= thresh
+        )
+        vars_remaining.append(count)
+
+    results_df = pd.DataFrame({
+        "frequency": thresholds,
+        "vars_remaining": vars_remaining,
+    })
+
+    # Elbow detection: maximum perpendicular distance to the chord.
+    p1 = np.array([thresholds[0], vars_remaining[0]])
+    p2 = np.array([thresholds[-1], vars_remaining[-1]])
+    max_dist, elbow_idx = 0.0, 0
+
+    for i in range(len(thresholds)):
+        p = np.array([thresholds[i], vars_remaining[i]])
+        dist = np.abs(np.cross(p2 - p1, p1 - p)) / np.linalg.norm(p2 - p1)
+        if dist > max_dist:
+            max_dist = dist
+            elbow_idx = i
+
+    elbow_threshold = float(thresholds[elbow_idx])
+
+    # Save the elbow curve figure.
+    if output_folder is not None:
+        os.makedirs(output_folder, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(
+            thresholds, vars_remaining, "o-",
+            linewidth=2, markersize=6, label="Curve",
+        )
+        ax.axvline(
+            x=elbow_threshold,
+            linestyle="--",
+            alpha=0.7,
+            label=f"Elbow (freq={elbow_threshold:.2f})",
+        )
+        ax.plot(
+            elbow_threshold, vars_remaining[elbow_idx],
+            "*", markersize=16,
+        )
+        ax.set_xlabel("Boruta frequency threshold")
+        ax.set_ylabel("Number of remaining features")
+        ax.set_title(
+            "Elbow curve — Boruta cross-fold frequency selection"
+        )
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        save_path = os.path.join(output_folder, "boruta_frequency_elbow.png")
+        _safe_save_figure(fig, save_path, dpi=150)
+        plt.close(fig)
+
+    print(
+        f"[BORUTA FREQ] Elbow threshold: {elbow_threshold:.2f} "
+        f"({elbow_threshold * n_folds:.0f}/{n_folds} folds), "
+        f"{vars_remaining[elbow_idx]} features retained.",
+        flush=True,
     )
 
-    # Use manual threshold if provided, otherwise use estimated.
-    final_threshold = corr_threshold if corr_threshold is not None else estimated_threshold
+    return elbow_threshold, results_df
 
-    if corr_threshold is not None:
-        print()
-        print(f"Note: Using manual threshold {corr_threshold:.2f} "
-              f"(estimated: {estimated_threshold:.2f})")
 
-    print()
-    print("=" * 60)
-    print(f"Step 2: Generating block heatmaps (threshold={final_threshold:.2f})...")
-    print("=" * 60)
+def get_boruta_features_at_threshold(
+    fold_feature_lists: list[list[str]],
+    n_folds: int,
+    frequency_threshold: float,
+) -> list[str]:
+    """Return features selected by Boruta in at least a given fraction of folds.
 
-    # Convert to Polars for the visualization functions.
-    df_pl = pl.from_pandas(df, include_index=True)
+    Args:
+        fold_feature_lists:
+            A list of length ``n_folds``, where each element is the list of
+            feature names selected by Boruta for that fold.
+        n_folds:
+            Total number of folds used in cross-validation.
+        frequency_threshold:
+            Minimum fraction of folds in which a feature must appear to be
+            retained. Must be in ``(0, 1]``.
 
-    afficher_correlation_par_blocs(
-        df=df_pl,
-        exclude_cols=None,
-        threshold=final_threshold,
-        output_dir=output_folder,
+    Returns:
+        Sorted list of feature names that meet the frequency threshold.
+    """
+    if not (0 < frequency_threshold <= 1):
+        raise ValueError(
+            f"frequency_threshold must be in (0, 1], got {frequency_threshold}."
+        )
+
+    feature_counts: dict[str, int] = {}
+    for fold_features in fold_feature_lists:
+        for feature in fold_features:
+            feature_counts[feature] = feature_counts.get(feature, 0) + 1
+
+    min_folds = int(np.ceil(frequency_threshold * n_folds))
+
+    selected = sorted(
+        feature
+        for feature, count in feature_counts.items()
+        if count >= min_folds
     )
 
-    print()
-    print("=" * 60)
-    print("Step 3: Generating complete correlation map...")
-    print("=" * 60)
-
-    corr_map_path = os.path.join(output_folder, "corr_complete_map.png")
-    corr_matrix = generer_map_correlation_complete(
-        df=df_pl,
-        exclude_cols=None,
-        output_path=corr_map_path,
+    print(
+        f"[BORUTA FREQ] {len(selected)} features selected at "
+        f"frequency >= {frequency_threshold:.2f} "
+        f"(>= {min_folds}/{n_folds} folds).",
+        flush=True,
     )
 
-    print()
-    print("=" * 60)
-    print("Analysis complete!")
-    print(f"  Threshold used: {final_threshold:.2f}")
-    if corr_threshold is not None:
-        print(f"  (Manual override, estimated was: {estimated_threshold:.2f})")
-    print(f"  Figures saved to: {output_folder}/")
-    print("=" * 60)
-
-    return final_threshold, elbow_results, corr_matrix
+    return selected

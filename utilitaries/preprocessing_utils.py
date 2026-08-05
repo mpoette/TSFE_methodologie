@@ -532,6 +532,116 @@ def equilibrer_dataset_tabulaire(
     return df_balanced, stats
 
 
+def collect_boruta_features_for_fold(
+    fold_idx,
+    train_idx,
+    test_idx,
+    X,
+    y,
+    groups,
+    seed,
+    **kwargs,
+):
+    """Run Boruta for one fold and return the selected feature list.
+
+    This helper is used in the first phase of cross-fold Boruta selection:
+    each fold runs correlation/variance filtering followed by Boruta, and the
+    resulting feature list is collected. After all folds have been processed,
+    the frequency of each feature across folds is analysed to determine a
+    unified feature set.
+
+    Args:
+        fold_idx:
+            Zero-based fold index.
+        train_idx:
+            Training indices for the current fold.
+        test_idx:
+            Validation indices for the current fold.
+        X:
+            Dataset used to recover patient identifiers for the split.
+        y:
+            Target array associated with the complete dataset.
+        groups:
+            Group array associated with the complete dataset.
+        seed:
+            Random seed used for feature selection.
+        **kwargs:
+            Pipeline configuration, including ``corr_threshold``,
+            ``static_feats``, and ``keep_static``.
+
+    Returns:
+        The list of feature names selected by Boruta for this fold (after
+        correlation/variance filtering). Returns an empty list when Boruta
+        is disabled.
+    """
+    patient_col = kwargs["patient_col"]
+    target_col = kwargs["target_col"]
+    train_init_tsfel = kwargs["train_init"]
+    static_feats = kwargs.get("static_feats", [])
+    keep_static = kwargs.get("keep_static", True)
+    boruta_filter = kwargs.get("boruta_filter", False)
+
+    # Retrieve patient identifiers for the current fold.
+    train_patients = (
+        X[train_idx]
+        .select(patient_col)
+        .unique()
+    )
+
+    test_patients = (
+        X[test_idx]
+        .select(patient_col)
+        .unique()
+    )
+
+    train_fold_tsfel = (
+        train_init_tsfel
+        .join(train_patients, on=patient_col, how="inner")
+        .sort(patient_col)
+    )
+
+    test_fold_tsfel = (
+        train_init_tsfel
+        .join(test_patients, on=patient_col, how="inner")
+        .sort(patient_col)
+    )
+
+    # Step 1: Correlation and variance filtering.
+    corr_threshold = kwargs.get("corr_threshold", 0.95)
+    train_clean, test_clean, _ = extract_feat.filtrage_corr_var(
+        train_fold_tsfel,
+        test_fold_tsfel,
+        patient_col,
+        target_col,
+        corr_threshold=corr_threshold,
+        static_features=static_feats,
+        keep_static=keep_static,
+    )
+
+    if not boruta_filter:
+        # No Boruta: return all features after corr/var filtering.
+        feature_names = (
+            train_clean
+            .select(pl.exclude(patient_col, target_col))
+            .columns
+        )
+        return list(feature_names)
+
+    # Step 2: Boruta selection.
+    _, _, boruta_features = extract_feat.filtrage_boruta(
+        train_clean,
+        test_clean,
+        patient_col,
+        target_col,
+        max_iter=100,
+        seed=seed,
+        static_features=static_feats,
+        keep_static=keep_static,
+    )
+
+    return list(boruta_features)
+
+
 def process_tsfel_fold(
     fold_idx,
     train_idx,
@@ -548,6 +658,9 @@ def process_tsfel_fold(
     filtering, optional Boruta feature selection, class balancing, integrity
     checks, and feature scaling. The independent holdout is transformed with
     the exact feature set and scaler learned from the current training fold.
+
+    When ``boruta_crossfold_features`` is provided in kwargs, the Boruta
+    selection is skipped in favour of the unified cross-fold feature set.
 
     Args:
         fold_idx:
@@ -582,6 +695,10 @@ def process_tsfel_fold(
     boruta_filter = kwargs["boruta_filter"]
     exp = kwargs["exp"]
     balance_method = kwargs["balance_method"]
+    final_features = kwargs["final_features"]
+    static_feats = kwargs.get("static_feats", [])
+    keep_static = kwargs.get("keep_static", True)
+    boruta_crossfold_features = kwargs.get("boruta_crossfold_features")
 
     # Retrieve patient identifiers associated with the current split.
     train_patients = (
@@ -609,30 +726,65 @@ def process_tsfel_fold(
         .sort(patient_col)
     )
 
-    # Remove correlated and zero-variance features.
-    corr_threshold = kwargs.get("corr_threshold", 0.9)
-    train_clean, test_clean, keepVariableList_1 = (
-        extract_feat.filtrage_corr_var(
-            train_fold_tsfel,
-            test_fold_tsfel,
-            patient_col,
-            target_col,
-            corr_threshold=corr_threshold,
-        )
-    )
-
-    # Optionally apply the fold-specific Boruta feature selection.
-    if boruta_filter:
-        filename_train_boruta = exp.get_tsfel_boruta(
+    filename_train_boruta = exp.get_tsfel_boruta(
             "train",
             fold_idx,
         )
-        filename_test_boruta = exp.get_tsfel_boruta(
-            "test",
-            fold_idx,
+    filename_test_boruta = exp.get_tsfel_boruta(
+        "test",
+        fold_idx,
+    )
+
+    # Apply correlation and variance filtering, then optional Boruta selection.
+    # The correlation threshold is computed once before the fold loop in the
+    # pipeline and passed via kwargs["corr_threshold"].
+    if not (
+            os.path.exists(filename_train_boruta)
+            and os.path.exists(filename_test_boruta)
+        ):
+
+        # Remove correlated and zero-variance features.
+        corr_threshold = kwargs.get("corr_threshold", 0.95)
+        train_clean, test_clean, keepVariableList_1 = (
+            extract_feat.filtrage_corr_var(
+                train_fold_tsfel,
+                test_fold_tsfel,
+                patient_col,
+                target_col,
+                corr_threshold=corr_threshold,
+                static_features=static_feats,
+                keep_static=keep_static,
+            )
         )
 
-        if (
+    # Optionally apply Boruta feature selection.
+    if boruta_filter:
+        if boruta_crossfold_features is not None:
+            # Use the unified cross-fold Boruta feature set instead of
+            # running per-fold Boruta. Simply filter the already cleaned
+            # data to keep only the features that passed the frequency
+            # threshold across all folds.
+            available_features = set(train_clean.columns) - {
+                patient_col, target_col
+            }
+            crossfold_available = [
+                f for f in boruta_crossfold_features
+                if f in available_features
+            ]
+            print(
+                f"[BORUTA CROSS-FOLD] Fold {fold_idx}: "
+                f"using {len(crossfold_available)} features from "
+                f"unified cross-fold set "
+                f"(out of {len(boruta_crossfold_features)} total)."
+            )
+            train_clean = train_clean.select(
+                [patient_col, target_col, *crossfold_available]
+            )
+            test_clean = test_clean.select(
+                [patient_col, target_col, *crossfold_available]
+            )
+            keepVariableList_2 = crossfold_available
+        elif (
             os.path.exists(filename_train_boruta)
             and os.path.exists(filename_test_boruta)
         ):
@@ -651,6 +803,8 @@ def process_tsfel_fold(
                     target_col,
                     max_iter=100,
                     seed=seed,
+                    static_features=static_feats,
+                    keep_static=keep_static,
                 )
             )
 
@@ -704,6 +858,28 @@ def process_tsfel_fold(
         .select([patient_col, target_col, *final_feature_names])
         .sort(patient_col)
     )
+
+    # Sanitize holdout: replace NaN and infinite values with medians computed from
+    # the training fold. The holdout dataset bypasses feature filtering (which
+    # performs median imputation on train/test), so non-finite values must be
+    # handled here to prevent models that do not natively support missing values
+    # (e.g., SVC, LogisticRegression) from crashing at prediction time.
+    _holdout_impute = {
+        col: train_clean[col].median()
+        for col in final_feature_names
+    }
+
+    for _col, _med in _holdout_impute.items():
+        # Fallback to 0.0 if the training median itself is undefined or NaN.
+        med_val = 0.0 if (_med is None or np.isnan(_med)) else _med
+
+        holdout_clean = holdout_clean.with_columns(
+            pl.col(_col)
+            .replace_infinite(None)  # Convert +/-inf to null
+            .fill_nan(None)          # Convert NaN to null
+            .fill_null(med_val)      # Impute all missing values using the train median
+            .alias(_col)
+        )
 
     if holdout_clean.height != holdout_clean[patient_col].n_unique():
         raise ValueError(
@@ -822,12 +998,50 @@ def process_time_fold(
     expected_length = kwargs["expected_length"]
     exp = kwargs["exp"]
 
+    print(
+        f"\n[TIME FOLD {fold_idx + 1}/5] === process_time_fold START ===",
+        flush=True,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] balance_method={balance_method!r}, "
+        f"expected_length={expected_length}, "
+        f"final_features count={len(final_features)}",
+        flush=True,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] train_init_df rows={len(train_init_df)}, "
+        f"holdout_init_df rows={len(holdout_init_df)}",
+        flush=True,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] train_idx length={len(train_idx)}, "
+        f"test_idx length={len(test_idx)}",
+        flush=True,
+    )
+
     # Extract and sort train, validation, and holdout observations.
     train_df = train_init_df[train_idx].sort([patient_col, time_col])
     test_df = train_init_df[test_idx].sort([patient_col, time_col])
     holdout_df = holdout_init_df.sort([patient_col, time_col])
 
+    print(
+        f"[TIME FOLD {fold_idx + 1}] After split -> train_df rows={len(train_df)}, "
+        f"test_df rows={len(test_df)}, holdout_df rows={len(holdout_df)}",
+        flush=True,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] After split -> train unique patients="
+        f"{train_df[patient_col].n_unique()}, "
+        f"test unique patients={test_df[patient_col].n_unique()}, "
+        f"holdout unique patients={holdout_df[patient_col].n_unique()}",
+        flush=True,
+    )
+
     # Apply custom patient-level balancing before sequence construction.
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Entering balancing step with method={balance_method!r}",
+        flush=True,
+    )
     if balance_method in ["downsampling_homemade", ""]:
         train_df, _ = equilibrer_dataset_tabulaire(
             train_df,
@@ -836,24 +1050,63 @@ def process_time_fold(
             method=balance_method,
             seed=seed,
         )
+        print(
+            f"[TIME FOLD {fold_idx + 1}] After balancing -> train_df rows={len(train_df)}, "
+            f"unique patients={train_df[patient_col].n_unique()}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[TIME FOLD {fold_idx + 1}] Skipping early balancing (method={balance_method!r}), "
+            f"will apply imbalanced-learn after build_sequences.",
+            flush=True,
+        )
 
     # Fit scaling on training rows and transform validation and holdout rows.
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Entering scaling step...",
+        flush=True,
+    )
     train_df, test_df, holdout_df = scaling(
         train_df,
         test_df,
         holdout_df,
     )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] After scaling -> train_df rows={len(train_df)}, "
+        f"test_df rows={len(test_df)}, holdout_df rows={len(holdout_df)}",
+        flush=True,
+    )
 
     # Guarantee the same alphabetical feature order for every sequence.
     ordered_feature_names = sorted(list(final_features))
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Ordered feature names ({len(ordered_feature_names)}): "
+        f"{ordered_feature_names}",
+        flush=True,
+    )
 
     # Convert patient observations into fixed-length 3D sequences.
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for TRAIN (patients={train_df[patient_col].n_unique()})...",
+        flush=True,
+    )
     X_train_fold, y_train_fold = build_sequences(
         train_df,
         patient_col,
         target_col,
         expected_length,
         ordered_feature_names,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] build_sequences TRAIN DONE -> X_train shape={X_train_fold.shape}, "
+        f"y_train positives={int(y_train_fold.sum())}/{len(y_train_fold)}",
+        flush=True,
+    )
+
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for VALIDATION (patients={test_df[patient_col].n_unique()})...",
+        flush=True,
     )
     X_test_fold, y_test_fold = build_sequences(
         test_df,
@@ -862,12 +1115,27 @@ def process_time_fold(
         expected_length,
         ordered_feature_names,
     )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] build_sequences VALIDATION DONE -> X_test shape={X_test_fold.shape}, "
+        f"y_test positives={int(y_test_fold.sum())}/{len(y_test_fold)}",
+        flush=True,
+    )
+
+    print(
+        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for HOLDOUT (patients={holdout_df[patient_col].n_unique()})...",
+        flush=True,
+    )
     X_holdout_fold, y_holdout = build_sequences(
         holdout_df,
         patient_col,
         target_col,
         expected_length,
         ordered_feature_names,
+    )
+    print(
+        f"[TIME FOLD {fold_idx + 1}] build_sequences HOLDOUT DONE -> X_holdout shape={X_holdout_fold.shape}, "
+        f"y_holdout positives={int(y_holdout.sum())}/{len(y_holdout)}",
+        flush=True,
     )
 
     # Preserve the patient order used by the sequence builder.
