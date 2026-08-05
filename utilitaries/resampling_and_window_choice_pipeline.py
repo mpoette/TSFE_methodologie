@@ -239,6 +239,12 @@ def prepare_dataset_from_config(
                 )
             )
 
+        # Simple truncation: keep only the first 24 hours of each stay.
+        elif config_mode.name == "24h_debut_rea_no-fill":
+            df_clean = df_clean.filter(
+                pl.col("delta_hour") < 24
+            )
+
         else:
             df_clean = extract.prepare_data(
                 df_clean,
