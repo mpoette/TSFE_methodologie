@@ -127,8 +127,8 @@ This 2652-line script is the **central orchestrator** of the entire project. It 
 │     - StratifiedGroupKFold on train_init                            │
 │     - For each fold:                                                │
 │       · Correlation + zero-variance feature filtering               │
-│       · Boruta feature selection (cross-fold, 90% threshold) (NEW)  │
-│       · Feature trace tracking per fold as JSON (NEW)               │
+│       · Boruta feature selection (cross-fold, dynamic threshold)    │
+│       · Feature trace tracking per fold as JSON                     │
 │       · Class balancing (downsampling / upsampling)                 │
 │       · StandardScaler fit on train, transform validation + holdout │
 └─────────────────────────────────────────────────────────────────────┘
@@ -162,12 +162,12 @@ This 2652-line script is the **central orchestrator** of the entire project. It 
                               ↓
 ┌─────────────────────────────────────────────────────────────────────┐
 │  11. FIGURE GENERATION (OOF)                                        │
-│     - ROC curve, PRC curve, Calibration curve (fixed bins) (NEW)    │
+│     - ROC curve, PRC curve, Calibration curve (fixed bins)          │
 │     - KDE distribution plot, F1-score evolution                     │
 │     - Confusion matrix, Brier score evolution                       │
 │     - Calibration per risk brackets                                 │
 │     - Learning curve plot                                           │
-│     - TableOne baseline statistics (NEW)                            │
+│     - TableOne baseline statistics                                  │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -188,7 +188,7 @@ This 2652-line script is the **central orchestrator** of the entire project. It 
 ┌─────────────────────────────────────────────────────────────────────┐
 │  14. MODEL COMPARISON REPORT (Optional)                             │
 │     - If RUN_COMPARISON: load all available models                  │
-│     - Generate comparative report with mean + std metrics (NEW)     │
+│     - Generate comparative report with mean + std metrics           │
 │     - Collective calibration curve comparison                       │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
@@ -245,7 +245,7 @@ This 2652-line script is the **central orchestrator** of the entire project. It 
 - **Leakage**: `encounterId`, `delta_hour`, `target_col`, `deces_datediff_days`, `los`, etc.
 - **Unused ICU**: `icu_actes`, `icu_mode_sortie`, `hosp_primaryDiagnosis`, etc.
 
-### TSFEL Feature Explainability Scores (NEW)
+### TSFEL Feature Explainability Scores
 
 The pipeline assigns explainability scores to TSFEL feature families in 6 tiers:
 
@@ -286,7 +286,7 @@ The pipeline assigns explainability scores to TSFEL feature families in 6 tiers:
 
 ---
 
-## Data Quality Filters (NEW)
+## Data Quality Filters
 
 The pipeline now applies additional patient-level filters:
 
@@ -316,13 +316,28 @@ The pipeline uses a **nested, patient-level stratified group cross-validation**:
 
 ---
 
-## Boruta Feature Selection (NEW Cross-Fold Approach)
+## Boruta Feature Selection (Cross-Fold with Dynamic Threshold)
 
-The Boruta feature selection has been improved with a **cross-fold approach**:
+The Boruta feature selection uses a **cross-fold approach with dynamic threshold estimation**:
 
-- Features must appear in **90% of folds** to be retained in the unified cross-fold feature set
-- Feature selection is now performed **after merging** for better traceability
-- Each fold saves a **feature trace JSON** file tracking:
+**Phase 1: Per-Fold Boruta Collection**
+- Run Boruta independently on each of the 5 cross-validation folds
+- Collect the list of selected features from each fold
+
+**Phase 1.5: Elbow Analysis (Dynamic Threshold)**
+- Compute the frequency with which each feature appears across all folds
+- Plot the frequency curve (threshold vs. remaining features)
+- Estimate the optimal frequency threshold using the **elbow method** (maximum distance to the chord between first and last points)
+- The `kneed` library is used when available, with a manual fallback otherwise
+- This threshold is **data-dependent** and varies per experiment
+
+**Phase 2: Unified Feature Set**
+- Retain only features that appear at or above the elbow-determined frequency threshold
+- Save the unified feature set as `boruta_crossfold_features.npy`
+- Save the elbow curve figure as `boruta_frequency_elbow.png`
+
+**Traceability**
+- Each fold saves a `feature_trace_fold_*.json` file tracking:
   - Initial feature count
   - Features after correlation/variance filtering
   - Features after Boruta cross-fold filtering
@@ -340,7 +355,7 @@ The Boruta feature selection has been improved with a **cross-fold approach**:
 
 When calibration is enabled without balancing, the training fold is further split (3-fold SGKF) to create a held-out calibration set.
 
-### Fixed-Bin Calibration (NEW)
+### Fixed-Bin Calibration
 
 Calibration curves now use **fixed 10% risk brackets** (0.05, 0.15, ..., 0.95) for consistent comparison across models and datasets. This aligns the calibration curve visualization with the Brier score, ICI, and risk bracket analysis.
 
@@ -394,15 +409,15 @@ inputs/<duplication_mode>/<target>/<windowing>/<features>/<model>/
 ├── confusion_matrix.png               # Confusion matrix
 ├── brier_evolution.png                # Brier score evolution
 ├── calibration_per_risk.png           # Calibration by risk bracket
-├── tableone_static_features.csv       # TableOne baseline statistics (NEW)
-├── tableone_static_features.html      # TableOne HTML report (NEW)
+├── tableone_static_features.csv       # TableOne baseline statistics
+├── tableone_static_features.html      # TableOne HTML report
 ├── L1_Log_path_fold_*.png             # Lasso coefficient paths (if Lasso)
 ├── tsfel_boruta/
 │   └── train/
 │       └── <seed>/
-│           ├── feature_trace_fold_*.json  # Feature selection trace (NEW)
-│           ├── train_filtered.parquet     # Cached filtered train data (NEW)
-│           └── test_filtered.parquet      # Cached filtered test data (NEW)
+│           ├── feature_trace_fold_*.json  # Feature selection trace
+│           ├── train_filtered.parquet     # Cached filtered train data
+│           └── test_filtered.parquet      # Cached filtered test data
 └── holdout/
     ├── roc_curve.png
     ├── prc_curve.png
@@ -454,7 +469,7 @@ Key methods:
 - `get_tsfel_parquet_path()`: Cached TSFEL feature path
 - `get_lasso_path()`: Lasso data path
 - `get_comparison_path()`: Comparison report directory
-- `get_tsfel_boruta()`: Boruta filtered data path (NEW)
+- `get_tsfel_boruta()`: Boruta filtered data path
 
 ### `sequential_utils.py` — `PipelineConfig` Factory
 
@@ -500,8 +515,8 @@ Returns a frozen `PipelineConfig` dataclass with all sub-configurations, includi
   - Boruta cross-fold feature selection (cached)
   - Class balancing (downsampling/upsampling)
   - `StandardScaler` fit/transform
-  - Feature trace JSON generation (NEW)
-  - Holdout NaN/infinite value sanitization (NEW)
+  - Feature trace JSON generation
+  - Holdout NaN/infinite value sanitization
 
 - **`process_time_fold()`**: Prepares one fold for time-series models:
   - Sequence building per patient
@@ -515,12 +530,12 @@ Returns a frozen `PipelineConfig` dataclass with all sub-configurations, includi
 - **`PriorCorrectionWrapper`**: Wraps any estimator with analytical prior-probability correction for balanced datasets.
 
 - **`fit_model_by_name()`**: Dispatches training to the appropriate model:
-  - `VanillaTransformerModified`: PyTorch Transformer with attention mechanism (NEW)
+  - `VanillaTransformerModified`: PyTorch Transformer with attention mechanism
   - `InceptionTimeModified`: PyTorch CNN with early stopping
   - `LstmTimeModified`: PyTorch LSTM with gradient clipping
   - `XGBoost TSFEL`: XGBoost with CUDA support and class-weight handling
   - `RandomForest TSFEL`: scikit-learn RandomForest
-  - `RandomForest Imbalanced TSFEL`: imbalanced-learn BalancedRandomForest (NEW)
+  - `RandomForest Imbalanced TSFEL`: imbalanced-learn BalancedRandomForest
   - `SVC TSFEL`: scikit-learn SVC with RBF kernel + CalibratedClassifierCV
   - `Logistic Regression Lasso TSFEL`: L1-regularized logistic regression with inner CV
 
@@ -532,11 +547,11 @@ Returns a frozen `PipelineConfig` dataclass with all sub-configurations, includi
 
 ### `evaluate_utils.py`
 
-- **`evaluate_vt_fold()`**: Load VanillaTransformer model, predict probabilities (NEW)
+- **`evaluate_vt_fold()`**: Load VanillaTransformer model, predict probabilities
 - **`evaluate_inception_fold()`**: Load InceptionTime model, predict probabilities
 - **`evaluate_lstm_fold()`**: Load LSTM model, predict probabilities
 - **`evaluate_tsfel_fold()`**: Load TSFEL model (joblib), predict with calibration
-- **`align_tsfel_features()`**: Align TSFEL feature columns with model-expected schema (NEW)
+- **`align_tsfel_features()`**: Align TSFEL feature columns with model-expected schema
 
 Each returns: `y_test`, `probas_uncalib`, `probas_calib`, `train_score`, `test_score`, `y_pred_test`
 
@@ -550,12 +565,14 @@ Each returns: `y_test`, `probas_uncalib`, `probas_calib`, `train_score`, `test_s
 
 - **`filtrage_corr_var()`**: Correlation and variance filtering with static feature protection
 
-- **Boruta cross-fold selection** (NEW):
-  - Collects Boruta-selected features across all folds
-  - Retains only features present in 90% of folds
-  - Saves feature trace JSON per fold for full transparency
+- **`estimate_correlation_threshold()`**: Elbow analysis for correlation threshold estimation
 
-- **Explainability scores** (NEW): Tiered scoring system for TSFEL feature families to assess clinical interpretability
+- **`resolve_boruta_crossfold_features()`**: Cross-fold Boruta with dynamic elbow threshold:
+  - Phase 1: Per-fold Boruta collection
+  - Phase 1.5: Elbow analysis for dynamic frequency threshold
+  - Phase 2: Unified feature set at elbow threshold
+
+- **Explainability scores**: Tiered scoring system for TSFEL feature families to assess clinical interpretability
 
 ### `static_features_utils.py`
 
@@ -568,10 +585,10 @@ Comprehensive visualization suite:
 
 - **`roc_curve_homemade()`**: ROC curve with AUC annotation
 - **`prc_curve_homemade()`**: Precision-Recall curve with AUPRC
-- **`calibration_curve_homemade()`**: Calibration curve with fixed 10% risk brackets (NEW)
-- **`plot_calibration_curves()`**: Multi-curve calibration comparison with fixed bins (NEW)
-- **`plot_collective_calibration_curves()`**: Collective calibration across multiple models (NEW)
-- **`get_calibration_stats()`**: Calibration statistics with fixed 10% risk brackets (NEW)
+- **`calibration_curve_homemade()`**: Calibration curve with fixed 10% risk brackets
+- **`plot_calibration_curves()`**: Multi-curve calibration comparison with fixed bins
+- **`plot_collective_calibration_curves()`**: Collective calibration across multiple models
+- **`get_calibration_stats()`**: Calibration statistics with fixed 10% risk brackets
 - **`compute_binary_metrics()`**: Per-fold metric computation
 - **`summarize_fold_metrics()`**: Mean +/- std across folds
 - **`kde_plot_homemade()`**: Kernel Density Estimate of predicted probabilities
@@ -580,7 +597,7 @@ Comprehensive visualization suite:
 - **`brier_evolution()`**: Brier score analysis
 - **`calibration_per_risk_brackets()`**: Calibration in 10% risk bins
 - **`plot_collected_learning_curve()`**: Learning curve visualization
-- **`generate_comparative_report()`**: Comparative report with mean + std metrics (NEW)
+- **`generate_comparative_report()`**: Comparative report with mean + std metrics
 
 ### `postprocessing_utils.py`
 
@@ -597,7 +614,7 @@ Comprehensive visualization suite:
   - Lomax timestamp generation for random prediction times
   - Median-based target length computation
 
-- **Simplified 24h window** (NEW): The `24h_debut_rea_no-fill` mode now uses simple `delta_hour < 24` truncation
+- **Simplified 24h window**: The `24h_debut_rea_no-fill` mode now uses simple `delta_hour < 24` truncation
 
 ### `optuna/` — Hyperparameter Optimization
 
@@ -646,7 +663,8 @@ TRANSPARENT = False      # Transparent background for figures
 
 ## Reproducibility
 
-- **Fixed seed**: `SEED = 42` applied to `random`, `numpy`, `torch`, and `PYTHONHASHSEED`
+- **Fixed seed**: `SEED = 42` applied to `random`,
+`numpy`, `torch`, and `PYTHONHASHSEED`
 - **Deterministic CUDA**: `torch.backends.cudnn.deterministic = True`, `benchmark = False`
 - **Logging**: Every run produces a timestamped log file in `pipeline_logs/`
 - **Cache**: TSFEL features, Boruta results, and Optuna results are cached to avoid recomputation
@@ -740,7 +758,7 @@ merged_static_ano_and_dynamic.parquet
     ├── Initial 80/20 Holdout Split
     ├── 5-Fold Stratified Group CV
     │   ├── TSFEL Extraction (if needed)
-    │   ├── Boruta Cross-Fold Feature Selection (90% threshold)
+    │   ├── Boruta Cross-Fold Feature Selection (dynamic elbow threshold)
     │   ├── Feature Trace JSON per fold
     │   ├── Class Balancing
     │   ├── StandardScaler
