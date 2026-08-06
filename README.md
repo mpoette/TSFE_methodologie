@@ -20,9 +20,8 @@ Projet Stage M2/
 │   └── overview.png                    # Pipeline overview diagram
 │
 ├── WorkPackages_WorkFlow/              # Main workflow directory
-│   ├── Models_Comparison_Pipeline_     # ★ CORE: Sequential pipeline (2188 lines)
+│   ├── Models_Comparison_Pipeline_     # ★ CORE: Sequential pipeline (2652 lines)
 │   │   └── sequential_journalisation.py
-│   ├── Show_Models_Comparison.py       # Interactive Marimo notebook UI
 │   ├── pipeline_logs/                  # Auto-generated log files per run
 │   ├── json/                           # Experiment result caches
 │   ├── inputs/                         # Experiment input configurations
@@ -33,9 +32,9 @@ Projet Stage M2/
 │   ├── path_utils.py                   # Experiment class: path management & naming
 │   ├── sequential_utils.py             # PipelineConfig dataclass & factory
 │   ├── preprocessing_utils.py          # Fold preprocessing (TSFEL & time modes)
-│   ├── training_utils.py               # Model fitting & learning curve logic
-│   ├── evaluate_utils.py               # Fold evaluation (Inception, LSTM, TSFEL)
-│   ├── features_extraction_utils.py    # TSFEL time-series feature extraction
+│   ├── training_utils.py               # Model fitting, calibration wrappers & learning curves
+│   ├── evaluate_utils.py               # Fold evaluation (Inception, LSTM, Transformer, TSFEL)
+│   ├── features_extraction_utils.py    # TSFEL time-series feature extraction & Boruta selection
 │   ├── static_features_utils.py        # Static feature encoding & one-hot
 │   ├── show_fig_utils.py               # Visualization: ROC, PRC, calibration, KDE, etc.
 │   ├── postprocessing_utils.py         # Bootstrap CI, SHAP explanation, fixed-threshold metrics
@@ -44,14 +43,19 @@ Projet Stage M2/
 │   ├── timestamp_sampling_utils.py     # Label preparation (survival targets)
 │   ├── resampling_and_window_choice_pipeline.py  # Windowing/resampling pipeline
 │   ├── resampling_utils.py             # Resampling helpers
-│   ├── preprocessing_utils.py          # Data cleaning & preprocessing
-│   └── optuna/                         # Optuna hyperparameter optimization
-│       ├── optuna_utils.py             # Common Optuna utilities
-│       ├── optuna_inception_utils.py   # InceptionTime hyperparameter search
-│       ├── optuna_lstm_utils.py        # LSTM hyperparameter search
-│       ├── optuna_xgb_utils.py         # XGBoost hyperparameter search
-│       ├── optuna_rf_utils.py          # RandomForest hyperparameter search
-│       └── optuna_svc_utils.py         # SVC hyperparameter search
+│   ├── optuna/                         # Optuna hyperparameter optimization
+│   │   ├── optuna_utils.py             # Common Optuna utilities
+│   │   ├── optuna_inception_utils.py   # InceptionTime hyperparameter search
+│   │   ├── optuna_lstm_utils.py        # LSTM hyperparameter search
+│   │   ├── optuna_xgb_utils.py         # XGBoost hyperparameter search
+│   │   ├── optuna_rf_utils.py          # RandomForest hyperparameter search
+│   │   └── optuna_svc_utils.py         # SVC hyperparameter search
+│   ├── models/                         # Deep learning model implementations
+│   │   ├── inceptionTimeModified.py    # InceptionTime CNN architecture
+│   │   ├── lstmTimeModified.py         # LSTM RNN architecture
+│   │   └── vanillaTransformerModified.py  # Vanilla Transformer architecture (NEW)
+│   └── tests/                          # Utility tests
+│       └── clustering_utils.py
 │
 └── .gitignore
 ```
@@ -60,13 +64,13 @@ Projet Stage M2/
 
 ## Core Pipeline: `Models_Comparison_Pipeline_sequential_journalisation.py`
 
-This 2188-line script is the **central orchestrator** of the entire project. It runs a grid of experiments sequentially, each defined by a unique combination of:
+This 2652-line script is the **central orchestrator** of the entire project. It runs a grid of experiments sequentially, each defined by a unique combination of:
 
-- **Model** (InceptionTime, LSTM, XGBoost, RandomForest, SVC, Lasso Logistic Regression, IGS2 clinical score)
-- **Feature set** (IGS2, Commonly Used, Commonly Used Without PMSI, All, Custom)
+- **Model** (VanillaTransformer, InceptionTime, LSTM, XGBoost, RandomForest, SVC, Lasso Logistic Regression, IGS2/NEWS2 clinical scores)
+- **Feature set** (IGS2, NEWS, NEWS2, Commonly Used, Commonly Used Without PMSI, All, Gabrielle, Custom)
 - **Windowing mode** (24h start of ICU stay, 24h end of ICU stay, random Lomax resampling)
-- **Target** (28-day mortality, 24h mortality, 7-day mortality, 3-month mortality)
-- **Balancing method** (None, DownSampling 50-50, UpSampling 50-50)
+- **Target** (28-day mortality, 24h mortality, 7-day mortality, 3-month mortality, overall death)
+- **Balancing method** (None, DownSampling 50-50, UpSampling 50-50, Up/DownSampling 50-50, HomeMade)
 - **Stratification** (target-based, 24h-then-28d)
 - **Optuna** (enabled/disabled for hyperparameter tuning)
 
@@ -96,6 +100,8 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 │  4. DATA LOADING & MERGING                                          │
 │     - Load merged_static_ano_and_dynamic.parquet                    │
 │     - Remove duplicates (prio_first / prio_last)                    │
+│     - Filter duplicate encounters based on utcInTime (NEW)          │
+│     - Min 24h ICU stay + valid SpO2 measurement filter (NEW)        │
 │     - Prepare survival labels (isDeceased_lt_28d, etc.)             │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
@@ -103,7 +109,8 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 │  5. DATASET PREPARATION & CLEANING                                  │
 │     - Apply windowing mode (24h window / resampling)                │
 │     - Drop score columns, leakage columns, unused columns           │
-│     - Select feature subset (IGS2 / Commonly Used / All / Custom)   │
+│     - Select feature subset (IGS2 / NEWS / Commonly Used / All /    │
+│       Gabrielle / Custom)                                           │
 │     - One-hot encode categorical features                           │
 │     - Filter patients by expected sequence length (window mode)     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -119,8 +126,9 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 │  7. FOLD BUILDING (5-FOLD CROSS-VALIDATION)                         │
 │     - StratifiedGroupKFold on train_init                            │
 │     - For each fold:                                                │
-│       · Feature filtering (correlation + zero-variance)             │
-│       · Boruta feature selection (optional, cached)                 │
+│       · Correlation + zero-variance feature filtering               │
+│       · Boruta feature selection (cross-fold, 90% threshold) (NEW)  │
+│       · Feature trace tracking per fold as JSON (NEW)               │
 │       · Class balancing (downsampling / upsampling)                 │
 │       · StandardScaler fit on train, transform validation + holdout │
 └─────────────────────────────────────────────────────────────────────┘
@@ -154,11 +162,12 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
                               ↓
 ┌─────────────────────────────────────────────────────────────────────┐
 │  11. FIGURE GENERATION (OOF)                                        │
-│     - ROC curve, PRC curve, Calibration curve                       │
+│     - ROC curve, PRC curve, Calibration curve (fixed bins) (NEW)    │
 │     - KDE distribution plot, F1-score evolution                     │
 │     - Confusion matrix, Brier score evolution                       │
 │     - Calibration per risk brackets                                 │
 │     - Learning curve plot                                           │
+│     - TableOne baseline statistics (NEW)                            │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -179,7 +188,8 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 ┌─────────────────────────────────────────────────────────────────────┐
 │  14. MODEL COMPARISON REPORT (Optional)                             │
 │     - If RUN_COMPARISON: load all available models                  │
-│     - Generate comparative report with fancy_grid table             │
+│     - Generate comparative report with mean + std metrics (NEW)     │
+│     - Collective calibration curve comparison                       │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -195,19 +205,22 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 
 | Model | Type | Extraction | Optuna Support | Calibration |
 |-------|------|------------|----------------|-------------|
+| **VanillaTransformerModified** | Deep Learning (Transformer) | time (3D sequences) | No (fixed arch) | Temperature Scaling |
 | **InceptionTimeModified** | Deep Learning (CNN) | time (3D sequences) | No (fixed arch) | Temperature Scaling |
 | **LstmTimeModified** | Deep Learning (RNN) | time (3D sequences) | Yes | Temperature Scaling |
 | **XGBoost TSFEL** | Gradient Boosting | TSFEL (tabular) | Yes | Platt / Prior |
 | **RandomForest TSFEL** | Ensemble Trees | TSFEL (tabular) | Yes | Platt / Prior |
+| **RandomForest Imbalanced TSFEL** | Ensemble Trees (Balanced) | TSFEL (tabular) | No | Platt / Prior |
 | **SVC TSFEL** | Support Vector Machine | TSFEL (tabular) | Yes | Platt / Prior |
 | **Logistic Regression Lasso TSFEL** | Linear (L1) | TSFEL (tabular) | No | Platt / Prior |
 | **IGS2** | Clinical Score | score | N/A | None |
+| **NEWS2** | Clinical Score | score | N/A | None |
 
 ### Extraction Types
 
-- **`time`**: Raw physiological time-series (3D tensor: `[patients, time_steps, features]`). Used by deep learning models (InceptionTime, LSTM).
+- **`time`**: Raw physiological time-series (3D tensor: `[patients, time_steps, features]`). Used by deep learning models (VanillaTransformer, InceptionTime, LSTM).
 - **`TSFEL`**: Tabular features extracted via [TSFEL](https://tsfel.readthedocs.io/) (Time Series Feature Extraction Library) + static features. Used by classical ML models.
-- **`score`**: Clinical score probability (e.g., SAPS-II). Used for baseline comparison.
+- **`score`**: Clinical score probability (e.g., IGS2, NEWS2). Used for baseline comparison.
 
 ---
 
@@ -215,7 +228,10 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 
 | Mode | Description |
 |------|-------------|
-| **Mode IGS2** | Features defined by IGS2 scoring system (minus `urine_rate`) |
+| **Mode IGS2** | Features defined by IGS2 scoring system |
+| **Mode NEWS** | Features defined by NEWS scoring system |
+| **Mode NEWS2** | NEWS features + chronic respiratory history |
+| **Mode Gabrielle** | 20-feature clinical subset (vitals, labs, dialysis) |
 | **Mode Commonly Used Without pmsi** | 34 clinically common features, no PMSI/admin codes |
 | **Mode Commonly Used** | Commonly used + PMSI columns (`hx_*`, `icu_*`) |
 | **Mode All** | All available features after cleaning |
@@ -229,15 +245,32 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 - **Leakage**: `encounterId`, `delta_hour`, `target_col`, `deces_datediff_days`, `los`, etc.
 - **Unused ICU**: `icu_actes`, `icu_mode_sortie`, `hosp_primaryDiagnosis`, etc.
 
+### TSFEL Feature Explainability Scores (NEW)
+
+The pipeline assigns explainability scores to TSFEL feature families in 6 tiers:
+
+| Tier | Score Range | Feature Families |
+|------|-------------|-----------------|
+| **1: Highly explainable** | 90-100 | max, min, mean, median, peak-to-peak, area, ecdf percentile |
+| **2: Moderately explainable** | 70-85 | std, variance, rms, energy, zero-crossing, IQR, slopes |
+| **3: Poorly explainable** | 50-65 | skewness, kurtosis, autocorrelation, spectral centroid |
+| **4: Abstract / Informational** | 30-45 | entropy, Lempel-Ziv complexity, multiscale entropy |
+| **5: Purely spectral** | 10-25 | spectral roll-off/roll-on/spread/slope/skewness/kurtosis |
+| **6: Wavelets** | 0-5 | wavelet std/variance/energy/entropy |
+
 ---
 
 ## Windowing / Resampling Modes
 
 | Mode | Description |
 |------|-------------|
-| **`24h début réanimation sans remplissage`** | 24-hour window from ICU admission start, no interpolation |
+| **`24h début réanimation sans remplissage`** | 24-hour window from ICU admission start, no interpolation (simplified) |
 | **`24h fin réanimation sans remplissage`** | 24-hour window from ICU discharge, no interpolation |
+| **`24h aléatoire 'lomax' prio 24h sans remplissage`** | 24h random window with Lomax distribution prioritizing first 24h |
+| **`24h aléatoire 'lomax' prio 50-50 sans remplissage`** | 24h random window with balanced Lomax distribution |
 | **`resampling aléatoire 'lomax' prio 24h sans remplissage`** | Random Lomax-distributed resampling prioritizing first 24h |
+| **`resampling aléatoire 'lomax' prio 50-50 sans remplissage`** | Random Lomax-distributed resampling with balanced priority |
+| **`resampling X points`** | Fixed-point resampling to median ICU stay length |
 
 ---
 
@@ -245,10 +278,22 @@ This 2188-line script is the **central orchestrator** of the entire project. It 
 
 | Target | Column | Description |
 |--------|--------|-------------|
-| **Survie à 28 jours** | `isDeceased_lt_28d` | Death within 28 days |
 | **Survie à 24 heures** | `isDeceased_lt_24h` | Death within 24 hours |
 | **Survie à 7 jours** | `isDeceased_lt_7d` | Death within 7 days |
+| **Survie à 28 jours** | `isDeceased_lt_28d` | Death within 28 days |
 | **Survie à 3 mois** | `isDeceased_lt_3m` | Death within 3 months |
+| **Survie (isDeceased)** | `isDeceased` | Overall hospital death |
+
+---
+
+## Data Quality Filters (NEW)
+
+The pipeline now applies additional patient-level filters:
+
+- **Minimum 24h ICU stay**: Patients with less than 24 hours of ICU data are excluded
+- **Valid SpO2 measurement**: Patients must have at least one valid SpO2 reading
+- **Duplicate encounter filtering**: Encounters with duplicate `utcInTime` are filtered
+- **GHM and entry_mode behaviors**: Specific handling for GHM (Groupe Homogène de Malades) and ICU entry mode
 
 ---
 
@@ -271,6 +316,20 @@ The pipeline uses a **nested, patient-level stratified group cross-validation**:
 
 ---
 
+## Boruta Feature Selection (NEW Cross-Fold Approach)
+
+The Boruta feature selection has been improved with a **cross-fold approach**:
+
+- Features must appear in **90% of folds** to be retained in the unified cross-fold feature set
+- Feature selection is now performed **after merging** for better traceability
+- Each fold saves a **feature trace JSON** file tracking:
+  - Initial feature count
+  - Features after correlation/variance filtering
+  - Features after Boruta cross-fold filtering
+  - Final feature set
+
+---
+
 ## Calibration Strategies
 
 | Strategy | When Applied | Description |
@@ -281,28 +340,36 @@ The pipeline uses a **nested, patient-level stratified group cross-validation**:
 
 When calibration is enabled without balancing, the training fold is further split (3-fold SGKF) to create a held-out calibration set.
 
+### Fixed-Bin Calibration (NEW)
+
+Calibration curves now use **fixed 10% risk brackets** (0.05, 0.15, ..., 0.95) for consistent comparison across models and datasets. This aligns the calibration curve visualization with the Brier score, ICI, and risk bracket analysis.
+
 ---
 
 ## Evaluation Metrics
 
 ### Discrimination
+
 - **AUC-ROC**: Area Under the Receiver Operating Characteristic Curve
 - **AUPRC**: Area Under the Precision-Recall Curve
 - **F1-Score**: At optimal threshold (OOF) or fixed threshold (holdout)
 - **MCC**: Matthews Correlation Coefficient
 
 ### Calibration
+
 - **Brier Score**: Mean squared difference between predicted probabilities and outcomes
 - **ICI**: Integrated Calibration Index
 - **Calibration Intercept & Slope**: From logistic regression of logits on predicted probabilities
-- **E90, EMax**: Maximum calibration errors in risk brackets
+- **E90, EMax**: 90th percentile and maximum calibration errors in risk brackets
 
 ### Distribution
+
 - **Non-overlap Area**: Between alive/deceased probability distributions
 - **Asymmetric Uncertainty**: Distribution asymmetry measure
 - **Mean Risk Difference**: Average predicted probability gap between classes
 
 ### Statistical Confidence
+
 - **Bootstrap 95% CI**: 2000 bootstrap iterations on holdout metrics
 
 ---
@@ -321,13 +388,21 @@ inputs/<duplication_mode>/<target>/<windowing>/<features>/<model>/
 ├── learning_curve.png                  # Learning curve plot
 ├── roc_curve.png                       # ROC curve
 ├── prc_curve.png                       # Precision-Recall curve
-├── calibration_curve.png               # Calibration curve
+├── calibration_curve.png               # Calibration curve (fixed bins)
 ├── kde_plot.png                        # KDE distribution plot
 ├── f1_score_evolution.png             # F1-score vs threshold
 ├── confusion_matrix.png               # Confusion matrix
 ├── brier_evolution.png                # Brier score evolution
 ├── calibration_per_risk.png           # Calibration by risk bracket
+├── tableone_static_features.csv       # TableOne baseline statistics (NEW)
+├── tableone_static_features.html      # TableOne HTML report (NEW)
 ├── L1_Log_path_fold_*.png             # Lasso coefficient paths (if Lasso)
+├── tsfel_boruta/
+│   └── train/
+│       └── <seed>/
+│           ├── feature_trace_fold_*.json  # Feature selection trace (NEW)
+│           ├── train_filtered.parquet     # Cached filtered train data (NEW)
+│           └── test_filtered.parquet      # Cached filtered test data (NEW)
 └── holdout/
     ├── roc_curve.png
     ├── prc_curve.png
@@ -345,14 +420,14 @@ inputs/<duplication_mode>/<target>/<windowing>/<features>/<model>/
 
 Defines all available options as immutable configuration objects:
 
-- **`MODES`**: Windowing/resampling configurations
+- **`MODES`**: Windowing/resampling configurations (7 modes including Lomax variants)
 - **`CLEAN`**: Data cleaning strategies
-- **`Y`**: Target variable configurations
-- **`BALANCE`**: Class balancing methods
+- **`Y`**: Target variable configurations (5 targets)
+- **`BALANCE`**: Class balancing methods (5 methods including Up/DownSampling)
 - **`POPULATION`**: Population filtering options
-- **`MODELS`**: Model definitions (name, type, extraction type)
-- **`SCORE`**: Clinical score configurations
-- **`FEAT`**: Feature set definitions
+- **`MODELS`**: Model definitions (10 models including VanillaTransformer)
+- **`SCORE`**: Clinical score configurations (IGS2, NEWS2)
+- **`FEAT`**: Feature set definitions (9 modes including NEWS, NEWS2, Gabrielle)
 
 ### `path_utils.py` — `Experiment` Class
 
@@ -379,19 +454,20 @@ Key methods:
 - `get_tsfel_parquet_path()`: Cached TSFEL feature path
 - `get_lasso_path()`: Lasso data path
 - `get_comparison_path()`: Comparison report directory
+- `get_tsfel_boruta()`: Boruta filtered data path (NEW)
 
 ### `sequential_utils.py` — `PipelineConfig` Factory
 
 ```python
 config = sequential.create_pipeline_config(
-    type_donnees="modèle",
-    mode_fenetrage="24h fin réanimation sans remplissage",
+    type_donnees="modele",
+    mode_fenetrage="24h debut reanimation sans remplissage",
     model_name="XGBoost TSFEL",
     score_name="IGS2",
     nettoyage="Enlever Surveillance Continue",
-    cible="Survie à 28 jours",
+    cible="Survie a 28 jours",
     mode_features="Mode Commonly Used Without pmsi",
-    equilibrage="Aucune Méthode",
+    equilibrage="Aucune Methode",
     population="Tout",
     save_figure=True,
     transparent=False,
@@ -410,12 +486,22 @@ Returns a frozen `PipelineConfig` dataclass with all sub-configurations, includi
 
 ### `preprocessing_utils.py`
 
+- **`scaling()`**: Scales continuous numerical features using `StandardScaler`, excluding binary columns (0/1) and boolean features. Fitted exclusively on training data.
+
+- **`build_sequences()`**: Converts patient observations into fixed-length 3D sequences with alphabetically sorted features for stable ordering.
+
+- **`downsample_train_patients()`**: Custom patient-level downsampling that preserves all 24h mortality patients while sampling from 28-day and survivor groups to match class balance.
+
+- **`equilibrer_dataset_tabulaire()`**: Balances a tabular DataFrame using multiple strategies: custom downsampling, imbalanced-learn undersampling/oversampling.
+
 - **`process_tsfel_fold()`**: Prepares one fold for TSFEL-based models:
   - Patient-level train/validation split
   - Correlation + zero-variance filtering
-  - Boruta feature selection (optional, cached)
+  - Boruta cross-fold feature selection (cached)
   - Class balancing (downsampling/upsampling)
   - `StandardScaler` fit/transform
+  - Feature trace JSON generation (NEW)
+  - Holdout NaN/infinite value sanitization (NEW)
 
 - **`process_time_fold()`**: Prepares one fold for time-series models:
   - Sequence building per patient
@@ -424,25 +510,33 @@ Returns a frozen `PipelineConfig` dataclass with all sub-configurations, includi
 
 ### `training_utils.py`
 
+- **`TemperatureScaledEstimator`**: Wraps any estimator with PyTorch temperature calibration, exposing a scikit-learn-compatible interface.
+
+- **`PriorCorrectionWrapper`**: Wraps any estimator with analytical prior-probability correction for balanced datasets.
+
 - **`fit_model_by_name()`**: Dispatches training to the appropriate model:
+  - `VanillaTransformerModified`: PyTorch Transformer with attention mechanism (NEW)
   - `InceptionTimeModified`: PyTorch CNN with early stopping
   - `LstmTimeModified`: PyTorch LSTM with gradient clipping
-  - `XGBoost TSFEL`: XGBoost with CUDA support
+  - `XGBoost TSFEL`: XGBoost with CUDA support and class-weight handling
   - `RandomForest TSFEL`: scikit-learn RandomForest
-  - `SVC TSFEL`: scikit-learn SVC with RBF kernel
-  - `Logistic Regression Lasso TSFEL`: L1-regularized logistic regression
+  - `RandomForest Imbalanced TSFEL`: imbalanced-learn BalancedRandomForest (NEW)
+  - `SVC TSFEL`: scikit-learn SVC with RBF kernel + CalibratedClassifierCV
+  - `Logistic Regression Lasso TSFEL`: L1-regularized logistic regression with inner CV
 
 - **`get_learning_curve_chunk()`**: Stratified group-aware sampling for learning curve stages (20%, 40%, 60%, 80%, 100%)
 
-- **`apply_prior_calibration()`**: Analytical prior correction for balanced datasets
+- **`apply_model_calibration()`**: Temperature scaling or Platt scaling on a held-out calibration set
 
-- **`apply_model_calibration()`**: Temperature scaling or Platt scaling
+- **`get_root_estimator()`**: Recursively unwraps known wrappers (CalibratedClassifierCV, FrozenEstimator, TemperatureScaledEstimator, PriorCorrectionWrapper)
 
 ### `evaluate_utils.py`
 
+- **`evaluate_vt_fold()`**: Load VanillaTransformer model, predict probabilities (NEW)
 - **`evaluate_inception_fold()`**: Load InceptionTime model, predict probabilities
 - **`evaluate_lstm_fold()`**: Load LSTM model, predict probabilities
 - **`evaluate_tsfel_fold()`**: Load TSFEL model (joblib), predict with calibration
+- **`align_tsfel_features()`**: Align TSFEL feature columns with model-expected schema (NEW)
 
 Each returns: `y_test`, `probas_uncalib`, `probas_calib`, `train_score`, `test_score`, `y_pred_test`
 
@@ -453,6 +547,15 @@ Each returns: `y_test`, `probas_uncalib`, `probas_calib`, `train_score`, `test_s
   - Applies TSFEL transformers (statistical, temporal, spectral features)
   - Joins with static features
   - Caches result as parquet
+
+- **`filtrage_corr_var()`**: Correlation and variance filtering with static feature protection
+
+- **Boruta cross-fold selection** (NEW):
+  - Collects Boruta-selected features across all folds
+  - Retains only features present in 90% of folds
+  - Saves feature trace JSON per fold for full transparency
+
+- **Explainability scores** (NEW): Tiered scoring system for TSFEL feature families to assess clinical interpretability
 
 ### `static_features_utils.py`
 
@@ -465,17 +568,19 @@ Comprehensive visualization suite:
 
 - **`roc_curve_homemade()`**: ROC curve with AUC annotation
 - **`prc_curve_homemade()`**: Precision-Recall curve with AUPRC
-- **`calibration_curve_homemade()`**: Calibration curve with intercept/slope/ICI
+- **`calibration_curve_homemade()`**: Calibration curve with fixed 10% risk brackets (NEW)
+- **`plot_calibration_curves()`**: Multi-curve calibration comparison with fixed bins (NEW)
+- **`plot_collective_calibration_curves()`**: Collective calibration across multiple models (NEW)
+- **`get_calibration_stats()`**: Calibration statistics with fixed 10% risk brackets (NEW)
+- **`compute_binary_metrics()`**: Per-fold metric computation
+- **`summarize_fold_metrics()`**: Mean +/- std across folds
 - **`kde_plot_homemade()`**: Kernel Density Estimate of predicted probabilities
 - **`f1_score_evolution()`**: F1-score across thresholds
 - **`confusion_matrix_homemade()`**: Confusion matrix with MCC
 - **`brier_evolution()`**: Brier score analysis
 - **`calibration_per_risk_brackets()`**: Calibration in 10% risk bins
 - **`plot_collected_learning_curve()`**: Learning curve visualization
-- **`plot_calibration_curves()`**: Multi-curve calibration comparison
-- **`compute_binary_metrics()`**: Per-fold metric computation
-- **`summarize_fold_metrics()`**: Mean ± std across folds
-- **`générer_rapport_comparatif()`**: Comparative report across models
+- **`generate_comparative_report()`**: Comparative report with mean + std metrics (NEW)
 
 ### `postprocessing_utils.py`
 
@@ -484,14 +589,22 @@ Comprehensive visualization suite:
 - **`f1_at_fixed_threshold()`**: F1 at OOF-determined threshold
 - **`mcc_at_fixed_threshold()`**: MCC at OOF-determined threshold
 
+### `resampling_and_window_choice_pipeline.py`
+
+- **`prepare_dataset_from_config()`**: Main entry point for windowing/resampling:
+  - Fixed-window modes (24h start/end, Lomax random)
+  - Resampling modes (fixed points, Lomax-distributed)
+  - Lomax timestamp generation for random prediction times
+  - Median-based target length computation
+
+- **Simplified 24h window** (NEW): The `24h_debut_rea_no-fill` mode now uses simple `delta_hour < 24` truncation
+
 ### `optuna/` — Hyperparameter Optimization
 
 Each model has a dedicated Optuna search:
 
 | Module | Model | Search Space |
 |--------|-------|-------------|
-| `optuna_inception_utils.py` | InceptionTime | `out_channels`, `bottleneck_channels`, `batch_size` (power-of-2) |
-| `optuna_lstm_utils.py` | LSTM | `hidden_size`, `batch_size`, `clip_grad` |
 | `optuna_xgb_utils.py` | XGBoost | `n_estimators`, `max_depth`, `learning_rate`, `subsample`, `colsample_bytree` |
 | `optuna_rf_utils.py` | RandomForest | `n_estimators`, `max_depth`, `min_samples_split`, `min_samples_leaf` |
 | `optuna_svc_utils.py` | SVC | `C`, `gamma` |
@@ -500,39 +613,12 @@ Optuna results are cached in `best_hyperparameters.json` per experiment to avoid
 
 ---
 
-## Interactive UI: `Show_Models_Comparison.py`
-
-A **Marimo notebook** providing an interactive web interface for the same pipeline. It features:
-
-- Dynamic dropdown widgets for all configuration options
-- Run buttons for training, Optuna search, Lasso path, and model comparison
-- Live figure rendering in the browser
-- Same underlying utility modules as the sequential pipeline
-
-Run with: `marimo edit Show_Models_Comparison.py` or `marimo run Show_Models_Comparison.py --headless`
-
----
-
-## Data Pipeline (External Repository)
-
-The input data is prepared by a separate preprocessing pipeline:
-
-- **Repository**: `/home/paquie.d/Preprocessing_pipeline/preprocessing-pipelines`
-- **Input**: Raw ICU data from `data2/paquie.d/Datasets/`
-- **Output**: 
-  - `df_static_ano_clean.parquet`: Cleaned static patient data
-  - `df_dynamic_full_clean.parquet`: Cleaned longitudinal physiological data
-  - `merged_static_ano_and_dynamic.parquet`: Merged dataset
-  - `df_static_full_clean.parquet`: Static data without anomaly filtering
-
----
-
 ## Running the Pipeline
 
 ### Prerequisites
 
 ```bash
-pip install torch numpy polars scikit-learn xgboost joblib matplotlib seaborn tsfel optuna shap marimo
+pip install torch numpy polars scikit-learn xgboost joblib matplotlib seaborn tsfel optuna shap boruta-py pywt tabulate imbalanced-learn
 ```
 
 ### Sequential Pipeline
@@ -540,13 +626,6 @@ pip install torch numpy polars scikit-learn xgboost joblib matplotlib seaborn ts
 ```bash
 cd WorkPackages_WorkFlow
 python Models_Comparison_Pipeline_sequential_journalisation.py
-```
-
-### Interactive Notebook
-
-```bash
-cd WorkPackages_WorkFlow
-marimo edit Show_Models_Comparison.py
 ```
 
 ### Configuration Flags
@@ -570,7 +649,7 @@ TRANSPARENT = False      # Transparent background for figures
 - **Fixed seed**: `SEED = 42` applied to `random`, `numpy`, `torch`, and `PYTHONHASHSEED`
 - **Deterministic CUDA**: `torch.backends.cudnn.deterministic = True`, `benchmark = False`
 - **Logging**: Every run produces a timestamped log file in `pipeline_logs/`
-- **Cache**: TSFEL features and Optuna results are cached to avoid recomputation
+- **Cache**: TSFEL features, Boruta results, and Optuna results are cached to avoid recomputation
 - **Skip existing**: Trained models are skipped if already present on disk
 
 ---
@@ -580,6 +659,7 @@ TRANSPARENT = False      # Transparent background for figures
 Each pipeline run creates a log file: `pipeline_logs/pipeline_YYYYMMDD_HHMMSS_pidXXXX.log`
 
 The log includes:
+
 - Timestamped stage transitions
 - Experiment configuration details
 - Model training progress
@@ -588,59 +668,41 @@ The log includes:
 
 ---
 
-## Output Format
+## Data Pipeline (External Repository)
 
-The `all_res.joblib` file contains a dictionary with:
+The input data is prepared by a separate preprocessing pipeline:
 
-```python
-{
-    # Pooled OOF predictions
-    "y_true_oof": np.ndarray,
-    "probas_oof": np.ndarray,
-    "probas_uncalib_oof": np.ndarray,
-    "probas_calib_oof": np.ndarray,
-    "preds_oof": np.ndarray,
-    
-    # Threshold-dependent metrics
-    "f1_score_oof": float,
-    "mcc_oof": float,
-    
-    # Discrimination metrics
-    "auc_oof": float,
-    "auprc_oof": float,
-    
-    # Calibration metrics
-    "brier_oof": float,
-    "calibration_intercept_oof": float,
-    "calibration_slope_oof": float,
-    "ici_oof": float,
-    "e90_oof": float,
-    "eMax_oof": float,
-    
-    # Fold-level information
-    "fold_metrics": list[dict],
-    "fold_metrics_summary": dict,
-    
-    # Distribution metrics
-    "non_overlap_area": float,
-    "asymetric_incertitude": float,
-    "mean_risk_diff": float,
-    "mean_deaths_prediction": float,
-    
-    # Per-fold metric values
-    "auc_per_fold": list, "auc_mean": float, "auc_std": float,
-    "auprc_per_fold": list, "auprc_mean": float, "auprc_std": float,
-    # ... (same pattern for all metrics)
-    
-    # Holdout results (if RUN_TEST=True)
-    "y_true_holdout": np.ndarray,
-    "holdout_patient_ids": np.ndarray,
-    "probas_holdout": np.ndarray,
-    "fixed_threshold_from_oof": float,
-    "bootstrap_holdout": dict,
-    "shap_holdout": dict,  # (TSFEL models only)
-}
-```
+- **Repository**: `/home/paquie.d/Preprocessing_pipeline/preprocessing-pipelines`
+- **Input**: Raw ICU data from `data2/paquie.d/Datasets/`
+- **Output**:
+  - `df_static_ano_clean.parquet`: Cleaned static patient data
+  - `df_dynamic_full_clean.parquet`: Cleaned longitudinal physiological data
+  - `merged_static_ano_and_dynamic.parquet`: Merged dataset
+  - `df_static_full_clean.parquet`: Static data without anomaly filtering
+
+---
+
+## Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| Python | >=3.10 | Runtime |
+| PyTorch | >=2.0 | Deep learning models |
+| NumPy | >=1.24 | Numerical operations |
+| Polars | >=0.20 | Fast DataFrame operations |
+| scikit-learn | >=1.3 | Classical ML, CV, metrics |
+| XGBoost | >=2.0 | Gradient boosting |
+| TSFEL | >=0.5 | Time-series feature extraction |
+| Optuna | >=3.0 | Hyperparameter optimization |
+| SHAP | >=0.44 | Model explanation |
+| BorutaPy | >=0.4 | Feature selection |
+| PyWavelets | >=1.4 | Wavelet transforms |
+| Joblib | >=1.3 | Model serialization, parallelism |
+| Matplotlib | >=3.7 | Figure generation |
+| Seaborn | >=0.12 | Statistical visualization |
+| imbalanced-learn | >=0.12 | Class balancing |
+| tabulate | >=0.9 | Table formatting |
+| tableone | >=0.9 | Baseline statistics tables |
 
 ---
 
@@ -651,31 +713,13 @@ The pipeline defines several preset experiment grids:
 | Mode | Description |
 |------|-------------|
 | **`score`** | Baseline: IGS2 clinical score evaluation only |
-| **`wp1`** | 24h-start window, 28-day mortality, all models, Optuna enabled |
+| **`wp1`** | 24h-start window, 28-day mortality, all models, multiple feature sets, Optuna enabled |
 | **`wp2`** | 24h-end window, all targets, all models, all balancing methods |
 | **`wp3`** | Lomax resampling, all targets, all models, all balancing methods |
-| **`test_imbalance`** | Imbalance impact study: LSTM + XGBoost with balancing |
+| **`test_imbalance`** | Imbalance impact study: Transformer + LSTM + XGBoost with balancing |
 | **`test_robustesse`** | Robustness test: XGBoost only |
-
----
-
-## Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| Python | 3.x | Runtime |
-| PyTorch | >=2.0 | Deep learning models |
-| NumPy | >=1.24 | Numerical operations |
-| Polars | >=0.20 | Fast DataFrame operations |
-| scikit-learn | >=1.3 | Classical ML, CV, metrics |
-| XGBoost | >=2.0 | Gradient boosting |
-| TSFEL | >=0.5 | Time-series feature extraction |
-| Optuna | >=3.0 | Hyperparameter optimization |
-| SHAP | >=0.44 | Model explanation |
-| Joblib | >=1.3 | Model serialization, parallelism |
-| Matplotlib | >=3.7 | Figure generation |
-| Seaborn | >=0.12 | Statistical visualization |
-| Marimo | >=0.23 | Interactive notebook UI |
+| **`SVC_LR`** | SVC + Lasso Logistic Regression benchmark |
+| **`end_game`** | Full model comparison with all models and commonly used features |
 
 ---
 
@@ -690,12 +734,14 @@ merged_static_ano_and_dynamic.parquet
     ↓
 [Models_Comparison_Pipeline_sequential_journalisation.py]
     ├── Data Loading & Label Preparation
+    ├── Data Quality Filters (min 24h stay, valid SpO2, duplicate filtering)
     ├── Windowing / Resampling
     ├── Feature Selection & Cleaning
     ├── Initial 80/20 Holdout Split
     ├── 5-Fold Stratified Group CV
     │   ├── TSFEL Extraction (if needed)
-    │   ├── Boruta Feature Selection
+    │   ├── Boruta Cross-Fold Feature Selection (90% threshold)
+    │   ├── Feature Trace JSON per fold
     │   ├── Class Balancing
     │   ├── StandardScaler
     │   ├── Optuna HP Search (optional)
@@ -703,13 +749,13 @@ merged_static_ano_and_dynamic.parquet
     │   ├── Calibration
     │   └── Fold Evaluation
     ├── OOF Pooling & Metrics
-    ├── Figure Generation
+    ├── Figure Generation (including TableOne)
     ├── Independent Holdout Evaluation
     │   ├── Ensemble Prediction
     │   ├── Bootstrap 95% CI
     │   └── SHAP Explanation
     ├── Lasso Path (if Lasso model)
-    └── Model Comparison Report
+    └── Model Comparison Report (mean + std)
     ↓
 all_res.joblib + figures + trained models
 ```

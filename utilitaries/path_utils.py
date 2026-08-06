@@ -438,6 +438,78 @@ class Experiment:
 
         return path / f"fold_{fold_idx}.parquet"
 
+    def _get_tsfel_boruta_dir(
+        self,
+        config_mode="",
+        class_weight="",
+    ):
+        """Return the common tsfel_boruta run directory.
+
+        The parent directory is created automatically when needed.
+
+        Args:
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the tsfel_boruta run directory.
+        """
+        weight = class_weight if class_weight != "" else None
+
+        path = (
+            self._get_base_path("inputs", config_mode)
+            / "tsfel_boruta"
+            / self._get_run_slug(
+                class_weight=weight,
+                include_calibration=False,
+            )
+        )
+
+        path.mkdir(parents=True, exist_ok=True)
+
+        return path
+
+    def get_boruta_crossfold_path(
+        self,
+        config_mode="",
+        class_weight="",
+    ):
+        """Return the path of the unified cross-fold Boruta feature set.
+
+        Args:
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the unified Boruta cross-fold NumPy file.
+        """
+        return self._get_tsfel_boruta_dir(config_mode, class_weight) / "boruta_crossfold_features.npy"
+
+    def get_corr_threshold_path(
+        self,
+        config_mode="",
+        class_weight="",
+    ):
+        """Return the path of the cached optimal correlation threshold.
+
+        Stored alongside the Boruta cross-fold features so that both
+        preprocessing artifacts live in the same directory.
+
+        Args:
+            config_mode:
+                Optional preprocessing mode override.
+            class_weight:
+                Optional class-weight override.
+
+        Returns:
+            Path to the correlation threshold NumPy file.
+        """
+        return self._get_tsfel_boruta_dir(config_mode, class_weight) / "optimal_corr_threshold.npy"
+
     def get_time_path(
         self,
         mode,

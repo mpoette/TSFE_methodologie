@@ -1430,20 +1430,25 @@ def filtrage_corr_var(
             "No feature remains after variance filtering."
         )
 
-    train_selected = pd.DataFrame(
-        index=train_metadata.index,
-    )
-    test_selected = pd.DataFrame(
-        index=test_metadata.index,
-    )
+    train_parts = []
+    test_parts = []
 
     if static_in_features:
-        train_selected[static_in_features] = train_static[static_in_features]
-        test_selected[static_in_features] = test_static[static_in_features]
+        train_parts.append(train_static[static_in_features])
+        test_parts.append(test_static[static_in_features])
 
     if dynamic_selected:
-        train_selected[dynamic_selected] = train_uncorrelated[dynamic_selected]
-        test_selected[dynamic_selected] = test_uncorrelated[dynamic_selected]
+        train_parts.append(train_uncorrelated[dynamic_selected])
+        test_parts.append(test_uncorrelated[dynamic_selected])
+
+    train_selected = pd.concat(
+        train_parts,
+        axis=1,
+    )
+    test_selected = pd.concat(
+        test_parts,
+        axis=1,
+    )
 
     train_final = pd.concat(
         [
@@ -3347,3 +3352,228 @@ def get_boruta_features_at_threshold(
     )
 
     return selected
+
+
+def collect_boruta_features_for_fold(
+    fold_idx,
+    train_idx,
+    test_idx,
+    X,
+    y,
+    groups,
+    seed,
+    **kwargs,
+):
+    """Run Boruta for one fold and return the selected feature list.
+
+    This helper is used in the first phase of cross-fold Boruta selection:
+    each fold runs correlation/variance filtering followed by Boruta, and the
+    resulting feature list is collected. After all folds have been processed,
+    the frequency of each feature across folds is analysed to determine a
+    unified feature set.
+
+    Args:
+        fold_idx:
+            Zero-based fold index.
+        train_idx:
+            Training indices for the current fold.
+        test_idx:
+            Validation indices for the current fold.
+        X:
+            Dataset used to recover patient identifiers for the split.
+        y:
+            Target array associated with the complete dataset.
+        groups:
+            Group array associated with the complete dataset.
+        seed:
+            Random seed used for feature selection.
+        **kwargs:
+            Pipeline configuration, including ``corr_threshold``,
+            ``static_feats``, and ``keep_static``.
+
+    Returns:
+        The list of feature names selected by Boruta for this fold (after
+        correlation/variance filtering). Returns an empty list when Boruta
+        is disabled.
+    """
+    patient_col = kwargs["patient_col"]
+    target_col = kwargs["target_col"]
+    train_init_tsfel = kwargs["train_init"]
+    static_feats = kwargs.get("static_feats", [])
+    keep_static = kwargs.get("keep_static", True)
+    boruta_filter = kwargs.get("boruta_filter", False)
+
+    # Retrieve patient identifiers for the current fold.
+    train_patients = (
+        X[train_idx]
+        .select(patient_col)
+        .unique()
+    )
+
+    test_patients = (
+        X[test_idx]
+        .select(patient_col)
+        .unique()
+    )
+
+    train_fold_tsfel = (
+        train_init_tsfel
+        .join(train_patients, on=patient_col, how="inner")
+        .sort(patient_col)
+    )
+
+    test_fold_tsfel = (
+        train_init_tsfel
+        .join(test_patients, on=patient_col, how="inner")
+        .sort(patient_col)
+    )
+
+    # Step 1: Correlation and variance filtering.
+    corr_threshold = kwargs.get("corr_threshold", 0.95)
+    train_clean, test_clean, _ = filtrage_corr_var(
+        train_fold_tsfel,
+        test_fold_tsfel,
+        patient_col,
+        target_col,
+        corr_threshold=corr_threshold,
+        static_features=static_feats,
+        keep_static=keep_static,
+    )
+
+    if not boruta_filter:
+        # No Boruta: return all features after corr/var filtering.
+        feature_names = (
+            train_clean
+            .select(pl.exclude(patient_col, target_col))
+            .columns
+        )
+        return list(feature_names)
+
+    # Step 2: Boruta selection.
+    _, _, boruta_features = filtrage_boruta(
+        train_clean,
+        test_clean,
+        patient_col,
+        target_col,
+        max_iter=100,
+        seed=seed,
+        static_features=static_feats,
+        keep_static=keep_static,
+    )
+
+    return list(boruta_features)
+
+
+def resolve_boruta_crossfold_features(
+    X,
+    y,
+    groups,
+    seed,
+    exp,
+    sgkf,
+    compare_figs_dir,
+    **kwargs,
+):
+    """Load or compute the unified cross-fold Boruta feature set.
+
+    When the cached feature file already exists, it is loaded directly.
+    Otherwise, the function runs Phase 1 (per-fold Boruta collection),
+    Phase 1.5 (elbow analysis), and saves the unified feature set.
+
+    Args:
+        X:
+            Dataset used to recover patient identifiers for the split.
+        y:
+            Target array associated with the complete dataset.
+        groups:
+            Group array associated with the complete dataset.
+        seed:
+            Random seed used for feature selection.
+        exp:
+            Experiment path configuration object.
+        sgkf:
+            Fitted StratifiedGroupKFold splitter.
+        compare_figs_dir:
+            Output directory for elbow analysis figures and CSV.
+        **kwargs:
+            Pipeline configuration forwarded to each fold.
+
+    Returns:
+        The unified list of Boruta feature names selected at the elbow
+        frequency threshold across all folds.
+    """
+    boruta_filter = kwargs.get("boruta_filter", False)
+
+    boruta_crossfold_path = exp.get_boruta_crossfold_path()
+    
+    if boruta_crossfold_path.exists():
+        features = list(
+            np.load(boruta_crossfold_path, allow_pickle=True)
+        )
+        print(
+            f"[BORUTA] Loaded {len(features)} features from cache."
+        )
+        return features
+
+    if not boruta_filter:
+        return []
+
+    # Phase 1: Collect Boruta features across 5 folds.
+    print("\n[BORUTA PHASE 1] Collecting features across 5 folds...")
+    fold_boruta_feature_lists = []
+
+    for _fold_idx, (_train_idx, _val_idx) in enumerate(
+        sgkf.split(X=X, y=y, groups=groups)
+    ):
+        print(
+            f"\n[BORUTA PHASE 1] Collecting fold {_fold_idx + 1}/5..."
+        )
+        features = collect_boruta_features_for_fold(
+            _fold_idx,
+            _train_idx,
+            _val_idx,
+            X,
+            y,
+            groups,
+            seed,
+            **kwargs,
+        )
+        fold_boruta_feature_lists.append(features)
+        print(
+            f"[BORUTA PHASE 1] Fold {_fold_idx + 1}: "
+            f"{len(features)} features selected."
+        )
+
+    # Phase 1.5: Elbow analysis.
+    print("\n[BORUTA PHASE 1.5] Analyzing frequency elbow...")
+    boruta_freq_threshold, boruta_freq_df = (
+        estimate_boruta_frequency_threshold(
+            fold_feature_lists=fold_boruta_feature_lists,
+            n_folds=5,
+            output_folder=str(compare_figs_dir),
+        )
+    )
+
+    # Save frequency results as CSV.
+    boruta_freq_df.to_csv(
+        compare_figs_dir / "boruta_frequency_results.csv",
+        index=False,
+    )
+
+    # Get the unified feature set at the elbow threshold.
+    boruta_crossfold_features = get_boruta_features_at_threshold(
+        fold_feature_lists=fold_boruta_feature_lists,
+        n_folds=5,
+        frequency_threshold=boruta_freq_threshold,
+    )
+
+    # Save the unified feature list.
+    np.save(boruta_crossfold_path, boruta_crossfold_features)
+
+    print(
+        f"\n[BORUTA CROSS-FOLD] Unified feature set: "
+        f"{len(boruta_crossfold_features)} features "
+        f"at frequency >= {boruta_freq_threshold:.2f}."
+    )
+
+    return list(boruta_crossfold_features)

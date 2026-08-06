@@ -59,7 +59,6 @@ def make_objective_svc_stage1(
         params = {
             "C": trial.suggest_float("C", 0.1, 100, log=True),
             "kernel": kernel,
-            "probability": fixed_params.get("probability", False),
             "class_weight": trial.suggest_categorical("class_weight", ["balanced", None]),
             "random_state": fixed_params.get("random_state", 42),
         }

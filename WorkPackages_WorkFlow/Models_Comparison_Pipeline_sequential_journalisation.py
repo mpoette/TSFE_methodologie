@@ -144,6 +144,7 @@ mode_names = ["score", "wp1", "wp2", "wp3"]
 mode_names = ["wp1","score"]
 # mode_names = ["test_robustesse"]
 # mode_names = ["score"]
+mode_names = ["SVC_LR", "end_game"]
 
 RUN_COMPARISON = False
 RUN_TRAINING = True
@@ -172,7 +173,7 @@ for mode_run in mode_names:
         model_names = ["IGS2"]
         stratify_modes = ["target_col"]
         optuna_run_options = [False]
-        feature_modes = ["Mode Commonly Used"]
+        feature_modes = ["Mode IGS2"]
         balancing_methods = ["Aucune Méthode"]
     if mode_run == "test_imbalance":
         mode_duplicates = "prio_first"
@@ -183,6 +184,25 @@ for mode_run in mode_names:
         optuna_run_options = [False]
         feature_modes = ["Mode Commonly Used Without pmsi"]
         balancing_methods = ["Aucune Méthode", "DownSampling 50-50", "UpSampling 50-50"]
+        RUN_COMPARISON = True
+    elif mode_run == "SVC_LR":
+        mode_duplicates = "prio_first"
+        target_labels = ["Survie à 28 jours"]
+        model_names = ["SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+        stratify_modes = ["target_col"]
+        WINDOWING_MODE = "24h début réanimation sans remplissage"
+        optuna_run_options = [False, True]
+        feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
+        balancing_methods = ["Aucune Méthode"]
+    elif mode_run == "end_game":
+        mode_duplicates = "prio_first"
+        WINDOWING_MODE = "24h début réanimation sans remplissage"
+        target_labels = ["Survie à 28 jours"]
+        model_names = ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+        stratify_modes = ["target_col"]
+        optuna_run_options = [False, True]
+        feature_modes = ["Mode Commonly Used"]
+        balancing_methods = ["Aucune Méthode"]
         RUN_COMPARISON = True
     elif mode_run == "test_robustesse":
         mode_duplicates = "prio_first"
@@ -788,7 +808,7 @@ for mode_run in mode_names:
                                 boruta_crossfold_features = None
                                 if config_models.extraction_type == "TSFEL":
                                     compare_figs_dir = exp.get_compare_figs_path()
-                                    threshold_path = compare_figs_dir / "optimal_corr_threshold.npy"
+                                    threshold_path = exp.get_corr_threshold_path()
 
                                     if threshold_path.exists():
                                         corr_threshold = float(np.load(threshold_path))
@@ -826,74 +846,22 @@ for mode_run in mode_names:
                                     fold_processing_config["train_init"] = train_init_tsfel
                                     fold_processing_config["holdout_init"] = test_holdout_tsfel
 
-                                    # ---- Phase 1: Cross-fold Boruta frequency collection ----
+                                    # ---- Phase 1: Boruta cross-fold feature resolution ----
                                     if config_boruta:
                                         update_progress(
-                                            "Phase 1: Collecting Boruta features across 5 folds"
+                                            "Resolving Boruta cross-fold features"
                                         )
-                                        fold_boruta_feature_lists = []
-                                        for _fold_idx, (_train_idx, _val_idx) in enumerate(
-                                            sgkf.split(X=X, y=y, groups=groups)
-                                        ):
-                                            print(
-                                                f"\n[BORUTA PHASE 1] Collecting fold "
-                                                f"{_fold_idx + 1}/5..."
-                                            )
-                                            features = preproc.collect_boruta_features_for_fold(
-                                                _fold_idx,
-                                                _train_idx,
-                                                _val_idx,
-                                                X,
-                                                y,
-                                                groups,
-                                                seed,
+                                        boruta_crossfold_features = (
+                                            extract_feat.resolve_boruta_crossfold_features(
+                                                X=X,
+                                                y=y,
+                                                groups=groups,
+                                                seed=seed,
+                                                sgkf=sgkf,
+                                                compare_figs_dir=compare_figs_dir,
                                                 **fold_processing_config,
                                             )
-                                            fold_boruta_feature_lists.append(features)
-                                            print(
-                                                f"[BORUTA PHASE 1] Fold {_fold_idx + 1}: "
-                                                f"{len(features)} features selected."
-                                            )
-
-                                        # ---- Phase 1.5: Elbow analysis ----
-                                        update_progress(
-                                            "Phase 1.5: Analyzing Boruta frequency elbow"
                                         )
-                                        boruta_freq_threshold, boruta_freq_df = (
-                                            extract_feat.estimate_boruta_frequency_threshold(
-                                                fold_feature_lists=fold_boruta_feature_lists,
-                                                n_folds=5,
-                                                output_folder=str(compare_figs_dir),
-                                            )
-                                        )
-
-                                        # Save frequency results as CSV.
-                                        boruta_freq_df.to_csv(
-                                            compare_figs_dir / "boruta_frequency_results.csv",
-                                            index=False,
-                                        )
-
-                                        # Get the unified feature set at the elbow threshold.
-                                        boruta_crossfold_features = (
-                                            extract_feat.get_boruta_features_at_threshold(
-                                                fold_feature_lists=fold_boruta_feature_lists,
-                                                n_folds=5,
-                                                frequency_threshold=boruta_freq_threshold,
-                                            )
-                                        )
-
-                                        # Save the unified feature list.
-                                        np.save(
-                                            compare_figs_dir / "boruta_crossfold_features.npy",
-                                            boruta_crossfold_features,
-                                        )
-
-                                        print(
-                                            f"\n[BORUTA CROSS-FOLD] Unified feature set: "
-                                            f"{len(boruta_crossfold_features)} features "
-                                            f"at frequency >= {boruta_freq_threshold:.2f}."
-                                        )
-
                                         fold_processing_config[
                                             "boruta_crossfold_features"
                                         ] = boruta_crossfold_features
@@ -1777,41 +1745,55 @@ for mode_run in mode_names:
                                     all_y_validation_global
                                 )
                                 if RUN_LASSO and config_models.models_name == 'Logistic Regression Lasso TSFEL':
-                                    print('Lasso path started')
-                                    print('Generating Lasso paths with warm start and multiprocessing...')
-                                    c_grid = np.logspace(-4, 4, 100)
+                                    # Check if all Lasso path figures already exist.
+                                    existing_lasso_paths = [
+                                        output_dir / f"L1_Log_path_fold_{i + 1}.png"
+                                        for i in range(5)
+                                    ]
+                                    if all(path.exists() for path in existing_lasso_paths):
+                                        print(
+                                            "Lasso path figures already exist. "
+                                            "Skipping regeneration."
+                                        )
+                                    else:
+                                        print("Lasso path started")
+                                        print(
+                                            "Generating Lasso paths with warm "
+                                            "start and multiprocessing..."
+                                        )
+                                        c_grid = np.logspace(-4, 4, 100)
 
-                                    def process_single_fold(fold_index):
-                                        file_X = exp.get_lasso_path('X', fold_index, 'parquet')
-                                        file_y = exp.get_lasso_path('y', fold_index, 'npy')
-                                        x_exact_fit = pl.read_parquet(file_X).to_numpy()
-                                        y_exact_fit = np.load(file_y)
-                                        model_path = exp.get_model_path('Logistic Regression Lasso TSFEL', fold_index, extension)
-                                        l1_model = joblib.load(model_path)
-                                        best_c = l1_model.C
-                                        lr_path_model = LogisticRegression(l1_ratio=1.0, solver='saga', max_iter=100001, random_state=seed, warm_start=True)
-                                        coefficient_list = []
-                                        sorted_Cs = np.sort(c_grid)
-                                        for c_value in sorted_Cs:
-                                            lr_path_model.set_params(C=c_value)
-                                            lr_path_model.fit(x_exact_fit, y_exact_fit)
-                                            coefficient_list.append(lr_path_model.coef_[0].copy())
-                                        return (sorted_Cs, np.array(coefficient_list), best_c, x_exact_fit.shape[1])
-                                    results = Parallel(n_jobs=-1)((delayed(process_single_fold)(f_idx) for f_idx in range(5)))
-                                    for fold_idx_L1, (sorted_Cs, coefficient_path, best_c, n_features) in enumerate(results):
-                                        plt.figure(figsize=(10, 6))
-                                        plt.plot(sorted_Cs, coefficient_path, alpha=0.7)
-                                        plt.axvline(x=best_c, color='black', linestyle='--', linewidth=2, label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_c:.4f}')
-                                        plt.xscale('log')
-                                        plt.xlabel('Paramètre de régularisation C (Log Scale)')
-                                        plt.ylabel(f'Coefficients ({n_features} features)')
-                                        plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
-                                        plt.grid(True, which='both', ls='-', alpha=0.5)
-                                        plt.legend()
-                                        if save_figure.value:
-                                            filename = f'L1_Log_path_fold_{fold_idx_L1 + 1}.png'
-                                            plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches='tight', transparent=config_transparent)
-                                        plt.show()
+                                        def process_single_fold(fold_index):
+                                            file_X = exp.get_lasso_path('X', fold_index, 'parquet')
+                                            file_y = exp.get_lasso_path('y', fold_index, 'npy')
+                                            x_exact_fit = pl.read_parquet(file_X).to_numpy()
+                                            y_exact_fit = np.load(file_y)
+                                            model_path = exp.get_model_path('Logistic Regression Lasso TSFEL', fold_index, extension)
+                                            l1_model = joblib.load(model_path)
+                                            best_c = l1_model.C
+                                            lr_path_model = LogisticRegression(l1_ratio=1.0, solver='saga', max_iter=100001, random_state=seed, warm_start=True)
+                                            coefficient_list = []
+                                            sorted_Cs = np.sort(c_grid)
+                                            for c_value in sorted_Cs:
+                                                lr_path_model.set_params(C=c_value)
+                                                lr_path_model.fit(x_exact_fit, y_exact_fit)
+                                                coefficient_list.append(lr_path_model.coef_[0].copy())
+                                            return (sorted_Cs, np.array(coefficient_list), best_c, x_exact_fit.shape[1])
+                                        results = Parallel(n_jobs=-1)((delayed(process_single_fold)(f_idx) for f_idx in range(5)))
+                                        for fold_idx_L1, (sorted_Cs, coefficient_path, best_c, n_features) in enumerate(results):
+                                            plt.figure(figsize=(10, 6))
+                                            plt.plot(sorted_Cs, coefficient_path, alpha=0.7)
+                                            plt.axvline(x=best_c, color='black', linestyle='--', linewidth=2, label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_c:.4f}')
+                                            plt.xscale('log')
+                                            plt.xlabel('Paramètre de régularisation C (Log Scale)')
+                                            plt.ylabel(f'Coefficients ({n_features} features)')
+                                            plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
+                                            plt.grid(True, which='both', ls='-', alpha=0.5)
+                                            plt.legend()
+                                            if save_figure.value:
+                                                filename = f'L1_Log_path_fold_{fold_idx_L1 + 1}.png'
+                                                plt.savefig(output_dir / Path(filename), dpi=300, bbox_inches='tight', transparent=config_transparent)
+                                            plt.show()
                                 update_progress(
                                     "Generating final metrics and figures"
                                 )
@@ -2359,13 +2341,31 @@ for mode_run in mode_names:
 
                                     shap_holdout_results = None
 
+                                    # Save results before SHAP computation (SHAP may
+                                    # take a very long time for certain models such
+                                    # as SVC, so we ensure results are persisted).
+                                    output_dir.mkdir(
+                                        parents=True,
+                                        exist_ok=True,
+                                    )
+
+                                    joblib.dump(
+                                        all_results,
+                                        output_dir / "all_res.joblib",
+                                    )
+
                                     # The current beeswarm implementation targets
                                     # tabular TSFEL models. Temporal 3D explanations
                                     # require a separate time-aggregation convention.
+                                    # Skip SHAP for SVC TSFEL because the
+                                    # PermutationExplainer is prohibitively slow
+                                    # (tens of hours per fold for ~3k samples).
                                     if (
                                         not is_score_mode
                                         and config_models.extraction_type
                                         == "TSFEL"
+                                        and config_models.models_name
+                                        != "SVC TSFEL"
                                     ):
                                         update_progress(
                                             "Computing ensemble SHAP values "
@@ -2441,19 +2441,17 @@ for mode_run in mode_names:
                                         }
                                     )
 
-                                update_progress(
-                                    "Saving final results"
-                                )
+                                    # Save final results (includes SHAP results
+                                    # when they were computed above).
+                                    output_dir.mkdir(
+                                        parents=True,
+                                        exist_ok=True,
+                                    )
 
-                                output_dir.mkdir(
-                                    parents=True,
-                                    exist_ok=True,
-                                )
-
-                                joblib.dump(
-                                    all_results,
-                                    output_dir / "all_res.joblib",
-                                )
+                                    joblib.dump(
+                                        all_results,
+                                        output_dir / "all_res.joblib",
+                                    )
 
                                 if RUN_COMPARISON:
                                     # List of all candidate models to evaluate.
@@ -2478,9 +2476,162 @@ for mode_run in mode_names:
                                             print(f"[COMPARISON] Model unavailable (skipped): {model_name}", flush=True)
                                     
                                     # Generate the report only when at least one model was found.
+                                    print(f"[COMPARISON] Loaded {len(comparisons)} models for comparison.", flush=True)
                                     if comparisons:
+                                        print("[COMPARISON] Generating comparative report...", flush=True)
                                         comparison_output_directory = exp.get_comparison_path("Comparisons All")
-                                        sfu.générer_rapport_comparatif(comparisons, save_dir=comparison_output_directory, table_format='fancy_grid')
+                                        print(f"[COMPARISON] Output directory: {comparison_output_directory}", flush=True)
+
+                                        # Global model comparison
+                                        print("[COMPARISON] Running generate_comparative_report...", flush=True)
+                                        sfu.generate_comparative_report(
+                                            comparisons,
+                                            save_dir=comparison_output_directory,
+                                            table_format='fancy_grid'
+                                        )
+                                        print("[COMPARISON] Global report generated successfully.", flush=True)
+
+                                        # --- Subgroup Analysis ---
+                                        print("[COMPARISON] Starting subgroup analysis...", flush=True)
+                                        # Holdout patient IDs are identical across all models (fixed holdout set)
+                                        ref_config = comparisons[0][1]
+                                        print(f"[COMPARISON] Reference config keys: {list(ref_config.keys())}", flush=True)
+                                        holdout_pids = np.asarray(ref_config["holdout_patient_ids"]).ravel()
+                                        print(f"[COMPARISON] Holdout patient IDs count: {len(holdout_pids)}", flush=True)
+
+                                        # Load holdout static features and align by patient ID
+                                        print("[COMPARISON] Loading holdout static features...", flush=True)
+                                        holdout_static = pl.read_parquet(
+                                            os.path.join(dataset_path, "df_static_full_clean.parquet")
+                                        )
+                                        print(f"[COMPARISON] Static features loaded: {holdout_static.shape}", flush=True)
+
+                                        holdout_static = holdout_static.with_columns(
+                                            pl.col("encounterId").cast(pl.Int64)
+                                        )
+
+                                        # Reorder to match holdout sample order via inner join with order DataFrame
+                                        print("[COMPARISON] Reordering static features to match holdout order...", flush=True)
+
+                                        # Conversion propre des PIDs numpy/list en Int64
+                                        clean_pids = np.asarray(holdout_pids, dtype=np.int64).ravel()
+
+                                        order_df = pl.DataFrame({
+                                            "encounterId": clean_pids,
+                                            "holdout_order": np.arange(len(clean_pids), dtype=np.int64)
+                                        })
+
+                                        holdout_static_aligned = (
+                                            order_df
+                                            .join(holdout_static, on="encounterId", how="inner")
+                                            .sort("holdout_order")
+                                            .drop("holdout_order")
+                                        )
+                                        print(f"[COMPARISON] Aligned static features: {holdout_static_aligned.shape}", flush=True)
+
+                                        # --- Define subgroup label arrays ---
+
+                                        # Age: < 40, [40-55], [55-70], > 70
+                                        print("[COMPARISON] Computing Age labels...", flush=True)
+                                        # Remplacement des éventuels nulls en NaN pour le type numérique
+                                        age_raw = holdout_static_aligned["age"].fill_null(np.nan).to_numpy()
+                                        age_labels = np.where(
+                                            np.isnan(age_raw), "Unknown",
+                                            np.where(age_raw < 40, "< 40",
+                                            np.where(age_raw < 55, "40-55",
+                                            np.where(age_raw <= 70, "55-70", "> 70")))
+                                        )
+                                        print(f"[COMPARISON] Age labels distribution: {dict(zip(*np.unique(age_labels, return_counts=True)))}", flush=True)
+
+                                        # Admission type: Medical, Scheduled Surgery, Unscheduled Surgery
+                                        print("[COMPARISON] Computing Admission Type labels...", flush=True)
+                                        # Remplace les null par "Unknown" directement dans Polars
+                                        admission_labels = (
+                                            holdout_static_aligned["admission_type"]
+                                            .fill_null("Unknown")
+                                            .to_numpy()
+                                        )
+                                        print(f"[COMPARISON] Admission labels distribution: {dict(zip(*np.unique(admission_labels, return_counts=True)))}", flush=True)
+
+                                        # ICU GHM categories
+                                        print("[COMPARISON] Computing ICU GHM labels...", flush=True)
+                                        
+                                        # 1. Extraction du premier élément de la liste si c'est une List(String), ou conversion directe
+                                        icu_ghm_series = holdout_static_aligned["icu_ghm"]
+                                        
+                                        if icu_ghm_series.dtype == pl.List:
+                                            icu_ghm_series = icu_ghm_series.list.get(0)
+                                            
+                                        icu_ghm_raw = (
+                                            icu_ghm_series
+                                            .fill_null("Other")
+                                            .to_numpy()
+                                        )
+                                        
+                                        target_ghms = {
+                                            "Respiratory Pathology",
+                                            "Neurology",
+                                            "Neurosurgery and neuro-embolisation",
+                                            "Cardiovascular Surgery",
+                                            "Polytrauma",
+                                        }
+                                        
+                                        icu_ghm_labels = np.array(
+                                            [str(g) if g in target_ghms else "Other" for g in icu_ghm_raw]
+                                        )
+                                        print(f"[COMPARISON] GHM labels distribution: {dict(zip(*np.unique(icu_ghm_labels, return_counts=True)))}", flush=True)
+
+                                        # --- Subgroup definitions ---
+                                        subgroup_configs = [
+                                            {
+                                                "name": "Age",
+                                                "labels": age_labels,
+                                                "names": {"< 40": "< 40", "40-55": "40-55", "55-70": "55-70", "> 70": "> 70"},
+                                            },
+                                            {
+                                                "name": "Admission Type",
+                                                "labels": admission_labels,
+                                                "names": {
+                                                    "Medical": "Medical",
+                                                    "Scheduled Surgery": "Scheduled Surgery",
+                                                    "Unscheduled Surgery": "Unscheduled Surgery",
+                                                },
+                                            },
+                                            {
+                                                "name": "ICU GHM",
+                                                "labels": icu_ghm_labels,
+                                                "names": {
+                                                    "Respiratory Pathology": "Respiratory Pathology",
+                                                    "Neurology": "Neurology",
+                                                    "Neurosurgery and neuro-embolisation": "Neurosurgery",
+                                                    "Cardiovascular Surgery": "Cardiovascular Surgery",
+                                                    "Polytrauma": "Polytrauma",
+                                                    "Other": "Other",
+                                                },
+                                            },
+                                        ]
+
+                                        # --- Generate subgroup reports per model ---
+                                        print(f"[COMPARISON] Generating subgroup reports for {len(comparisons)} models across {len(subgroup_configs)} subgroups...", flush=True)
+                                        for model_name, config in comparisons:
+                                            print(f"[COMPARISON] Processing model: {model_name}", flush=True)
+                                            probas = np.asarray(config["probas_holdout"], dtype=float).ravel()
+                                            y_true = np.asarray(config["y_true_holdout"], dtype=int).ravel()
+                                            print(f"[COMPARISON] Model {model_name}: probas shape={probas.shape}, y_true shape={y_true.shape}", flush=True)
+
+                                            for sg in subgroup_configs:
+                                                print(f"[COMPARISON]   -> Subgroup: {sg['name']}", flush=True)
+                                                sfu.generate_subgroup_comparative_report(
+                                                    probas=probas,
+                                                    y_true=y_true,
+                                                    subgroup_labels=sg["labels"],
+                                                    subgroup_names=sg["names"],
+                                                    save_dir=comparison_output_directory / f"Subgroup_{sg['name']}" / model_name,
+                                                )
+                                                print(f"[COMPARISON]   -> Subgroup {sg['name']} done.", flush=True)
+                                            print(f"[COMPARISON] Model {model_name} done.", flush=True)
+                                        print("[COMPARISON] All subgroup reports generated successfully.", flush=True)
+
                                     else:
                                         print("[COMPARISON] No model could be loaded. Report generation cancelled.", flush=True)
 

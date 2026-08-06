@@ -24,7 +24,7 @@ GHM_CODE_TO_LABEL_FR: dict[str, str] = {
     "10M": "Diabete et troubles metaboliques",
     "11C": "Chirurgie Urologique",
     "11M": "Pyelonéphrite non chirurgicale et insuffisance rénale",
-    "18M": "Maladie infectieuse et sepsis",
+    "18M": "Maladie infectieuse et sepsis without precision",
     "21M": "Intoxication",
     "26C": "Polytraumatisme",
     "26M": "Polytraumatisme",
@@ -32,20 +32,20 @@ GHM_CODE_TO_LABEL_FR: dict[str, str] = {
 }
 
 GHM_CODE_TO_LABEL: dict[str, str] = {
-    "01C": "Neurosurgery",
+    "01C": "Neurosurgery and neuro-embolisation",
     "01M": "Neurology",
-    "01K": "Cerebral or Spinal Embolization",
+    "01K": "Neurosurgery and neuro-embolisation",
     "03C": "ENT Surgery",
     "04M": "Respiratory Pathology",
-    "05C": "Cardiovascular Surgery (excluding Endoprosthesis)",
-    "05K": "Vascular Endoprosthesis",
+    "05C": "Cardiovascular Surgery",
+    "05K": "Cardiovascular Surgery",
     "05M": "Cardiology",
     "06M": "Gastroenterology",
     "07M": "Gastroenterology",
     "08C": "Orthopedic Surgery and Amputations",
-    "10M": "Diabetes and Metabolic Disorders",
+    "10M": "Metabolic and renal disorders",
     "11C": "Urological Surgery",
-    "11M": "Non-surgical Pyelonephritis and Renal Insufficiency",
+    "11M": "Metabolic and renal disorders",
     "18M": "Infectious Disease and Sepsis",
     "21M": "Poisoning",
     "26C": "Polytrauma",
@@ -66,6 +66,27 @@ FR_TO_EN: dict[str, str] = {
     # Gender
     "Féminin": "Female",
     "Masculin": "Male",
+}
+
+
+# Display names for TableOne only. Column names in the modelling pipeline
+# remain unchanged; this mapping is applied temporarily before TableOne
+# generation and affects the exported HTML/CSV/LaTeX output.
+TABLEONE_COLUMN_DISPLAY_NAMES: dict[str, str] = {
+    "age": "Age",
+    "score_glasgow": "Glasgow Score",
+    "icu_ghm": "ICU Disease Group",
+    "icu_mode_entree": "ICU Entry Mode",
+    "admission_type": "Admission Type",
+    "gender": "Gender",
+    "had_dialyse": "Dialysis",
+    "had_vasoactive_drugs": "Vasoactive Drugs",
+    "was_conscious": "Conscious",
+    "was_ventilated": "Ventilated",
+    "real_time_hours": "Real Time (hours)",
+    "observed_duration": "Observed Duration",
+    # Target columns (mortality outcomes)
+    "isDeceased_lt_28d": "28-Day Mortality",
 }
 
 
@@ -469,21 +490,27 @@ def add_variable_type_sections(
 
 
 
-def _any_true_during_stay(
+def _any_boolean_during_stay(
     columns: Sequence[str],
     output_name: str,
+    check_any_false: bool = False,
 ) -> pl.Expr:
-    """Return whether any input flag is true at least once during a stay.
+    """Return whether any input flag is true (or false) at least once during a stay.
 
     The expression first combines the requested columns row by row, then
     aggregates the resulting boolean values over every row of the patient
-    group. Null and non-convertible values are treated as ``False``.
+    group. When ``check_any_false`` is ``False`` (default), null and non-convertible
+    values are treated as ``False``. When ``True``, they are treated as ``True``.
 
     Args:
         columns:
             Boolean-like columns to inspect.
         output_name:
             Name assigned to the resulting patient-level flag.
+        check_any_false:
+            If ``False``, returns ``True`` when at least one column is ``True``
+            on any row of the stay. If ``True``, returns ``True`` when at least
+            one column is ``False`` on any row of the stay.
 
     Returns:
         A Polars aggregation expression yielding one boolean per patient.
@@ -493,15 +520,21 @@ def _any_true_during_stay(
             f"At least one source column is required for {output_name!r}."
         )
 
-    row_has_true = pl.any_horizontal(
-        [
-            pl.col(column)
-            .cast(pl.Boolean, strict=False)
-            .fill_null(False)
-            for column in columns
-        ]
-    )
+    casted_columns = [
+        pl.col(column).cast(pl.Boolean, strict=False)
+        for column in columns
+    ]
 
+    if check_any_false:
+        # Treat nulls as True; detect any False via negated all_horizontal.
+        row_has_false = pl.all_horizontal(
+            [col.fill_null(True) for col in casted_columns]
+        ).not_()
+        return row_has_false.any().alias(output_name)
+
+    row_has_true = pl.any_horizontal(
+        [col.fill_null(False) for col in casted_columns]
+    )
     return row_has_true.any().alias(output_name)
 
 
@@ -511,38 +544,53 @@ def _build_patient_level_clinical_flags(
 ) -> pl.DataFrame:
     """Build one row of clinical history flags per patient.
 
-    ``had_ventilation`` is true when at least one ventilation source column
+    ``had_dialyse`` is true when at least one ventilation source column
     is true on at least one row of the patient's stay.
     """
     aggregation_expressions: list[pl.Expr] = []
 
-    ventilation_columns = [
+    dialyse_columns = [
         column
         for column in ("is_cvvhf", "is_hdi")
         if column in dataframe.columns
     ]
 
-    if ventilation_columns:
+    vaso_active_columns = [
+        column
+        for column in ("nad_dose_poids", "dobu_dose_poids")
+        if column in dataframe.columns
+    ]
+
+    if dialyse_columns:
         aggregation_expressions.append(
-            _any_true_during_stay(
-                columns=ventilation_columns,
-                output_name="had_ventilation",
+            _any_boolean_during_stay(
+                columns=dialyse_columns,
+                output_name="had_dialyse",
             )
         )
 
-    if "dobu_dose_poids" in dataframe.columns:
+    if vaso_active_columns:
+        # Build per-column expressions: is any value != 0?
+        vaso_exprs = [
+            pl.col(col).ne(0).any() for col in vaso_active_columns
+        ]
         aggregation_expressions.append(
-            pl.col("dobu_dose_poids")
-            .is_not_null()
-            .any()
-            .alias("had_nad")
+            pl.any_horizontal(*vaso_exprs).alias("had_vasoactive_drugs")
         )
 
     if "is_conscious" in dataframe.columns:
         aggregation_expressions.append(
-            _any_true_during_stay(
+            _any_boolean_during_stay(
                 columns=["is_conscious"],
                 output_name="was_conscious",
+                check_any_false = False
+            )
+        )
+    if "is_ventilated" in dataframe.columns:
+        aggregation_expressions.append(
+            _any_boolean_during_stay(
+                columns=["is_ventilated"],
+                output_name="was_ventilated",
             )
         )
 
@@ -563,14 +611,14 @@ def _build_patient_level_clinical_flags(
             f"of rows: expected {expected_patients}, got {flags.height}."
         )
 
-    if "had_ventilation" in flags.columns:
+    if "had_dialyse" in flags.columns:
         ventilation_count = (
             flags
-            .select(pl.col("had_ventilation").sum())
+            .select(pl.col("had_dialyse").sum())
             .item()
         )
         print(
-            "[TABLEONE] had_ventilation=True for "
+            "[TABLEONE] had_dialyse=True for "
             f"{int(ventilation_count)} / {flags.height} patient(s).",
             flush=True,
         )
@@ -612,6 +660,161 @@ def _translate_tableone_categories(
         )
 
     return translated
+
+
+def _dedummy_categorical_columns(
+    dataframe: pd.DataFrame,
+    prefix: str,
+    output_column: str,
+    reverse_label_map: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Reverse one-hot encoding for a group of dummy columns.
+
+    For each row, the column with value ``1`` determines the categorical
+    label stored in the output column. Rows where no dummy is active or
+    where multiple dummies are active receive ``"Unknown"``.
+
+    Args:
+        dataframe: Input DataFrame containing the dummy columns.
+        prefix: Column name prefix to identify the dummy group
+            (e.g. ``"icu_ghm_"``).
+        output_column: Name of the reconstructed categorical column
+            (e.g. ``"icu_ghm"``).
+        reverse_label_map: Optional mapping from dummy-label to a
+            display-friendly label. When ``None``, the label embedded in
+            the column name is used as-is.
+
+    Returns:
+        A copy of the DataFrame with the dummy columns removed and the
+        new categorical column added.
+    """
+    result = dataframe.copy()
+    dummy_columns = [
+        col for col in result.columns
+        if col.startswith(prefix) and col != output_column
+    ]
+
+    if not dummy_columns:
+        return result
+
+    # Build mapping: dummy column name -> categorical label
+    label_map: dict[str, str] = {}
+    for col in dummy_columns:
+        raw_label = col.removeprefix(prefix)
+        label = (
+            reverse_label_map.get(raw_label, raw_label)
+            if reverse_label_map is not None
+            else raw_label
+        )
+        label_map[col] = label
+
+    # Reconstruct categorical value row by row.
+    # When no dummy is active (or multiple are active), merge into "Others"
+    # rather than creating a separate "Unknown" category.
+    def _resolve_label(row: pd.Series) -> str:
+        active_columns = [
+            col for col in dummy_columns
+            if pd.notna(row.get(col)) and row[col] == 1
+        ]
+        if len(active_columns) == 1:
+            return label_map[active_columns[0]]
+        return "Others"
+
+    result[output_column] = result.apply(_resolve_label, axis=1)
+
+    # Drop the original dummy columns
+    result = result.drop(columns=dummy_columns)
+
+    return result
+
+
+def _sort_categorical_rows_by_frequency(
+    table_dataframe: pd.DataFrame,
+    features_to_sort: Sequence[str],
+) -> pd.DataFrame:
+    """Sort category rows within the specified features by descending count.
+
+    For each feature listed in ``features_to_sort``, the category sub-rows
+    are reordered by the count extracted from the "Overall" column (format
+    ``"n (pct)"`` or plain numeric) in descending order. Section header rows
+    and non-target features are untouched.
+
+    Args:
+        table_dataframe: The formatted TableOne dataframe (two-level
+            MultiIndex).
+        features_to_sort: Feature display names whose category rows should
+            be sorted by frequency.
+
+    Returns:
+        The dataframe with the requested feature rows reordered.
+    """
+    if (
+        not isinstance(table_dataframe.index, pd.MultiIndex)
+        or table_dataframe.index.nlevels != 2
+    ):
+        return table_dataframe
+
+    result = table_dataframe.copy()
+    first_level = result.index.get_level_values(0).astype(str)
+    features_set = set(features_to_sort)
+
+    # TableOne stores the Overall column as strings like "8466 (52.07)".
+    # Extract the raw count for numeric sorting.
+    overall_col = "Overall" if "Overall" in result.columns else result.columns[-1]
+
+    def _extract_count(value: object) -> float:
+        """Parse count from TableOne cell values such as '8466 (52.07)'."""
+        if pd.isna(value):
+            return 0.0
+        text = str(value).strip()
+        # Try plain numeric first
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        # Try "n (pct)" pattern
+        match = re.match(r"^([0-9]+(?:,[0-9]+)?(?:\.[0-9]+)?)\s*\(", text)
+        if match:
+            return float(match.group(1).replace(",", ""))
+        return 0.0
+
+    output_blocks: list[pd.DataFrame] = []
+    i = 0
+
+    while i < len(result):
+        row_label = first_level[i].strip()
+
+        # TableOne index includes ", n (%)" suffix; match by prefix
+        matching_feature = None
+        for feat in features_set:
+            if row_label.startswith(feat):
+                matching_feature = feat
+                break
+
+        if matching_feature is not None:
+            # Collect all consecutive rows for this feature
+            feature_rows_indices: list[int] = []
+            j = i
+            while j < len(result):
+                if first_level[j].strip().startswith(matching_feature):
+                    feature_rows_indices.append(j)
+                    j += 1
+                else:
+                    break
+
+            # Sort these rows by extracted count descending
+            feature_df = result.iloc[feature_rows_indices].copy()
+            feature_df["_sort_key"] = feature_df[overall_col].apply(_extract_count)
+            sorted_df = feature_df.sort_values("_sort_key", ascending=False).drop(
+                columns=["_sort_key"]
+            )
+            output_blocks.append(sorted_df)
+            i = j
+        else:
+            output_blocks.append(result.iloc[i:i + 1])
+            i += 1
+
+    return pd.concat(output_blocks)
 
 
 def _find_binary_indicator_features(
@@ -743,7 +946,7 @@ def build_tableone(
     )
 
     # Compute one boolean value per patient from the complete stay.
-    # For had_ventilation this means:
+    # For had_dialyse this means:
     #   any source column is True on any row of the stay.
     flags_df = _build_patient_level_clinical_flags(
         dataframe=df_clean,
@@ -849,7 +1052,12 @@ def build_tableone(
             categorical_features.append(feature)
 
     # Add patient-level clinical flags as categorical variables
-    clinical_flags = ["had_ventilation", "had_nad", "was_conscious"]
+    clinical_flags = [
+        "had_dialyse",
+        "had_vasoactive_drugs",
+        "was_conscious",
+        "was_ventilated",
+    ]
     for flag in clinical_flags:
         if (
             flag in pd_static.columns
@@ -858,14 +1066,39 @@ def build_tableone(
         ):
             categorical_features.append(flag)
 
-    # Add GHM and entry mode dummy columns as categorical variables
-    for col in keep_for_tableone:
+    # Dedummy icu_ghm columns into a single categorical column
+    # Build reverse map: dummy label -> display label (identity since labels
+    # are already human-readable English strings from GHM_CODE_TO_LABEL).
+    pd_static = _dedummy_categorical_columns(
+        dataframe=pd_static,
+        prefix="icu_ghm_",
+        output_column="icu_ghm",
+    )
+
+    # Dedummy icu_mode_entree columns into a single categorical column
+    pd_static = _dedummy_categorical_columns(
+        dataframe=pd_static,
+        prefix="icu_mode_entree_",
+        output_column="icu_mode_entree",
+    )
+
+    # Add the reconstructed categorical columns
+    for reconstructed_col in ["icu_ghm", "icu_mode_entree"]:
         if (
-            col in pd_static.columns
-            and col not in categorical_features
-            and col not in continuous_features
+            reconstructed_col in pd_static.columns
+            and reconstructed_col not in categorical_features
+            and reconstructed_col not in continuous_features
         ):
-            categorical_features.append(col)
+            categorical_features.append(reconstructed_col)
+
+    # Sort categories by descending frequency so TableOne displays them
+    # from most common to least common.
+    for col in ["icu_ghm", "icu_mode_entree", "gender"]:
+        if col in pd_static.columns:
+            freq_order = pd_static[col].value_counts().index.tolist()
+            pd_static[col] = pd.Categorical(
+                pd_static[col], categories=freq_order, ordered=True
+            )
 
     describe_columns = [
         *continuous_features,
@@ -887,14 +1120,37 @@ def build_tableone(
 
     # Ensure ALL columns in pd_static are simple scalar types for TableOne.
     # TableOne's pd.isnull() fails on array-like or boolean dtypes.
+    # Preserve ordered categorical columns (used for frequency-based sorting).
+    _ordered_categorical_cols = {
+        col
+        for col in pd_static.columns
+        if isinstance(pd_static[col].dtype, pd.CategoricalDtype)
+        and pd_static[col].cat.ordered
+    }
     for col in pd_static.columns:
         if pd.api.types.is_bool_dtype(pd_static[col]):
             pd_static[col] = pd_static[col].astype(int)
         elif pd.api.types.is_numeric_dtype(pd_static[col]):
             # Keep numeric as-is (already handled for continuous features)
             pass
-        else:
+        elif col not in _ordered_categorical_cols:
             pd_static[col] = pd_static[col].astype(str)
+
+    # Rename columns with human-readable display names for TableOne only.
+    # The modelling pipeline and feature lists remain unaffected.
+    rename_mask: dict[str, str] = {
+        col: display_name
+        for col, display_name in TABLEONE_COLUMN_DISPLAY_NAMES.items()
+        if col in pd_static.columns
+    }
+    pd_static = pd_static.rename(columns=rename_mask)
+
+    # Update describe_columns and feature lists to use display names.
+    _rename_feature = lambda name: rename_mask.get(name, name)
+    continuous_features = [_rename_feature(f) for f in continuous_features]
+    categorical_features = [_rename_feature(f) for f in categorical_features]
+    describe_columns = [_rename_feature(f) for f in describe_columns]
+    binary_indicator_features = [_rename_feature(f) for f in binary_indicator_features]
 
     table = TableOne(
         data=pd_static,
@@ -915,6 +1171,15 @@ def build_tableone(
         table_dataframe=positive_binary_table,
         continuous_features=continuous_features,
         categorical_features=categorical_features,
+    )
+
+    # Sort multi-level categorical rows by descending frequency (Overall col).
+    # TableOne ignores pandas Categorical order and sorts alphabetically,
+    # so we must reorder the result manually.
+    _sort_cols = {"ICU Disease Group", "ICU Entry Mode"}
+    formatted_table = _sort_categorical_rows_by_frequency(
+        table_dataframe=formatted_table,
+        features_to_sort=_sort_cols,
     )
 
     output_dir = Path(output_dir)

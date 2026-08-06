@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -532,116 +534,6 @@ def equilibrer_dataset_tabulaire(
     return df_balanced, stats
 
 
-def collect_boruta_features_for_fold(
-    fold_idx,
-    train_idx,
-    test_idx,
-    X,
-    y,
-    groups,
-    seed,
-    **kwargs,
-):
-    """Run Boruta for one fold and return the selected feature list.
-
-    This helper is used in the first phase of cross-fold Boruta selection:
-    each fold runs correlation/variance filtering followed by Boruta, and the
-    resulting feature list is collected. After all folds have been processed,
-    the frequency of each feature across folds is analysed to determine a
-    unified feature set.
-
-    Args:
-        fold_idx:
-            Zero-based fold index.
-        train_idx:
-            Training indices for the current fold.
-        test_idx:
-            Validation indices for the current fold.
-        X:
-            Dataset used to recover patient identifiers for the split.
-        y:
-            Target array associated with the complete dataset.
-        groups:
-            Group array associated with the complete dataset.
-        seed:
-            Random seed used for feature selection.
-        **kwargs:
-            Pipeline configuration, including ``corr_threshold``,
-            ``static_feats``, and ``keep_static``.
-
-    Returns:
-        The list of feature names selected by Boruta for this fold (after
-        correlation/variance filtering). Returns an empty list when Boruta
-        is disabled.
-    """
-    patient_col = kwargs["patient_col"]
-    target_col = kwargs["target_col"]
-    train_init_tsfel = kwargs["train_init"]
-    static_feats = kwargs.get("static_feats", [])
-    keep_static = kwargs.get("keep_static", True)
-    boruta_filter = kwargs.get("boruta_filter", False)
-
-    # Retrieve patient identifiers for the current fold.
-    train_patients = (
-        X[train_idx]
-        .select(patient_col)
-        .unique()
-    )
-
-    test_patients = (
-        X[test_idx]
-        .select(patient_col)
-        .unique()
-    )
-
-    train_fold_tsfel = (
-        train_init_tsfel
-        .join(train_patients, on=patient_col, how="inner")
-        .sort(patient_col)
-    )
-
-    test_fold_tsfel = (
-        train_init_tsfel
-        .join(test_patients, on=patient_col, how="inner")
-        .sort(patient_col)
-    )
-
-    # Step 1: Correlation and variance filtering.
-    corr_threshold = kwargs.get("corr_threshold", 0.95)
-    train_clean, test_clean, _ = extract_feat.filtrage_corr_var(
-        train_fold_tsfel,
-        test_fold_tsfel,
-        patient_col,
-        target_col,
-        corr_threshold=corr_threshold,
-        static_features=static_feats,
-        keep_static=keep_static,
-    )
-
-    if not boruta_filter:
-        # No Boruta: return all features after corr/var filtering.
-        feature_names = (
-            train_clean
-            .select(pl.exclude(patient_col, target_col))
-            .columns
-        )
-        return list(feature_names)
-
-    # Step 2: Boruta selection.
-    _, _, boruta_features = extract_feat.filtrage_boruta(
-        train_clean,
-        test_clean,
-        patient_col,
-        target_col,
-        max_iter=100,
-        seed=seed,
-        static_features=static_feats,
-        keep_static=keep_static,
-    )
-
-    return list(boruta_features)
-
-
 def process_tsfel_fold(
     fold_idx,
     train_idx,
@@ -735,14 +627,41 @@ def process_tsfel_fold(
         fold_idx,
     )
 
+    # Initialize feature trace for transparency tracking.
+    feature_trace = {
+        "fold": fold_idx,
+        "seed": seed,
+        "stages": {},
+    }
+
+    # Record initial feature count before any filtering.
+    initial_features = (
+        train_fold_tsfel
+        .select(pl.exclude(patient_col, target_col))
+        .columns
+    )
+    feature_trace["stages"]["initial"] = {
+        "count": len(initial_features),
+        "features": sorted(initial_features),
+    }
+
     # Apply correlation and variance filtering, then optional Boruta selection.
     # The correlation threshold is computed once before the fold loop in the
     # pipeline and passed via kwargs["corr_threshold"].
-    if not (
-            os.path.exists(filename_train_boruta)
-            and os.path.exists(filename_test_boruta)
-        ):
 
+    # Step 1: Check if cached filtered data exists (corr_var + boruta_crossfold
+    # already applied). If so, load and skip all filtering.
+    if (
+        os.path.exists(filename_train_boruta)
+        and os.path.exists(filename_test_boruta)
+    ):
+        print(
+            "Reading existing filtered files for "
+            f"fold {fold_idx} (seed {seed})."
+        )
+        train_clean = pl.read_parquet(filename_train_boruta)
+        test_clean = pl.read_parquet(filename_test_boruta)
+    else:
         # Remove correlated and zero-variance features.
         corr_threshold = kwargs.get("corr_threshold", 0.95)
         train_clean, test_clean, keepVariableList_1 = (
@@ -757,13 +676,24 @@ def process_tsfel_fold(
             )
         )
 
-    # Optionally apply Boruta feature selection.
-    if boruta_filter:
-        if boruta_crossfold_features is not None:
-            # Use the unified cross-fold Boruta feature set instead of
-            # running per-fold Boruta. Simply filter the already cleaned
-            # data to keep only the features that passed the frequency
-            # threshold across all folds.
+        # Record features after correlation/variance filtering.
+        after_corr_var_features = (
+            train_clean
+            .select(pl.exclude(patient_col, target_col))
+            .columns
+        )
+        feature_trace["stages"]["after_corr_var"] = {
+            "count": len(after_corr_var_features),
+            "features": sorted(after_corr_var_features),
+            "corr_threshold": corr_threshold,
+            "removed": len(initial_features) - len(after_corr_var_features),
+        }
+
+        # Apply Boruta feature selection using the unified cross-fold feature
+        # set. The per-fold Boruta call was replaced by Phase 1
+        # (collect_boruta_features_for_fold) in the pipeline, so
+        # boruta_crossfold_features is always available here.
+        if boruta_filter and boruta_crossfold_features is not None:
             available_features = set(train_clean.columns) - {
                 patient_col, target_col
             }
@@ -783,48 +713,51 @@ def process_tsfel_fold(
             test_clean = test_clean.select(
                 [patient_col, target_col, *crossfold_available]
             )
-            keepVariableList_2 = crossfold_available
-        elif (
-            os.path.exists(filename_train_boruta)
-            and os.path.exists(filename_test_boruta)
-        ):
-            print(
-                "Reading existing Boruta files for "
-                f"fold {fold_idx} (seed {seed})."
-            )
-            train_clean = pl.read_parquet(filename_train_boruta)
-            test_clean = pl.read_parquet(filename_test_boruta)
-        else:
-            train_clean, test_clean, keepVariableList_2 = (
-                extract_feat.filtrage_boruta(
-                    train_clean,
-                    test_clean,
-                    patient_col,
-                    target_col,
-                    max_iter=100,
-                    seed=seed,
-                    static_features=static_feats,
-                    keep_static=keep_static,
-                )
-            )
 
-            train_clean.write_parquet(filename_train_boruta)
-            test_clean.write_parquet(filename_test_boruta)
+            # Record features after Boruta cross-fold filtering.
+            after_boruta_features = (
+                train_clean
+                .select(pl.exclude(patient_col, target_col))
+                .columns
+            )
+            feature_trace["stages"]["after_boruta_crossfold"] = {
+                "count": len(after_boruta_features),
+                "features": sorted(after_boruta_features),
+                "boruta_crossfold_total": len(boruta_crossfold_features),
+                "boruta_crossfold_available": len(crossfold_available),
+                "removed": len(after_corr_var_features) - len(after_boruta_features),
+            }
 
-            print(
-                "Saving Boruta results for "
-                f"fold {fold_idx} (seed {seed})."
-            )
+        # Save the filtered data for future runs so that corr_var and the
+        # boruta crossfold filter can be skipped on subsequent executions.
+        train_clean.write_parquet(filename_train_boruta)
+        test_clean.write_parquet(filename_test_boruta)
+        print(
+            "Saving filtered results for "
+            f"fold {fold_idx} (seed {seed})."
+        )
 
-            parent_folder = filename_train_boruta.parent
-            np.save(
-                parent_folder / f"keepVariableList_1_fold_{fold_idx}.npy",
-                keepVariableList_1,
-            )
-            np.save(
-                parent_folder / f"keepVariableList_2_fold_{fold_idx}.npy",
-                keepVariableList_2,
-            )
+    # Record final feature set after all filtering.
+    final_features_at_this_step = (
+        train_clean
+        .select(pl.exclude(patient_col, target_col))
+        .columns
+    )
+    feature_trace["stages"]["final"] = {
+        "count": len(final_features_at_this_step),
+        "features": sorted(final_features_at_this_step),
+    }
+
+    # Save feature trace as JSON in the same directory as the Boruta files.
+    feature_trace_path = (
+        Path(filename_train_boruta).parent / f"feature_trace_fold_{fold_idx}.json"
+    )
+    with open(feature_trace_path, "w", encoding="utf-8") as f:
+        json.dump(feature_trace, f, indent=2, ensure_ascii=False)
+    print(
+        f"[FEATURE TRACE] Saved feature trace for fold {fold_idx} "
+        f"to {feature_trace_path}"
+    )
 
     # Sort the fold data before alignment and balancing checks.
     train_clean = train_clean.sort(patient_col)
@@ -864,22 +797,29 @@ def process_tsfel_fold(
     # performs median imputation on train/test), so non-finite values must be
     # handled here to prevent models that do not natively support missing values
     # (e.g., SVC, LogisticRegression) from crashing at prediction time.
-    _holdout_impute = {
-        col: train_clean[col].median()
-        for col in final_feature_names
-    }
-
-    for _col, _med in _holdout_impute.items():
-        # Fallback to 0.0 if the training median itself is undefined or NaN.
-        med_val = 0.0 if (_med is None or np.isnan(_med)) else _med
-
-        holdout_clean = holdout_clean.with_columns(
-            pl.col(_col)
-            .replace_infinite(None)  # Convert +/-inf to null
-            .fill_nan(None)          # Convert NaN to null
-            .fill_null(med_val)      # Impute all missing values using the train median
-            .alias(_col)
+    
+    # 1. Safely extract train medians (with fallback to 0.0)
+    _holdout_impute = {}
+    for col in final_feature_names:
+        med = train_clean[col].median()
+        _holdout_impute[col] = (
+            0.0 if (med is None or np.isnan(med)) else float(med)
         )
+
+    # 2. Build a single list of transformation expressions
+    exprs = [
+        pl.col(col)
+        .replace(
+            [float("inf"), float("-inf")], None
+        )  # Replace infinite values with null
+        .fill_nan(None)  # Convert NaN to null
+        .fill_null(_holdout_impute[col])  # Impute missing values using train median
+        .alias(col)
+        for col in final_feature_names
+    ]
+
+    # 3. Apply all transformations in a single optimized pass
+    holdout_clean = holdout_clean.with_columns(exprs)
 
     if holdout_clean.height != holdout_clean[patient_col].n_unique():
         raise ValueError(

@@ -28,6 +28,7 @@ import utilitaries.features_extraction_utils as feu
 from pathlib import Path
 
 import utilitaries.evaluate_utils as evaluate
+from utilitaries.postprocessing_utils import bootstrap_holdout_metrics
 
 
 def plot_collected_learning_curve(
@@ -1991,32 +1992,266 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
         plt.savefig(f"{folder}/comparison_{figname}", dpi=300, bbox_inches="tight")
     plt.show()
 
-def générer_rapport_comparatif(
+def _build_holdout_metric_functions():
+    """Return metric functions compatible with bootstrap_holdout_metrics.
+
+    Returns:
+        A dictionary mapping metric names to callables accepting
+        ``(y_true, probabilities)``.
+    """
+    from sklearn.metrics import (
+        brier_score_loss,
+        roc_auc_score,
+    )
+
+    def _auprc(y_true, probas):
+        p, r, _ = precision_recall_curve(y_true, probas)
+        return float(auc(r, p))
+
+    return {
+        "auc": roc_auc_score,
+        "auprc": _auprc,
+        "brier": brier_score_loss,
+    }
+
+
+def compute_subgroup_holdout_metrics(
+    probas,
+    y_true,
+    subgroup_labels,
+    subgroup_names=None,
+    n_bootstrap=2000,
+    confidence_level=0.95,
+    seed=42,
+):
+    """Compute bootstrap holdout metrics for each subgroup independently.
+
+    Given a full set of holdout predictions and a categorical subgroup
+    assignment, this function filters the predictions per subgroup and runs
+    :func:`bootstrap_holdout_metrics` from ``postprocessing_utils`` on each
+    subset.
+
+    The returned list of dictionaries is directly compatible with
+    :func:`generate_comparative_report` in **"holdout"** mode.
+
+    Args:
+        probas:
+            Array-like of predicted probabilities for the positive class
+            (length ``n_samples``).
+        y_true:
+            Array-like of binary ground-truth labels (length ``n_samples``).
+        subgroup_labels:
+            Array-like of categorical subgroup identifiers (length
+            ``n_samples``).  Each unique value defines one subgroup.
+        subgroup_names:
+            Optional mapping from raw subgroup label to a human-readable name.
+            When omitted, the string representation of each label is used.
+        n_bootstrap:
+            Number of bootstrap resamples per subgroup.
+        confidence_level:
+            Confidence level for percentile intervals (0 < p < 1).
+        seed:
+            Random seed for reproducibility.
+
+    Returns:
+        A list of ``(display_name, config_dict)`` tuples, one per subgroup,
+        sorted alphabetically by display name.  Each ``config_dict`` contains:
+
+        - ``"probas_holdout"``: subgroup predicted probabilities.
+        - ``"y_true_holdout"``: subgroup ground-truth labels.
+        - ``"bootstrap_holdout"``: dictionary returned by
+          :func:`bootstrap_holdout_metrics`.
+        - ``"metrics"``: point-estimate dictionary from
+          :func:`compute_binary_metrics`.
+
+    Raises:
+        ValueError:
+            If inputs have mismatched lengths or a subgroup contains only one
+            class.
+    """
+    probas = np.asarray(probas, dtype=float).ravel()
+    y_true = np.asarray(y_true, dtype=int).ravel()
+    subgroup_labels = np.asarray(subgroup_labels, dtype=object).ravel()
+
+    if probas.shape[0] != y_true.shape[0]:
+        raise ValueError(
+            f"probas and y_true must have the same length: "
+            f"{probas.shape[0]} != {y_true.shape[0]}."
+        )
+
+    if probas.shape[0] != subgroup_labels.shape[0]:
+        raise ValueError(
+            f"probas and subgroup_labels must have the same length: "
+            f"{probas.shape[0]} != {subgroup_labels.shape[0]}."
+        )
+
+    if subgroup_names is None:
+        subgroup_names = {}
+
+    metric_functions = _build_holdout_metric_functions()
+    unique_labels = np.unique(subgroup_labels)
+    results = []
+
+    for label in unique_labels:
+        mask = subgroup_labels == label
+        sub_probas = probas[mask]
+        sub_y_true = y_true[mask]
+
+        if sub_probas.size == 0:
+            continue
+
+        display_name = subgroup_names.get(label, str(label))
+
+        # Skip subgroups with only one class
+        if np.unique(sub_y_true).size < 2:
+            print(
+                f"[compute_subgroup_holdout_metrics] Skipping subgroup "
+                f"'{display_name}': only one class present "
+                f"({len(sub_probas)} samples)."
+            )
+            continue
+
+        # Point estimates via compute_binary_metrics
+        try:
+            metrics = compute_binary_metrics(sub_probas, sub_y_true)
+        except ValueError as exc:
+            print(
+                f"[compute_subgroup_holdout_metrics] Skipping subgroup "
+                f"'{display_name}': {exc}"
+            )
+            continue
+
+        # Bootstrap confidence intervals
+        try:
+            bootstrap_result = bootstrap_holdout_metrics(
+                sub_y_true,
+                sub_probas,
+                metric_functions,
+                n_bootstrap=n_bootstrap,
+                confidence_level=confidence_level,
+                seed=seed,
+            )
+        except RuntimeError as exc:
+            print(
+                f"[compute_subgroup_holdout_metrics] Bootstrap failed for "
+                f"subgroup '{display_name}': {exc}"
+            )
+            continue
+
+        config = {
+            "probas_holdout": sub_probas,
+            "y_true_holdout": sub_y_true,
+            "bootstrap_holdout": bootstrap_result,
+            "metrics": metrics,
+        }
+
+        results.append((display_name, config))
+
+    # Sort alphabetically for deterministic output
+    results.sort(key=lambda item: item[0])
+    return results
+
+
+def generate_subgroup_comparative_report(
+    probas,
+    y_true,
+    subgroup_labels,
+    subgroup_names=None,
+    n_bootstrap=2000,
+    confidence_level=0.95,
+    seed=42,
+    save_dir=None,
+    table_format="fancy_grid",
+):
+    """Generate a comparative holdout report across patient subgroups.
+
+    Convenience wrapper that chains
+    :func:`compute_subgroup_holdout_metrics` and
+    :func:`generate_comparative_report` in **"holdout"** mode.  Holdout
+    predictions are split by subgroup, bootstrap confidence intervals are
+    computed per subgroup, and a collective report (tables + figures) is
+    generated.
+
+    Args:
+        probas:
+            Array-like of predicted probabilities for the positive class.
+        y_true:
+            Array-like of binary ground-truth labels.
+        subgroup_labels:
+            Array-like of categorical subgroup identifiers (same length as
+            ``probas``).
+        subgroup_names:
+            Optional mapping from raw subgroup label to a human-readable name.
+        n_bootstrap:
+            Number of bootstrap resamples per subgroup.
+        confidence_level:
+            Confidence level for percentile intervals.
+        seed:
+            Random seed for reproducibility.
+        save_dir:
+            Optional output directory for figures and tables.
+        table_format:
+            Console table format passed to :func:`tabulate`.
+
+    Returns:
+        A pandas DataFrame containing formatted metric values (with
+        estimate [CI95%]) per subgroup, as returned by
+        :func:`generate_comparative_report`.
+    """
+    subgroup_results = compute_subgroup_holdout_metrics(
+        probas=probas,
+        y_true=y_true,
+        subgroup_labels=subgroup_labels,
+        subgroup_names=subgroup_names,
+        n_bootstrap=n_bootstrap,
+        confidence_level=confidence_level,
+        seed=seed,
+    )
+
+    return generate_comparative_report(
+        configurations=subgroup_results,
+        save_dir=save_dir,
+        table_format=table_format,
+        evaluation_mode="holdout",
+    )
+
+
+def generate_comparative_report(
     configurations,
     y_true_base=None,
     save_dir=None,
     table_format="fancy_grid",
+    evaluation_mode="oof",
 ):
-    """Generate comparison tables and collective OOF figures.
+    """Generate comparison tables and collective OOF or Holdout figures.
 
-    The summary table contains only fold-level ``mean ± std`` values.
-    ROC, precision-recall, and calibration figures use pooled out-of-fold
-    predictions and the corresponding stored OOF metrics.
+    The summary table contains fold-level ``mean ± std`` values for OOF mode,
+    or bootstrap ``estimate [CI95%]`` values for holdout mode.
+    ROC, precision-recall, and calibration figures use pooled predictions
+    and the corresponding stored metrics.
 
     Args:
         configurations:
             Iterable of ``(model_name, all_results)`` pairs.
         y_true_base:
-            Optional common OOF labels. When omitted, ``y_true_oof`` is read
-            from each configuration.
+            Optional common labels. When omitted, labels are read from each
+            configuration (``y_true_oof`` or ``y_true_holdout``).
         save_dir:
             Optional output directory.
         table_format:
             Console format passed to :func:`tabulate`.
+        evaluation_mode:
+            Either ``"oof"`` to use out-of-fold results (default) or
+            ``"holdout"`` to use independent holdout results.
 
     Returns:
-        A pandas DataFrame containing formatted fold ``mean ± std`` values.
+        A pandas DataFrame containing formatted metric values.
     """
+    if evaluation_mode not in ("oof", "holdout"):
+        raise ValueError(
+            f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
+        )
+
     configurations = list(configurations)
 
     predefined_order = [
@@ -2042,14 +2277,34 @@ def générer_rapport_comparatif(
             )
         return config[key]
 
-    def format_mean_std(config, metric_name, model_name):
-        mean_value = float(
-            require_key(config, f"{metric_name}_mean", model_name)
-        )
-        std_value = float(
-            require_key(config, f"{metric_name}_std", model_name)
-        )
-        return f"{mean_value:.3f} ± {std_value:.3f}"
+    # ---- Key mapping depending on mode ----
+    if evaluation_mode == "oof":
+        y_true_key = "y_true_oof"
+        probas_key = "probas_oof"
+        metric_suffix = ""  # e.g. "auc_oof", "auc_mean"
+    else:
+        y_true_key = "y_true_holdout"
+        probas_key = "probas_holdout"
+        metric_suffix = "_holdout"  # not used for bootstrap, see below
+
+    def format_metric(config, metric_name, model_name):
+        """Format metric value: mean±std for OOF, estimate[CI] for holdout."""
+        if evaluation_mode == "oof":
+            mean_value = float(
+                require_key(config, f"{metric_name}_mean", model_name)
+            )
+            std_value = float(
+                require_key(config, f"{metric_name}_std", model_name)
+            )
+            return f"{mean_value:.3f} ± {std_value:.3f}"
+        else:
+            bootstrap = require_key(config, "bootstrap_holdout", model_name)
+            summary = bootstrap["summary"]
+            entry = summary[metric_name]
+            estimate = float(entry["estimate"])
+            ci_lower = float(entry["ci_lower"])
+            ci_upper = float(entry["ci_upper"])
+            return f"{estimate:.3f} [{ci_lower:.3f}, {ci_upper:.3f}]"
 
     configurations = sorted(configurations, key=get_sort_key)
     default_colors = sns.color_palette(
@@ -2062,183 +2317,140 @@ def générer_rapport_comparatif(
     reference_y = None
 
     for idx, (name, config) in enumerate(configurations):
-        probas_oof = np.asarray(
-            require_key(config, "probas_oof", name),
+        probas = np.asarray(
+            require_key(config, probas_key, name),
             dtype=float,
         ).ravel()
 
         current_y = (
             y_true_base
             if y_true_base is not None
-            else require_key(config, "y_true_oof", name)
+            else require_key(config, y_true_key, name)
         )
 
-        y_true_oof = np.asarray(
-            current_y,
-            dtype=int,
-        ).ravel()
+        y_true = np.asarray(current_y, dtype=int).ravel()
 
-        if probas_oof.shape[0] != y_true_oof.shape[0]:
+        if probas.shape[0] != y_true.shape[0]:
             raise ValueError(
-                f"{name}: probas_oof and y_true_oof have different "
-                f"lengths: {len(probas_oof)} != {len(y_true_oof)}."
+                f"{name}: probas and y_true have different "
+                f"lengths: {len(probas)} != {len(y_true)}."
             )
 
         if reference_y is None:
-            reference_y = y_true_oof
-        elif not np.array_equal(reference_y, y_true_oof):
-            raise ValueError(
-                f"{name}: y_true_oof differs from the reference labels. "
-                "Collective curves require aligned OOF observations."
-            )
+            reference_y = y_true
 
         color = config.get(
             "color",
             default_colors[idx % len(default_colors)],
         )
 
-        constant_predictions = np.all(probas_oof == probas_oof[0])
+        constant_predictions = np.all(probas == probas[0])
 
         if constant_predictions:
-            prevalence = float(np.mean(y_true_oof))
+            prevalence = float(np.mean(y_true))
             fpr = np.array([0.0, 1.0])
             tpr = np.array([0.0, 1.0])
             precision = np.array([1.0, prevalence, prevalence])
             recall = np.array([0.0, 0.0, 1.0])
             fop = np.array([prevalence])
-            mpv = np.array([float(probas_oof[0])])
+            mpv = np.array([float(probas[0])])
         else:
-            fpr, tpr, _ = roc_curve(
-                y_true_oof,
-                probas_oof,
-            )
-            precision, recall, _ = precision_recall_curve(
-                y_true_oof,
-                probas_oof,
-            )
+            fpr, tpr, _ = roc_curve(y_true, probas)
+            precision, recall, _ = precision_recall_curve(y_true, probas)
             fop, mpv = calibration_curve(
-                y_true_oof,
-                probas_oof,
-                n_bins=10,
-                strategy="uniform",
+                y_true, probas, n_bins=10, strategy="uniform"
             )
 
-        auc_oof = float(
-            require_key(config, "auc_oof", name)
-        )
-        auprc_oof = float(
-            require_key(config, "auprc_oof", name)
-        )
-        intercept_oof = float(
-            require_key(config, "calibration_intercept_oof", name)
-        )
-        slope_oof = float(
-            require_key(config, "calibration_slope_oof", name)
-        )
-        ici_oof = float(
-            require_key(config, "ici_oof", name)
-        )
+        # ---- Get AUC/AUPRC for labels ----
+        if evaluation_mode == "oof":
+            auc_val = float(require_key(config, "auc_oof", name))
+            auprc_val = float(require_key(config, "auprc_oof", name))
+            intercept_val = float(require_key(config, "calibration_intercept_oof", name))
+            slope_val = float(require_key(config, "calibration_slope_oof", name))
+            ici_val = float(require_key(config, "ici_oof", name))
+        else:
+            bootstrap = require_key(config, "bootstrap_holdout", name)
+            summary = bootstrap["summary"]
+            auc_val = float(summary["auc"]["estimate"])
+            auprc_val = float(summary["auprc"]["estimate"])
+            # For holdout calibration stats, compute from probas/y_true directly
+            cal_stats = get_calibration_stats(probas, y_true)
+            intercept_val = cal_stats["intercept"]
+            slope_val = cal_stats["slope"]
+            ici_val = cal_stats["ici"]
 
-        results[name] = {
-            "AUC ROC": format_mean_std(config, "auc", name),
-            "AUPRC": format_mean_std(config, "auprc", name),
-            "F1-Score": format_mean_std(
-                config,
-                "f1_score",
-                name,
-            ),
-            "MCC": format_mean_std(config, "mcc", name),
-            "Brier": format_mean_std(config, "brier", name),
-            "Intercept": format_mean_std(
-                config,
-                "calibration_intercept",
-                name,
-            ),
-            "Slope": format_mean_std(
-                config,
-                "calibration_slope",
-                name,
-            ),
-            "ICI": format_mean_std(config, "ici", name),
-            "E90": format_mean_std(config, "e90", name),
-            "EMax": format_mean_std(config, "eMax", name),
-        }
+        # ---- Results table ----
+        if evaluation_mode == "oof":
+            results[name] = {
+                "AUC ROC": format_metric(config, "auc", name),
+                "AUPRC": format_metric(config, "auprc", name),
+                "F1-Score": format_metric(config, "f1_score", name),
+                "MCC": format_metric(config, "mcc", name),
+                "Brier": format_metric(config, "brier", name),
+                "Intercept": format_metric(config, "calibration_intercept", name),
+                "Slope": format_metric(config, "calibration_slope", name),
+                "ICI": format_metric(config, "ici", name),
+                "E90": format_metric(config, "e90", name),
+                "EMax": format_metric(config, "eMax", name),
+            }
+        else:
+            results[name] = {
+                "AUC ROC": format_metric(config, "auc", name),
+                "AUPRC": format_metric(config, "auprc", name),
+                "F1-Score": format_metric(config, "f1", name),
+                "MCC": format_metric(config, "mcc", name),
+                "Brier": format_metric(config, "brier", name),
+            }
+
+        label_prefix = "OOF" if evaluation_mode == "oof" else "Holdout"
 
         plot_data_list.append({
             "name": name,
             "color": color,
             "fpr": fpr,
             "tpr": tpr,
-            "auc_oof": auc_oof,
+            "auc_val": auc_val,
             "recall": recall,
             "precision": precision,
-            "auprc_oof": auprc_oof,
+            "auprc_val": auprc_val,
             "fop": fop,
             "mpv": mpv,
-            "intercept_oof": intercept_oof,
-            "slope_oof": slope_oof,
-            "ici_oof": ici_oof,
+            "intercept_val": intercept_val,
+            "slope_val": slope_val,
+            "ici_val": ici_val,
+            "label_prefix": label_prefix,
         })
 
-    fig_roc, ax_roc = plt.subplots(
-        figsize=(8, 8),
-        layout="constrained",
-    )
-    fig_prc, ax_prc = plt.subplots(
-        figsize=(8, 8),
-        layout="constrained",
-    )
-    fig_cal, ax_cal = plt.subplots(
-        figsize=(8, 8),
-        layout="constrained",
-    )
+    # ---- Figures ----
+    fig_roc, ax_roc = plt.subplots(figsize=(8, 8), layout="constrained")
+    fig_prc, ax_prc = plt.subplots(figsize=(8, 8), layout="constrained")
+    fig_cal, ax_cal = plt.subplots(figsize=(8, 8), layout="constrained")
 
     for item in plot_data_list:
+        prefix = item["label_prefix"]
         ax_roc.plot(
-            item["fpr"],
-            item["tpr"],
-            label=(
-                f"{item['name']} "
-                f"(OOF AUC = {item['auc_oof']:.3f})"
-            ),
-            color=item["color"],
-            linewidth=2,
+            item["fpr"], item["tpr"],
+            label=f"{item['name']} ({prefix} AUC = {item['auc_val']:.3f})",
+            color=item["color"], linewidth=2,
         )
-
         ax_prc.plot(
-            item["recall"],
-            item["precision"],
-            label=(
-                f"{item['name']} "
-                f"(OOF AUPRC = {item['auprc_oof']:.3f})"
-            ),
-            color=item["color"],
-            linewidth=2,
+            item["recall"], item["precision"],
+            label=f"{item['name']} ({prefix} AUPRC = {item['auprc_val']:.3f})",
+            color=item["color"], linewidth=2,
         )
-
-        calibration_label = (
+        cal_label = (
             f"{item['name']} "
-            f"(Int={item['intercept_oof']:.2f}, "
-            f"Slope={item['slope_oof']:.2f}, "
-            f"ICI={item['ici_oof']:.3f})"
+            f"(Int={item['intercept_val']:.2f}, "
+            f"Slope={item['slope_val']:.2f}, "
+            f"ICI={item['ici_val']:.3f})"
         )
-
         ax_cal.plot(
-            item["mpv"],
-            item["fop"],
-            "s-",
-            label=calibration_label,
-            color=item["color"],
-            linewidth=2,
+            item["mpv"], item["fop"], "s-",
+            label=cal_label, color=item["color"], linewidth=2,
         )
 
-    ax_roc.plot(
-        [0, 1],
-        [0, 1],
-        linestyle="--",
-        label="Chance",
-        color="gray",
-    )
+    # ROC styling
+    ax_roc.plot([0, 1], [0, 1], linestyle="--", label="Chance", color="gray")
     ax_roc.set_xlabel("False Positive Rate (FPR)")
     ax_roc.set_ylabel("True Positive Rate (TPR)")
     ax_roc.set_xlim(0.0, 1.0)
@@ -2246,18 +2458,10 @@ def générer_rapport_comparatif(
     ax_roc.grid(True, linestyle=":", alpha=0.6)
     ax_roc.legend(loc="lower right", fontsize=9)
 
-    baseline = (
-        float(np.mean(reference_y))
-        if reference_y is not None
-        else 0.5
-    )
-    ax_prc.axhline(
-        y=baseline,
-        linestyle="--",
-        color="green",
-        alpha=0.7,
-        label=f"Chance (Pos Ratio = {baseline:.3f})",
-    )
+    # PRC styling
+    baseline = float(np.mean(reference_y)) if reference_y is not None else 0.5
+    ax_prc.axhline(y=baseline, linestyle="--", color="green", alpha=0.7,
+                    label=f"Chance (Pos Ratio = {baseline:.3f})")
     ax_prc.set_xlabel("Recall (Sensitivity)")
     ax_prc.set_ylabel("Precision (PPV)")
     ax_prc.set_xlim(0.0, 1.0)
@@ -2265,13 +2469,8 @@ def générer_rapport_comparatif(
     ax_prc.grid(True, linestyle=":", alpha=0.6)
     ax_prc.legend(loc="upper right", fontsize=9)
 
-    ax_cal.plot(
-        [0, 1],
-        [0, 1],
-        "k:",
-        alpha=0.7,
-        label="Perfect calibration",
-    )
+    # Calibration styling
+    ax_cal.plot([0, 1], [0, 1], "k:", alpha=0.7, label="Perfect calibration")
     ax_cal.set_xlabel("Mean Predicted Probability")
     ax_cal.set_ylabel("True Fraction of Positives")
     ax_cal.set_xlim(0.0, 1.0)
@@ -2279,51 +2478,21 @@ def générer_rapport_comparatif(
     ax_cal.grid(True, linestyle=":", alpha=0.6)
     ax_cal.legend(loc="upper left", fontsize=9)
 
+    # ---- Table ----
     results_df = pd.DataFrame(results).T
+    mode_label = "OOF" if evaluation_mode == "oof" else "Holdout"
+    print(f"\n=== {mode_label} PERFORMANCE COMPARISON TABLE ===")
+    print(tabulate(results_df, headers="keys", tablefmt=table_format, showindex=True))
 
-    print("\n=== PERFORMANCE COMPARISON TABLE ===")
-    print(
-        tabulate(
-            results_df,
-            headers="keys",
-            tablefmt=table_format,
-            showindex=True,
-        )
-    )
-
+    # ---- Save ----
     if save_dir is not None:
         output_path = Path(save_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-
-        fig_roc.savefig(
-            output_path / "collective_roc_curve.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        fig_prc.savefig(
-            output_path / "collective_prc_curve.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        fig_cal.savefig(
-            output_path / "collective_calibration_curve.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-
-        with open(
-            output_path / "results_table.tex",
-            "w",
-            encoding="utf-8",
-        ) as output_file:
-            output_file.write(
-                tabulate(
-                    results_df,
-                    headers="keys",
-                    tablefmt="latex_booktabs",
-                    showindex=True,
-                )
-            )
+        fig_roc.savefig(output_path / f"collective_roc_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
+        fig_prc.savefig(output_path / f"collective_prc_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
+        fig_cal.savefig(output_path / f"collective_calibration_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
+        with open(output_path / f"results_table_{mode_label.lower()}.tex", "w", encoding="utf-8") as output_file:
+            output_file.write(tabulate(results_df, headers="keys", tablefmt="latex_booktabs", showindex=True))
 
     plt.show()
     plt.close(fig_roc)
@@ -2331,4 +2500,5 @@ def générer_rapport_comparatif(
     plt.close(fig_cal)
 
     return results_df
+
 
