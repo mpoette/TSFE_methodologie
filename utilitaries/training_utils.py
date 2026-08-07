@@ -1,6 +1,16 @@
+"""Model training and calibration utilities for ICU prediction pipelines.
+
+Provides functions to train neural-network and classical ML models,
+apply temperature scaling and Platt calibration, handle class weighting,
+and manage cross-validation folds with early stopping and checkpointing.
+"""
+
+import logging
 import numpy as np
 import polars as pl
 import torch
+
+logger = logging.getLogger(__name__)
 
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
@@ -651,11 +661,11 @@ def fit_model_by_name(
             f"but received {np.unique(groups_lasso).size}."
         )
 
-        print(
-            "[DEBUG LASSO INNER CV] "
-            f"rows={len(X_train)}, "
-            f"groups={len(groups_lasso)}, "
-            f"unique_groups={np.unique(groups_lasso).size}"
+        logger.debug(
+            "LASSO INNER CV: rows=%d, groups=%d, unique_groups=%d",
+            len(X_train),
+            len(groups_lasso),
+            np.unique(groups_lasso).size,
         )
 
         inner_cv = StratifiedGroupKFold(

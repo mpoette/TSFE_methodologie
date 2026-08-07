@@ -1,3 +1,11 @@
+"""Static feature extraction and baseline statistics utilities.
+
+Provides functions to compute static (patient-level) features from
+ICU time-series data, including demographic information, admission
+characteristics, and baseline laboratory values. Also generates Table 1
+summary statistics using the TableOne library.
+"""
+
 from collections.abc import Sequence
 from pathlib import Path
 import re
@@ -371,8 +379,16 @@ def build_static_feature_list(
     static_features = [
         *generated_dummy_columns,
         "age",
-        "score_glasgow"
+        "score_glasgow",
     ]
+
+    # Include any column matching the "hx_" prefix (comorbidities).
+    _hx_pattern = re.compile(r"^hx_")
+    static_features.extend(
+        column
+        for column in dataframe.columns
+        if _hx_pattern.match(column)
+    )
 
     if config_mode_name == "resampling_X_points":
         static_features.append("real_time_hours")

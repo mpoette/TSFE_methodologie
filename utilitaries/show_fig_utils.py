@@ -1,3 +1,11 @@
+"""Visualization utilities for model evaluation and comparison figures.
+
+Provides functions to generate ROC curves, calibration plots, feature
+importance charts, and model comparison tables using Matplotlib and Plotly.
+Supports both calibrated and uncalibrated probability visualization.
+"""
+
+import functools
 import matplotlib.pyplot as plt
 import pandas as pd
 from tabulate import tabulate
@@ -11,10 +19,10 @@ from scipy.stats import gaussian_kde
 from xgboost import XGBClassifier
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
-    brier_score_loss, 
-    confusion_matrix, 
+    brier_score_loss,
+    confusion_matrix,
     matthews_corrcoef,
-    roc_curve, 
+    roc_curve,
     roc_auc_score,
     f1_score,
     precision_recall_curve,
@@ -28,7 +36,11 @@ import utilitaries.features_extraction_utils as feu
 from pathlib import Path
 
 import utilitaries.evaluate_utils as evaluate
-from utilitaries.postprocessing_utils import bootstrap_holdout_metrics
+from utilitaries.postprocessing_utils import (
+    bootstrap_holdout_metrics,
+    f1_at_fixed_threshold,
+    mcc_at_fixed_threshold,
+)
 
 
 def plot_collected_learning_curve(
@@ -1657,281 +1669,6 @@ def plot_all_figs(
         mean_p1,
     )
 
-def mesureImportance_tsfel(model, X_train, varnames, top_n=20, class_labels=None, folder="", savefig=True, transparent=True, seed=42):
-    """Analyze and plot TSFEL feature importance with MDI and SHAP.
-    
-    The function unwraps fitted estimators when necessary, computes individual
-    and globally aggregated feature importances, creates SHAP summary plots,
-    and groups observations by predicted class. Feature names sharing a TSFEL
-    suffix are aggregated under their common root feature.
-    
-    Args:
-        model:
-            Fitted estimator or fitted estimator wrapper.
-        X_train:
-            Training features as a Polars DataFrame, pandas DataFrame, or
-            array-like object.
-        varnames:
-            Feature names corresponding to the columns of ``X_train``.
-        top_n:
-            Maximum number of individual or aggregated features displayed.
-        class_labels:
-            Optional human-readable labels for output classes.
-        folder:
-            Directory in which generated figures should be written.
-        savefig:
-            Whether generated figures should be saved.
-        transparent:
-            Whether PDF figures should use a transparent background.
-        seed:
-            NumPy random seed used for reproducibility.
-    
-    Returns:
-        A dictionary containing samples grouped by predicted class, the top
-        individual SHAP features, the top aggregated MDI features, and the top
-        aggregated SHAP features.
-    
-    Raises:
-        ValueError:
-            If SHAP returns an unsupported output format.
-    """
-    np.random.seed(seed)
-    if isinstance(X_train, pl.DataFrame):
-        X_train = X_train.to_pandas()
-    
-    if isinstance(X_train, pd.DataFrame):
-        X_arr = X_train.values
-    else:
-        X_arr = np.asarray(X_train) 
-        
-    varnames = list(varnames)
-    k = int(min(top_n, len(varnames)))
-    
-    if hasattr(model, 'best_estimator_'):
-        model = model.best_estimator_
-    shap_model = evaluate.get_root_estimator(model)
-    # ----- 1) Tree-based feature importance -----
-    importances = None
-    if hasattr(model, 'feature_importances_'):
-        importances = model.feature_importances_
-    elif hasattr(model, 'calibrated_classifiers_'):
-        importances = np.mean([
-            clf.estimator.feature_importances_ 
-            for clf in model.calibrated_classifiers_
-        ], axis=0)
-    elif hasattr(shap_model, 'feature_importances_'): # Additional safeguard when a wrapper hides the attribute
-        importances = shap_model.feature_importances_
-    else:
-        print("⚠️ This model does not expose 'feature_importances_'. Falling back to SHAP.")
-
-    if importances is not None:
-        sorted_idx = np.argsort(importances)[::-1]
-        sorted_feature_names = np.array(varnames)[sorted_idx]
-        sorted_importances = importances[sorted_idx]
-
-        # Aggregate remaining individual MDI values
-        if len(sorted_importances) > k:
-            other_importance = np.sum(sorted_importances[k:])
-            display_importances = np.append(sorted_importances[:k], other_importance)
-            display_feature_names = np.append(sorted_feature_names[:k], f"Others Features (N={len(sorted_feature_names[:k])})")
-        else:
-            display_importances = sorted_importances
-            display_feature_names = sorted_feature_names
-
-        plt.figure(figsize=(12, 4))
-        plt.bar(range(len(display_importances)), display_importances)
-        plt.xticks(range(len(display_feature_names)), display_feature_names, rotation=90)
-        plt.ylabel("Importance (forest)")
-        plt.tight_layout()
-        if savefig:
-            plt.savefig(f"{folder}/feature_importance.pdf", bbox_inches="tight", transparent=transparent)
-            plt.savefig(f"{folder}/feature_importance.png", dpi=300, bbox_inches="tight")
-        plt.show()
-
-        # Aggregate feature importance by root feature name
-        suffixes = feu.generer_suffixes_tsfel()
-        root_feature_names = [feu.extraire_racine(name, suffixes) for name in varnames]
-        mdi_df = pd.DataFrame({
-            'Global_Feature': root_feature_names,
-            'Importance': importances
-        })
-        
-        aggregated_mdi_df = mdi_df.groupby('Global_Feature').sum().sort_values(by='Importance', ascending=False)
-        aggregated_top_k = int(min(top_n, len(aggregated_mdi_df)))
-
-        # Aggregate remaining global MDI values
-        if len(aggregated_mdi_df) > aggregated_top_k:
-            other_aggregated_mdi = aggregated_mdi_df.iloc[aggregated_top_k:].sum()
-            mdi_plot_df = pd.concat([
-                aggregated_mdi_df.head(aggregated_top_k),
-                pd.DataFrame([other_aggregated_mdi], index=["Other Global Features"])
-            ])
-        else:
-            mdi_plot_df = aggregated_mdi_df
-        
-        plt.figure(figsize=(12, 4))
-        plt.bar(range(len(mdi_plot_df)), mdi_plot_df['Importance'])
-        plt.xticks(range(len(mdi_plot_df)), mdi_plot_df.index, rotation=90)
-        plt.ylabel("Cumulative Global Importance (forest)")
-        plt.title("Top Global Feature Importance (MDI)")
-        plt.tight_layout()
-        if savefig:
-            plt.savefig(f"{folder}/global_feature_importance_mdi.pdf", bbox_inches="tight", transparent=transparent)
-            plt.savefig(f"{folder}/global_feature_importance_mdi.png", dpi=300, bbox_inches="tight")
-        plt.show()
-    else:
-        suffixes = feu.generer_suffixes_tsfel()
-        root_feature_names = [feu.extraire_racine(name, suffixes) for name in varnames]
-
-    # ----- 2) SHAP values -----
-    x_numpy = np.array(X_arr, dtype=np.float32)
-
-    if hasattr(shap_model, 'n_jobs'):
-        shap_model.n_jobs = -1
-        
-    if isinstance(shap_model, XGBClassifier):
-        explainer = shap.TreeExplainer(shap_model)
-    else:
-        try:
-            explainer = shap.Explainer(shap_model)
-        except Exception:
-            explainer = shap.TreeExplainer(shap_model)
-            
-    shap_values = explainer.shap_values(x_numpy)
-
-    if isinstance(shap_values, list):
-        shap_arr = np.stack(shap_values, axis=-1)
-    elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
-        shap_arr = shap_values
-    elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 2:
-        shap_arr = shap_values[:, :, None]
-    else:
-        raise ValueError(f"Unexpected SHAP format: type={type(shap_values)}")
-
-    n_samples, n_features, n_classes = shap_arr.shape
-
-    # ----- 3) Individual SHAP aggregations -----
-    mean_abs_by_class = np.abs(shap_arr).mean(axis=0)  # (n_features, n_classes)
-    feature_sum = mean_abs_by_class.sum(axis=1)
-    
-    top_idx = np.argsort(feature_sum)[::-1][:min(k, n_features)]
-    
-    # Aggregate remaining individual SHAP values
-    if n_features > k:
-        other_idx = np.argsort(feature_sum)[::-1][k:]
-        others_shap = mean_abs_by_class[other_idx].sum(axis=0) # Sum by class
-        plot_data = np.vstack([mean_abs_by_class[top_idx], others_shap])
-        plot_labels = [varnames[i] for i in top_idx] + ["Other Features"]
-    else:
-        plot_data = mean_abs_by_class[top_idx]
-        plot_labels = [varnames[i] for i in top_idx]
-
-    if class_labels is not None:
-        class_names = list(class_labels)
-    else:
-        class_names = ["0", "1"] if (shap_arr.ndim == 3 or (shap_arr.ndim == 2 and "XGB" in str(type(shap_model)))) else [str(i) for i in range(n_classes)]
-
-    if n_classes == 1 and len(class_names) > 1:
-        class_names = [class_names[-1]]
-
-    # ----- 4) Stacked SHAP bars -----
-    fig, ax = plt.subplots(figsize=(16, 8))
-    left = np.zeros(len(plot_labels))
-    for c_id in range(n_classes):
-        ax.barh(
-            y=np.arange(len(plot_labels)),
-            width=plot_data[:, c_id],
-            left=left,
-            label=class_names[c_id]
-        )
-        left += plot_data[:, c_id]
-        
-    ax.set_yticks(np.arange(len(plot_labels)))
-    ax.set_yticklabels(plot_labels)
-    ax.invert_yaxis()
-    ax.set_xlabel("mean(|SHAP value|) (average impact per class)")
-    ax.legend(title="Classes", bbox_to_anchor=(1.04, 1), loc="upper left")
-    plt.tight_layout()
-    if savefig:
-        plt.savefig(f"{folder}/shap_importance.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/shap_importance.png", dpi=300, bbox_inches="tight")
-    plt.show()
-
-    # ----- 5) Class-specific summary plots -----
-    for class_id, class_name in enumerate(class_names):
-        plt.figure(figsize=(10, 6))
-        shap.summary_plot(
-            shap_arr[..., class_id],
-            X_arr,
-            feature_names=varnames,
-            show=False
-        )
-        plt.title(f"SHAP Value Impact for {class_name}")
-        plt.tight_layout()
-        if savefig:
-            plt.savefig(f"{folder}/shap_values_{class_name}.pdf", bbox_inches="tight", transparent=transparent)
-            plt.savefig(f"{folder}/shap_values_{class_name}.png", dpi=300, bbox_inches="tight")
-        plt.show()
-
-    # ----- 6) Split samples by predicted class -----
-    y_pred = model.predict(X_arr)
-    unique_classes = np.unique(y_pred)
-    X_by_class = {cls: X_arr[y_pred == cls] for cls in unique_classes}
-    
-    # ----- 7) Globally aggregated SHAP importance -----
-    shap_data = {'Global_Feature': root_feature_names}
-    for c_id in range(n_classes):
-        shap_data[f'SHAP_class_{c_id}'] = mean_abs_by_class[:, c_id]
-    
-    aggregated_shap_df = pd.DataFrame(shap_data).groupby('Global_Feature').sum()
-    aggregated_shap_df['Total_Impact'] = aggregated_shap_df.sum(axis=1)
-    aggregated_shap_df = aggregated_shap_df.sort_values(by='Total_Impact', ascending=False).drop(columns=['Total_Impact'])
-    
-    aggregated_shap_top_k = int(min(top_n, len(aggregated_shap_df)))
-    
-    # Aggregate remaining global SHAP values
-    if len(aggregated_shap_df) > aggregated_shap_top_k:
-        other_aggregated_shap = aggregated_shap_df.iloc[aggregated_shap_top_k:].sum()
-        shap_plot_df = pd.concat([
-            aggregated_shap_df.head(aggregated_shap_top_k),
-            pd.DataFrame([other_aggregated_shap], index=["Other Global Features"])
-        ])
-    else:
-        shap_plot_df = aggregated_shap_df
-    
-    # Globally aggregated SHAP figure
-    fig, ax = plt.subplots(figsize=(16, 8))
-    aggregated_left = np.zeros(len(shap_plot_df))
-    
-    for c_id in range(n_classes):
-        ax.barh(
-            y=np.arange(len(shap_plot_df)),
-            width=shap_plot_df[f'SHAP_class_{c_id}'].values,
-            left=aggregated_left,
-            label=class_names[c_id]
-        )
-        aggregated_left += shap_plot_df[f'SHAP_class_{c_id}'].values
-        
-    ax.set_yticks(np.arange(len(shap_plot_df)))
-    ax.set_yticklabels(shap_plot_df.index)
-    ax.invert_yaxis()
-    ax.set_xlabel("Cumulative mean(|SHAP value|) (average impact per class)")
-    ax.set_title("Top Global Feature Importance (SHAP)")
-    ax.legend(title="Classes", bbox_to_anchor=(1.04, 1), loc="upper left")
-    plt.tight_layout()
-    if savefig:
-        plt.savefig(f"{folder}/global_shap_importance.pdf", bbox_inches="tight", transparent=transparent)
-        plt.savefig(f"{folder}/global_shap_importance.png", dpi=300, bbox_inches="tight")
-    plt.show()
-
-    # Return only original top features, excluding the aggregated "Others" category
-    return {
-        "X_by_class": X_by_class,
-        "top_feat": [varnames[i] for i in top_idx],
-        "top_global_feat_mdi" : list(aggregated_mdi_df.index[:aggregated_top_k]) if importances is not None else [],
-        "top_global_feat_shap" : list(aggregated_shap_df.index[:aggregated_shap_top_k])
-    }
-
 def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **paths):
     """Display the same saved figure for several models in a dynamic grid.
     
@@ -1992,8 +1729,15 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
         plt.savefig(f"{folder}/comparison_{figname}", dpi=300, bbox_inches="tight")
     plt.show()
 
-def _build_holdout_metric_functions():
+def _build_holdout_metric_functions(
+    threshold=0.5,
+):
     """Return metric functions compatible with bootstrap_holdout_metrics.
+
+    Args:
+        threshold:
+            Fixed decision threshold used for F1 and MCC computation.
+            Defaults to ``0.5``.
 
     Returns:
         A dictionary mapping metric names to callables accepting
@@ -2012,6 +1756,14 @@ def _build_holdout_metric_functions():
         "auc": roc_auc_score,
         "auprc": _auprc,
         "brier": brier_score_loss,
+        "f1": functools.partial(
+            f1_at_fixed_threshold,
+            threshold=threshold,
+        ),
+        "mcc": functools.partial(
+            mcc_at_fixed_threshold,
+            threshold=threshold,
+        ),
     }
 
 
@@ -2088,7 +1840,6 @@ def compute_subgroup_holdout_metrics(
     if subgroup_names is None:
         subgroup_names = {}
 
-    metric_functions = _build_holdout_metric_functions()
     unique_labels = np.unique(subgroup_labels)
     results = []
 
@@ -2111,7 +1862,7 @@ def compute_subgroup_holdout_metrics(
             )
             continue
 
-        # Point estimates via compute_binary_metrics
+        # Point estimates via compute_binary_metrics (provides best_threshold)
         try:
             metrics = compute_binary_metrics(sub_probas, sub_y_true)
         except ValueError as exc:
@@ -2120,6 +1871,14 @@ def compute_subgroup_holdout_metrics(
                 f"'{display_name}': {exc}"
             )
             continue
+
+        # Use the threshold optimized on this subgroup for bootstrap metrics
+        best_threshold = metrics["best_threshold"]
+
+        # Build metric functions with the subgroup-specific threshold
+        metric_functions = _build_holdout_metric_functions(
+            threshold=best_threshold
+        )
 
         # Bootstrap confidence intervals
         try:

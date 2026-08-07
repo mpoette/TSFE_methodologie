@@ -1,3 +1,11 @@
+"""Optuna hyperparameter optimization utilities for InceptionTime models.
+
+Provides objective functions and study runners for the first stage of
+Optuna-based hyperparameter search targeting InceptionTime architectures.
+The search space is automatically adapted for short sequences to prevent
+overfitting by constraining kernel sizes and model depth.
+"""
+
 import numpy as np
 import optuna
  
@@ -97,16 +105,16 @@ def make_objective_stage1(
             score = optuna_utils.extract_best_val_loss(history, "val_loss")
 
             if not np.isfinite(score):
-                raise FloatingPointError("Score non fini.")
+                raise FloatingPointError("Non-finite score.")
 
             return score
 
         except FloatingPointError:
-            raise optuna.TrialPruned("FloatingPointError: Perte infinie.")
+            raise optuna.TrialPruned("FloatingPointError: Infinite loss.")
         except optuna.TrialPruned:
             raise
         except Exception as e:
-            raise optuna.TrialPruned(f"Trial echoue: {e}")
+            raise optuna.TrialPruned(f"Trial failed: {e}")
 
     return objective
 

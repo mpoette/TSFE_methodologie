@@ -1,3 +1,10 @@
+"""Shared UI widget factories for the marimo-based pipeline sidebar.
+
+Provides functions to build and render the configuration sidebar used
+across all pipeline notebooks, including dropdowns, toggles, and input
+widgets for windowing, population, model, feature, and balancing settings.
+"""
+
 import sys
 
 import marimo as mo

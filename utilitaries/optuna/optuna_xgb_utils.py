@@ -1,3 +1,10 @@
+"""Optuna hyperparameter optimization utilities for XGBoost models.
+
+Provides objective functions and study runners for the first stage of
+Optuna-based hyperparameter search targeting XGBoost classifiers with
+cross-validation and configurable scoring metrics.
+"""
+
 import numpy as np
 import optuna
 
@@ -104,14 +111,14 @@ def make_objective_xgb_stage1_anti_overfit(
             score = np.mean(scores)
 
             if not np.isfinite(score):
-                raise FloatingPointError("Score non fini.")
+                raise FloatingPointError("Non-finite score.")
 
             return score
 
         except FloatingPointError:
-            raise optuna.TrialPruned("FloatingPointError détecté.")
+            raise optuna.TrialPruned("FloatingPointError detected.")
         except Exception as e:
-            raise optuna.TrialPruned(f"Trial échoué: {e}")
+            raise optuna.TrialPruned(f"Trial failed: {e}")
 
     return objective
 

@@ -1,3 +1,10 @@
+"""Global configuration dataclasses, type aliases, and widget styles.
+
+Provides the shared configuration objects used across the preprocessing
+and machine-learning pipelines (windowing, population, clinical scores,
+models, feature sets, class balancing, and prediction targets).
+"""
+
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 

@@ -1,9 +1,20 @@
+"""Model evaluation utilities for neural-network and TSFEL-based estimators.
+
+Provides helpers to load checkpoints, align TSFEL feature columns with the
+schema expected by a fitted model, and compute both calibrated and
+uncalibrated prediction probabilities for InceptionTime, LSTM,
+VanillaTransformer, and classical ML estimators.
+"""
+
+import logging
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 from utilitaries.models.inceptionTimeModified import (
     evaluate_on_test,
@@ -246,9 +257,10 @@ def evaluate_lstm_fold(
         A dictionary containing the AUC, Brier score, test labels,
         uncalibrated probabilities, and calibrated probabilities.
     """
-    print(
-        f"\n[DEBUG EVAL - Fold {fold_idx + 1}] "
-        f"X_test shape: {X_test.shape}"
+    logger.debug(
+        "EVAL Fold %d: X_test shape=%s",
+        fold_idx + 1,
+        X_test.shape,
     )
 
     auc, brier, _ = evaluate_lstm_on_test(
@@ -313,9 +325,10 @@ def evaluate_vanilla_transformer_fold(
         A dictionary containing the AUC, Brier score, test labels,
         uncalibrated probabilities, and calibrated probabilities.
     """
-    print(
-        f"\n[DEBUG EVAL - Fold {fold_idx + 1}] "
-        f"X_test shape: {X_test.shape}"
+    logger.debug(
+        "EVAL Fold %d: X_test shape=%s",
+        fold_idx + 1,
+        X_test.shape,
     )
 
     auc, brier, _ = evaluate_vt_on_test(
@@ -404,16 +417,23 @@ def evaluate_tsfel_fold(
     classifier = joblib.load(
         loaded_model
     )
-    # TODO : enlever ces debugs
-    print(f"   [DEBUG] Type de classifier: {type(classifier)}")
-    if hasattr(classifier, 'estimator'):
-        print(f"   [DEBUG] Type de classifier.estimator: {type(classifier.estimator)}")
-    # --------------------------------------------
+    logger.debug(
+        "Classifier type: %s",
+        type(classifier).__name__,
+    )
+    if hasattr(classifier, "estimator"):
+        logger.debug(
+            "Classifier.estimator type: %s",
+            type(classifier.estimator).__name__,
+        )
 
     root_model = get_root_estimator(
         classifier
     )
-    print(f"   [DEBUG] Type de root_model extrait: {type(root_model)}")
+    logger.debug(
+        "Root model type: %s",
+        type(root_model).__name__,
+    )
 
     # Align and reorder the TSFEL features according to the schema used when
     # the estimator was fitted.

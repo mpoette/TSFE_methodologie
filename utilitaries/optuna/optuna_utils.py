@@ -1,3 +1,10 @@
+"""Shared utilities for Optuna hyperparameter optimization studies.
+
+Provides helper functions for extracting validation metrics from training
+history, managing Optuna storage, and handling trial pruning across all
+model-specific Optuna objective functions.
+"""
+
 import optuna
 import numpy as np
 
@@ -35,7 +42,7 @@ def get_params(study_name, default_params, storage=OPTUNA_STORAGE):
     except KeyError:
         pass
     except Exception as e:
-        print("Erreur Optuna:", e)
+        print("Optuna error:", e)
 
     return params, use_defaults
 
@@ -64,7 +71,7 @@ def extract_best_val_loss(history, metric_name):
         if v is not None and np.isfinite(v)
     ]
     if not values:
-        raise ValueError("Aucune val_loss/val_auc valide trouvée.")
+        raise ValueError("No valid val_loss/val_auc found.")
  
     if metric_name == "val_loss":
         return float(min(values))

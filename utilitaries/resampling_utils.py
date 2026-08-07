@@ -1,3 +1,10 @@
+"""Resampling utilities for ICU patient stay time-series.
+
+Provides functions to resample ICU stays to a fixed number of time points
+using interpolation-based strategies, ensuring consistent sequence lengths
+for time-series model training.
+"""
+
 import polars as pl
 import numpy as np
 

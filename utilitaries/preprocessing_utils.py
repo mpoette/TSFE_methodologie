@@ -1,3 +1,11 @@
+"""Preprocessing utilities for ICU prediction model pipelines.
+
+This module provides functions for feature scaling, sequence construction,
+class balancing, and cross-validation fold preparation. It supports both
+TSFEL-based tabular models and time-series models with patient-level
+downsampling, correlation/variance filtering, and Boruta feature selection.
+"""
+
 import json
 import os
 from pathlib import Path
@@ -5,6 +13,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import polars as pl
+import polars.selectors as cs
 from sklearn.preprocessing import StandardScaler
 
 import utilitaries.extract_data_utils as edu
@@ -645,38 +654,28 @@ def process_tsfel_fold(
         "features": sorted(initial_features),
     }
 
-    # Apply correlation and variance filtering, then optional Boruta selection.
-    # The correlation threshold is computed once before the fold loop in the
-    # pipeline and passed via kwargs["corr_threshold"].
+    # Correlation/variance filtering is now applied globally in the pipeline
+    # before the fold loop. The per-fold corr/var step is skipped here.
+    # We only apply the unified Boruta cross-fold feature set.
 
-    # Step 1: Check if cached filtered data exists (corr_var + boruta_crossfold
-    # already applied). If so, load and skip all filtering.
+    # Step 1: Check if cached Boruta-filtered data exists. If so, load it.
     if (
         os.path.exists(filename_train_boruta)
         and os.path.exists(filename_test_boruta)
     ):
         print(
-            "Reading existing filtered files for "
+            "Reading existing Boruta-filtered files for "
             f"fold {fold_idx} (seed {seed})."
         )
         train_clean = pl.read_parquet(filename_train_boruta)
         test_clean = pl.read_parquet(filename_test_boruta)
     else:
-        # Remove correlated and zero-variance features.
-        corr_threshold = kwargs.get("corr_threshold", 0.95)
-        train_clean, test_clean, keepVariableList_1 = (
-            extract_feat.filtrage_corr_var(
-                train_fold_tsfel,
-                test_fold_tsfel,
-                patient_col,
-                target_col,
-                corr_threshold=corr_threshold,
-                static_features=static_feats,
-                keep_static=keep_static,
-            )
-        )
+        # Data is already globally filtered by corr/var in the pipeline.
+        # Start from the fold-split data (already corr/var filtered).
+        train_clean = train_fold_tsfel
+        test_clean = test_fold_tsfel
 
-        # Record features after correlation/variance filtering.
+        # Record features after global corr/var filtering (inherited from pipeline).
         after_corr_var_features = (
             train_clean
             .select(pl.exclude(patient_col, target_col))
@@ -685,7 +684,7 @@ def process_tsfel_fold(
         feature_trace["stages"]["after_corr_var"] = {
             "count": len(after_corr_var_features),
             "features": sorted(after_corr_var_features),
-            "corr_threshold": corr_threshold,
+            "note": "global corr/var applied in pipeline (not per-fold)",
             "removed": len(initial_features) - len(after_corr_var_features),
         }
 
@@ -727,6 +726,29 @@ def process_tsfel_fold(
                 "boruta_crossfold_available": len(crossfold_available),
                 "removed": len(after_corr_var_features) - len(after_boruta_features),
             }
+
+        # Compute imputation medians from training data only to avoid data
+        # leakage, then apply to both train and test before saving to cache.
+        numeric_cols = train_clean.select(cs.numeric()).columns
+        impute_dict = {}
+        for col in numeric_cols:
+            col_data = train_clean[col]
+            if col_data.dtype in (pl.Float32, pl.Float64, pl.Int32, pl.Int64):
+                median_val = col_data.median()
+                impute_dict[col] = float(median_val) if (
+                    median_val is not None and not np.isnan(median_val)
+                ) else 0.0
+
+        # Apply imputation to both datasets.
+        if impute_dict:
+            train_clean = train_clean.with_columns([
+                pl.col(col).fill_null(impute_dict[col]).alias(col)
+                for col in impute_dict
+            ])
+            test_clean = test_clean.with_columns([
+                pl.col(col).fill_null(impute_dict[col]).alias(col)
+                for col in impute_dict
+            ])
 
         # Save the filtered data for future runs so that corr_var and the
         # boruta crossfold filter can be skipped on subsequent executions.

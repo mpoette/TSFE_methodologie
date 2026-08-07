@@ -1,3 +1,11 @@
+"""Data extraction utilities for ICU survival prediction pipelines.
+
+This module provides functions for loading, cleaning, and preparing ICU
+patient time-series data from Parquet sources. It handles encounter-level
+duplicate removal, time-axis recalibration, and the generation of either
+fixed or random 24-hour observation windows for model training.
+"""
+
 from pathlib import Path
 from typing import TypeAlias
 

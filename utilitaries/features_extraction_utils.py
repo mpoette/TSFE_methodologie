@@ -4,10 +4,13 @@ from collections.abc import Sequence
 from typing import TypeAlias
 
 import gc
+import logging
 import os
 import re
 import resource
 import warnings
+
+logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -216,7 +219,7 @@ def _compute_numeric_correlation(
     Raises:
         ValueError: If fewer than two usable numeric columns remain.
     """
-    print("[CORR] Sanitizing numeric data...", flush=True)
+    logger.debug("CORR: Sanitizing numeric data...")
     _log_memory("before numeric sanitization")
 
     numeric_df = (
@@ -227,9 +230,8 @@ def _compute_numeric_correlation(
 
     empty_columns = numeric_df.columns[~numeric_df.notna().any(axis=0)]
     if len(empty_columns):
-        print(
-            f"[CORR] Dropping {len(empty_columns)} all-NaN column(s).",
-            flush=True,
+        logger.debug(
+            "CORR: Dropping %d all-NaN column(s).", len(empty_columns)
         )
         numeric_df = numeric_df.drop(columns=empty_columns)
 
@@ -239,13 +241,13 @@ def _compute_numeric_correlation(
         )
 
     _log_memory("after numeric sanitization")
-    print(
-        f"[CORR] Computing Pearson matrix for "
-        f"{numeric_df.shape[0]} rows x {numeric_df.shape[1]} features...",
-        flush=True,
+    logger.debug(
+        "CORR: Computing Pearson matrix for %d rows x %d features...",
+        numeric_df.shape[0],
+        numeric_df.shape[1],
     )
     corr_matrix = numeric_df.corr(method="pearson")
-    print(f"[CORR] Matrix ready: {corr_matrix.shape}", flush=True)
+    logger.debug("CORR: Matrix ready: %s", corr_matrix.shape)
     _log_memory("after correlation computation")
     return numeric_df, corr_matrix
 
@@ -422,9 +424,9 @@ def audit_explainability_recognition(
         )
     )
 
-    print("[EXPLAINABILITY AUDIT]", flush=True)
+    logger.debug("EXPLAINABILITY AUDIT:")
     for row in summary.itertuples(index=False):
-        print(
+        logger.debug(
             f"  - {row.matched_family}: score={row.score}, "
             f"features={row.feature_count}",
             flush=True,
@@ -435,10 +437,10 @@ def audit_explainability_recognition(
         "feature",
     ].tolist()
     if unknown:
-        print(
-            f"[EXPLAINABILITY AUDIT] {len(unknown)} unknown feature(s). "
-            f"Examples: {unknown[:20]}",
-            flush=True,
+        logger.debug(
+            "EXPLAINABILITY AUDIT: %d unknown feature(s). Examples: %s",
+            len(unknown),
+            unknown[:20],
         )
 
     return audit_df
@@ -735,8 +737,8 @@ def drop_correlated_by_explainability(
             drop_set.add(dropped)
 
             line = (
-                f"[CORR DECISION] |corr|={abs(float(corr_value)):.6f} "
-                f"(corr={float(corr_value):+.6f}) :: "
+                "CORR DECISION |corr|=%.6f "
+                "(corr=%+.6f) :: "
                 f"KEEP '{kept}' [{kept_family}, score={kept_score}] "
                 f"vs DROP '{dropped}' "
                 f"[{dropped_family}, score={dropped_score}] "
@@ -755,17 +757,17 @@ def drop_correlated_by_explainability(
             handle.write("\n".join(decision_lines))
             if decision_lines:
                 handle.write("\n")
-        print(
-            f"[CORR DECISION] Saved {len(decision_lines)} decision(s) to "
-            f"{decision_log_path}",
-            flush=True,
+        logger.debug(
+            "CORR DECISION: Saved %d decision(s) to %s",
+            len(decision_lines),
+            decision_log_path,
         )
 
-    print(
-        f"Dropped {len(drop_set)} correlated feature(s) "
-        f"at threshold={threshold:.2f}; "
-        f"logged {len(decision_lines)} decision(s).",
-        flush=True,
+    logger.debug(
+        "Dropped %d correlated feature(s) at threshold=%.2f; logged %d decision(s).",
+        len(drop_set),
+        threshold,
+        len(decision_lines),
     )
 
     return df.loc[:, [col for col in columns if col not in drop_set]]
@@ -1003,6 +1005,25 @@ def _process_single_patient(
         .apply(pd.to_numeric, errors="coerce")
     )
 
+    # Diagnostic logging: detect constant (static-like) and all-NaN columns.
+    variances = feature_data.var(axis=0)
+    constant_cols = sorted(variances[variances == 0.0].index.tolist())
+    all_nan_cols = sorted(
+        col for col in unique_feature_cols if feature_data[col].isna().all()
+    )
+    valid_per_col = feature_data.count(axis=0)
+    min_valid = int(valid_per_col.min())
+
+    # Raise if insufficient valid data for TSFEL extraction.
+    if min_valid < 2:
+        raise ValueError(
+            f"Patient '{patient_ids[0]}' has only {min_valid} valid sample(s) "
+            f"across {len(unique_feature_cols)} feature(s) (need >= 2). "
+            f"Constant columns ({len(constant_cols)}): {constant_cols}. "
+            f"All-NaN columns ({len(all_nan_cols)}): {all_nan_cols}. "
+            f"This likely indicates static features leaking into TSFEL input."
+        )
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -1095,42 +1116,35 @@ def extract_tsfel_per_patient(
     time_col: str,
     feature_cols: list[str],
     target_col: str,
-    n_jobs: int = -1,
+    n_jobs: int = 8,
     sampling_interval_hours: float = 1.0,
 ) -> pl.DataFrame:
     """Extract TSFEL features independently for each patient or ICU stay.
 
     The input is sorted chronologically, partitioned by patient, and processed
-    in parallel. Fractal features are excluded, along with Histogram mode and
-    MFCC spectral features. All other spectral features are retained.
+    in parallel using Joblib generator mode to minimize peak memory consumption.
+    Fractal features are excluded, along with Histogram mode and MFCC spectral
+    features. All other spectral features are retained.
 
     Args:
-        df:
-            Patient time-series dataset.
-        patient_col:
-            Patient or stay identifier column.
-        time_col:
-            Temporal ordering column.
-        feature_cols:
-            Dynamic variables used for feature extraction.
-        target_col:
-            Prediction target column.
-        n_jobs:
-            Number of parallel Joblib workers. ``-1`` uses all available
-            logical CPU cores.
-        sampling_interval_hours:
-            Time between two consecutive observations, in hours. The default
-            is ``1.0`` (one observation per hour). It is converted to hertz
-            before being passed to TSFEL: ``fs = 1 / (hours * 3600)``.
+        df: Patient time-series dataset.
+        patient_col: Patient or stay identifier column.
+        time_col: Temporal ordering column.
+        feature_cols: Dynamic variables used for feature extraction.
+        target_col: Prediction target column.
+        n_jobs: Number of parallel Joblib workers. Defaults to 8 to avoid OOM
+            spikes on systems with large core counts.
+        sampling_interval_hours: Time between two consecutive observations, in
+            hours. Defaults to 1.0 (one observation per hour). It is converted
+            to hertz before being passed to TSFEL: ``fs = 1 / (hours * 3600)``.
 
     Returns:
         A DataFrame containing one row per patient and one column per
         extracted TSFEL feature.
 
     Raises:
-        ValueError:
-            If the input is empty, required columns are missing, no feature
-            column is provided, or no patient group is processed.
+        ValueError: If the input is empty, required columns are missing, no
+            feature column is provided, or no patient group is processed.
     """
     df = _ensure_dataframe(df)
 
@@ -1154,12 +1168,11 @@ def extract_tsfel_per_patient(
     sampling_frequency_hz = 1.0 / sampling_interval_seconds
     sampling_frequency_per_hour = sampling_frequency_hz * 3600.0
 
-    print(
-        "TSFEL sampling configuration: "
-        f"interval={sampling_interval_hours:.12g} hour(s), "
-        f"fs={sampling_frequency_hz:.15g} Hz, "
-        f"sampling_rate={sampling_frequency_per_hour:.12g} sample/hour",
-        flush=True,
+    logger.debug(
+        "TSFEL sampling: interval=%.12g hour(s), fs=%.15g Hz, rate=%.12g sample/hour",
+        sampling_interval_hours,
+        sampling_frequency_hz,
+        sampling_frequency_per_hour,
     )
 
     _validate_columns(
@@ -1203,13 +1216,21 @@ def extract_tsfel_per_patient(
         maintain_order=True,
     )
 
-    print(
-        "Starting parallel TSFEL extraction for "
-        f"{len(patient_groups)} patients...",
-        flush=True,
+    # Log feature columns passed to TSFEL to detect static features leaking in.
+    logger.info(
+        "TSFEL feature_cols (%d columns): %s",
+        len(feature_cols),
+        feature_cols,
     )
 
-    results = Parallel(n_jobs=n_jobs)(
+    logger.debug(
+        "Starting parallel TSFEL extraction for %d patients (n_jobs=%d)",
+        len(patient_groups),
+        n_jobs,
+    )
+
+    # Placing tqdm directly over patient_groups displays the progress bar immediately as tasks are submitted
+    results_generator = Parallel(n_jobs=n_jobs, return_generator=True)(
         delayed(_process_single_patient)(
             patient_df=patient_group,
             config=config,
@@ -1225,16 +1246,19 @@ def extract_tsfel_per_patient(
         )
     )
 
+    # Materialize the generator directly into a list
+    results = list(results_generator)
+
     if not results:
         raise ValueError(
             "No patient group was processed during TSFEL extraction."
         )
 
+    # Single vertical concatenation of all processed patient DataFrames.
     return pl.concat(
         results,
         how="vertical",
     )
-
 
 def filtrage_corr_var(
     Dataset_train: PolarsFrame,
@@ -1466,13 +1490,11 @@ def filtrage_corr_var(
         axis=1,
     )
 
-    print(
-        "Shape after correlation filtering: "
-        f"{train_uncorrelated.shape}"
+    logger.debug(
+        "Shape after correlation filtering: %s", train_uncorrelated.shape
     )
-    print(
-        "Number of remaining features: "
-        f"{len(all_selected_features)}"
+    logger.debug(
+        "Number of remaining features: %d", len(all_selected_features)
     )
 
     return (
@@ -1748,11 +1770,11 @@ def filtrage_boruta(
         how="horizontal",
     )
 
-    print(
-        "Boruta completed: "
-        f"{len(all_selected_features)} features retained "
-        f"({len(static_in_features)} static + "
-        f"{len(dynamic_selected)} dynamic)."
+    logger.debug(
+        "Boruta completed: %d features retained (%d static + %d dynamic).",
+        len(all_selected_features),
+        len(static_in_features),
+        len(dynamic_selected),
     )
 
     return (
@@ -2560,13 +2582,6 @@ def afficher_correlation_par_blocs(
             static_roots=static_roots,
             temporal_roots=temporal_roots,
         )
-        print(
-            "[STATIC SUMMARY] Rendering one matrix with "
-            f"{len(static_roots)} static feature(s) x "
-            f"{len(temporal_roots)} temporal source feature(s).",
-            flush=True,
-        )
-
         if normal_dir is not None:
             _render_static_temporal_summary(
                 summary=static_summary,
@@ -3296,11 +3311,12 @@ def estimate_boruta_frequency_threshold(
         _safe_save_figure(fig, save_path, dpi=150)
         plt.close(fig)
 
-    print(
-        f"[BORUTA FREQ] Elbow threshold: {elbow_threshold:.2f} "
-        f"({elbow_threshold * n_folds:.0f}/{n_folds} folds), "
-        f"{vars_remaining[elbow_idx]} features retained.",
-        flush=True,
+    logger.debug(
+        "BORUTA FREQ: Elbow threshold=%.2f (%.0f/%d folds), %d features retained.",
+        elbow_threshold,
+        elbow_threshold * n_folds,
+        n_folds,
+        vars_remaining[elbow_idx],
     )
 
     return elbow_threshold, results_df
@@ -3344,11 +3360,12 @@ def get_boruta_features_at_threshold(
         if count >= min_folds
     )
 
-    print(
-        f"[BORUTA FREQ] {len(selected)} features selected at "
-        f"frequency >= {frequency_threshold:.2f} "
-        f"(>= {min_folds}/{n_folds} folds).",
-        flush=True,
+    logger.debug(
+        "BORUTA FREQ: %d features selected at frequency >= %.2f (>= %d/%d folds).",
+        len(selected),
+        frequency_threshold,
+        min_folds,
+        n_folds,
     )
 
     return selected
@@ -3428,17 +3445,9 @@ def collect_boruta_features_for_fold(
         .sort(patient_col)
     )
 
-    # Step 1: Correlation and variance filtering.
-    corr_threshold = kwargs.get("corr_threshold", 0.95)
-    train_clean, test_clean, _ = filtrage_corr_var(
-        train_fold_tsfel,
-        test_fold_tsfel,
-        patient_col,
-        target_col,
-        corr_threshold=corr_threshold,
-        static_features=static_feats,
-        keep_static=keep_static,
-    )
+    # Data is already globally filtered by corr/var in the pipeline,
+    # so we skip the per-fold corr/var step here.
+    train_clean, test_clean = train_fold_tsfel, test_fold_tsfel
 
     if not boruta_filter:
         # No Boruta: return all features after corr/var filtering.
@@ -3510,8 +3519,8 @@ def resolve_boruta_crossfold_features(
         features = list(
             np.load(boruta_crossfold_path, allow_pickle=True)
         )
-        print(
-            f"[BORUTA] Loaded {len(features)} features from cache."
+        logger.debug(
+            "BORUTA: Loaded %d features from cache.", len(features)
         )
         return features
 
@@ -3519,14 +3528,14 @@ def resolve_boruta_crossfold_features(
         return []
 
     # Phase 1: Collect Boruta features across 5 folds.
-    print("\n[BORUTA PHASE 1] Collecting features across 5 folds...")
+    logger.debug("BORUTA PHASE 1: Collecting features across 5 folds...")
     fold_boruta_feature_lists = []
 
     for _fold_idx, (_train_idx, _val_idx) in enumerate(
         sgkf.split(X=X, y=y, groups=groups)
     ):
-        print(
-            f"\n[BORUTA PHASE 1] Collecting fold {_fold_idx + 1}/5..."
+        logger.debug(
+            "BORUTA PHASE 1: Collecting fold %d/5...", _fold_idx + 1
         )
         features = collect_boruta_features_for_fold(
             _fold_idx,
@@ -3539,13 +3548,14 @@ def resolve_boruta_crossfold_features(
             **kwargs,
         )
         fold_boruta_feature_lists.append(features)
-        print(
-            f"[BORUTA PHASE 1] Fold {_fold_idx + 1}: "
-            f"{len(features)} features selected."
+        logger.debug(
+            "BORUTA PHASE 1: Fold %d: %d features selected.",
+            _fold_idx + 1,
+            len(features),
         )
 
     # Phase 1.5: Elbow analysis.
-    print("\n[BORUTA PHASE 1.5] Analyzing frequency elbow...")
+    logger.debug("BORUTA PHASE 1.5: Analyzing frequency elbow...")
     boruta_freq_threshold, boruta_freq_df = (
         estimate_boruta_frequency_threshold(
             fold_feature_lists=fold_boruta_feature_lists,
@@ -3570,10 +3580,10 @@ def resolve_boruta_crossfold_features(
     # Save the unified feature list.
     np.save(boruta_crossfold_path, boruta_crossfold_features)
 
-    print(
-        f"\n[BORUTA CROSS-FOLD] Unified feature set: "
-        f"{len(boruta_crossfold_features)} features "
-        f"at frequency >= {boruta_freq_threshold:.2f}."
+    logger.debug(
+        "BORUTA CROSS-FOLD: Unified feature set: %d features at frequency >= %.2f.",
+        len(boruta_crossfold_features),
+        boruta_freq_threshold,
     )
 
     return list(boruta_crossfold_features)

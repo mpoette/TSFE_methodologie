@@ -1,3 +1,10 @@
+"""Sequential pipeline utilities for ICU prediction model configuration.
+
+Provides dataclasses and helpers to manage sequential execution of
+machine-learning pipelines, including model configuration selection,
+parameter iteration, and progress tracking for batch training workflows.
+"""
+
 from dataclasses import dataclass
 
 import utilitaries.config_utils as mo_utils

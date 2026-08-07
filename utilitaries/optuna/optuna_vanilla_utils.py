@@ -1,3 +1,10 @@
+"""Optuna hyperparameter optimization utilities for Vanilla Transformer models.
+
+Provides objective functions and study runners for the first stage of
+Optuna-based hyperparameter search targeting Vanilla Transformer architectures
+with attention-based sequence modelling and configurable encoder dimensions.
+"""
+
 import numpy as np
 import optuna
 
@@ -102,16 +109,16 @@ def make_objective_stage1(
             score = optuna_utils.extract_best_val_loss(history, "val_loss")
 
             if not np.isfinite(score):
-                raise FloatingPointError("Score non fini.")
+                raise FloatingPointError("Non-finite score.")
 
             return score
 
         except FloatingPointError:
-            raise optuna.TrialPruned("FloatingPointError: Perte infinie.")
+            raise optuna.TrialPruned("FloatingPointError: Infinite loss.")
         except optuna.TrialPruned:
             raise
         except Exception as e:
-            raise optuna.TrialPruned(f"Trial echoue: {e}")
+            raise optuna.TrialPruned(f"Trial failed: {e}")
 
     return objective
 

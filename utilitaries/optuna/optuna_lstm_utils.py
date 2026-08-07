@@ -1,3 +1,11 @@
+"""Optuna hyperparameter optimization utilities for LSTM models.
+
+Provides objective functions and study runners for the first stage of
+Optuna-based hyperparameter search targeting LSTM (Long Short-Term Memory)
+architectures. Includes categorical search spaces for fully-connected units
+and handles gradient clipping suggestions.
+"""
+
 import numpy as np
 import optuna
 
@@ -98,16 +106,16 @@ def make_objective_lstm_stage1(
             score = optuna_utils.extract_best_val_loss(history, metric_name)
 
             if not np.isfinite(score):
-                raise FloatingPointError("Score non fini.")
+                raise FloatingPointError("Non-finite score.")
 
             return score
 
         except FloatingPointError:
-            raise optuna.TrialPruned("FloatingPointError: Perte infinie.")
+            raise optuna.TrialPruned("FloatingPointError: Infinite loss.")
         except optuna.TrialPruned:
             raise
         except Exception as e:
-            raise optuna.TrialPruned(f"Trial échoué: {e}")
+            raise optuna.TrialPruned(f"Trial failed: {e}")
 
     return objective
 

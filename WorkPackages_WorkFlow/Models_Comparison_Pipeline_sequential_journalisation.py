@@ -1,3 +1,11 @@
+"""Models comparison pipeline for ICU mortality prediction experiments.
+
+Orchestrates end-to-end training, evaluation, and comparison of machine
+learning and clinical-score models across multiple configurations including
+windowing strategies, feature sets, balancing methods, and calibration
+modes. Supports both out-of-fold cross-validation and holdout evaluation.
+"""
+
 from types import SimpleNamespace
 
 SEED = 42
@@ -69,6 +77,17 @@ class _TeeStream:
 
 sys.stdout = _TeeStream(_ORIGINAL_STDOUT, _LOG_FILE)
 sys.stderr = _TeeStream(_ORIGINAL_STDERR, _LOG_FILE)
+
+# Configure the standard logging module to write to the same log file so
+# that warnings from features_extraction_utils appear alongside print() output.
+import logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(levelname)s - %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(_LOG_FILE)],
+)
+logger = logging.getLogger(__name__)
+
 faulthandler.enable(file=_LOG_FILE, all_threads=True)
 
 CURRENT_RUN_CONTEXT = {
@@ -83,18 +102,6 @@ def update_progress(stage):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [STAGE] {stage}", flush=True)
 
 
-def _uncaught_exception_hook(exc_type, exc_value, exc_traceback):
-    """Add the experiment context before the standard Python traceback."""
-    print("\n" + "!" * 90, file=sys.stderr, flush=True)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [CRASH] Uncaught exception", file=sys.stderr, flush=True)
-    print(f"[CRASH] Experiment: {CURRENT_RUN_CONTEXT.get('experiment')}", file=sys.stderr, flush=True)
-    print(f"[CRASH] Last known stage: {CURRENT_RUN_CONTEXT.get('stage')}", file=sys.stderr, flush=True)
-    print(f"[CRASH] Full log: {_LOG_PATH}", file=sys.stderr, flush=True)
-    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
-    print("!" * 90, file=sys.stderr, flush=True)
-
-
-sys.excepthook = _uncaught_exception_hook
 print(f"[LOG] Log file for this run: {_LOG_PATH}", flush=True)
 
 import joblib
@@ -127,7 +134,6 @@ import utilitaries.evaluate_utils as evaluate
 import utilitaries.resampling_and_window_choice_pipeline as choice
 import utilitaries.sequential_utils as sequential
 import utilitaries.static_features_utils as static_utils
-from datetime import datetime
 
 import warnings
 
@@ -144,8 +150,9 @@ mode_names = ["score", "wp1", "wp2", "wp3"]
 mode_names = ["wp1","score"]
 # mode_names = ["test_robustesse"]
 # mode_names = ["score"]
-mode_names = ["SVC_LR", "end_game"]
-
+mode_names = ["end_game"]
+mode_names = ["TSFEL"]
+n_jobs = -1
 RUN_COMPARISON = False
 RUN_TRAINING = True
 RUN_LASSO = True
@@ -175,16 +182,6 @@ for mode_run in mode_names:
         optuna_run_options = [False]
         feature_modes = ["Mode IGS2"]
         balancing_methods = ["Aucune Méthode"]
-    if mode_run == "test_imbalance":
-        mode_duplicates = "prio_first"
-        WINDOWING_MODE = "24h début réanimation sans remplissage"
-        target_labels = ["Survie à 28 jours"]
-        model_names = ["VanillaTransformerModified", "LstmTimeModified", "XGBoost TSFEL"]
-        stratify_modes = ["target_col"]
-        optuna_run_options = [False]
-        feature_modes = ["Mode Commonly Used Without pmsi"]
-        balancing_methods = ["Aucune Méthode", "DownSampling 50-50", "UpSampling 50-50"]
-        RUN_COMPARISON = True
     elif mode_run == "SVC_LR":
         mode_duplicates = "prio_first"
         target_labels = ["Survie à 28 jours"]
@@ -194,24 +191,14 @@ for mode_run in mode_names:
         optuna_run_options = [False, True]
         feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
         balancing_methods = ["Aucune Méthode"]
-    elif mode_run == "end_game":
+    elif mode_run == "TSFEL":
         mode_duplicates = "prio_first"
-        WINDOWING_MODE = "24h début réanimation sans remplissage"
         target_labels = ["Survie à 28 jours"]
-        model_names = ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+        model_names = ["SVC TSFEL", "Logistic Regression Lasso TSFEL", "XGBoost TSFEL", "RandomForest TSFEL",]
         stratify_modes = ["target_col"]
+        WINDOWING_MODE = "24h début réanimation sans remplissage"
         optuna_run_options = [False, True]
-        feature_modes = ["Mode Commonly Used"]
-        balancing_methods = ["Aucune Méthode"]
-        RUN_COMPARISON = True
-    elif mode_run == "test_robustesse":
-        mode_duplicates = "prio_first"
-        target_labels = ["Survie à 28 jours"]
-        model_names = ["XGBoost TSFEL"]
-        stratify_modes = ["target_col"]
-        WINDOWING_MODE = "24h début réanimation sans remplissage"
-        optuna_run_options = [False]
-        feature_modes =["Mode IGS2"]
+        feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
     elif mode_run == "wp1":
         mode_duplicates = "prio_first"
@@ -393,19 +380,28 @@ for mode_run in mode_names:
                                 # df_merged = create_merged_dataset.create_merged_dataset(df_static, df_dynamic, True, save=True, folder=dataset_path)
                                 _path = os.path.join(dataset_path, 'merged_static_ano_and_dynamic.parquet')
                                 df_merged = pl.scan_parquet(_path)
-                                print("!!!!!!!!!!!!!!! LOG df_merged !!!!!!!!!!!!!! : unique encounterIds =", df_merged.collect().select("encounterId").unique().shape[0])
+                                logger.debug(
+                                    "LOG df_merged unique encounterIds: %d",
+                                    df_merged.collect().select("encounterId").unique().shape[0],
+                                )
                                 if not keep_duplicates:
                                     _path = os.path.join(dataset_path, 'df_static_full_clean.parquet')
                                     df_without_anomalies = pl.scan_parquet(_path)
                                     df_merged = extract.remove_duplicates(df_without_anomalies, df_merged, mode_duplicates == "prio_last")
                                 else:
                                     df_merged.collect()
-                                print("!!!!!!!!!!!!!!! LOG df_merged without duplicates !!!!!!!!!!!!!! : unique encounterIds =", df_merged.select("encounterId").unique().shape[0])
+                                logger.debug(
+                                    "LOG df_merged without duplicates unique encounterIds: %d",
+                                    df_merged.select("encounterId").unique().shape[0],
+                                )
                                 df_labeled = tsu.prepare_labels(df_merged, 'relative')
                                 # TODO: Move this line earlier in the pipeline.
                                 df_labeled = df_labeled.filter(pl.col('delta_hour') >= 0)
                                 df_labeled.columns
-                                print("!!!!!!!!!!!!!!! LOG df_labeled !!!!!!!!!!!!!! : unique encounterIds =", df_labeled.select("encounterId").unique().shape[0])
+                                logger.debug(
+                                    "LOG df_labeled unique encounterIds: %d",
+                                    df_labeled.select("encounterId").unique().shape[0],
+                                )
 
                                 
 
@@ -413,7 +409,10 @@ for mode_run in mode_names:
 
                                 update_progress("Preparing and cleaning the dataset")
                                 df_clean, features_list, target_length = choice.prepare_dataset_from_config(df_merged=df_labeled, config_mode=config_mode, target_col=target_col, patient_col=patient_col, targets=targets, seed=seed)
-                                print("!!!!!!!!!!!!!!! LOG df_clean size !!!!!!!!!!!!!! : unique encounterIds =", df_clean.select("encounterId").unique().shape[0])
+                                logger.debug(
+                                    "LOG df_clean size unique encounterIds: %d",
+                                    df_clean.select("encounterId").unique().shape[0],
+                                )
 
                                 score_columns = ['NEWS', 'NEWS2', 'sapsii', 'sapsii_prob']
                                 discarded_columns = ['endotracheal_tube', 'tracheo', 'installation', 'eer', 'hx_comorbidité_majeure', 'imc', 'neuro_status', 'ecmo_all', 'prone', 'plq']
@@ -504,6 +503,7 @@ for mode_run in mode_names:
                                         target_col,
                                         *categorical_source_columns,
                                     ]).unique()
+                                    n_jobs = 8
 
                                 (
                                     df_clean_3,
@@ -558,7 +558,7 @@ for mode_run in mode_names:
                                     if extract_tsfel.value or not os.path.exists(raw_global_tsfel_path):
                                         print("Starting global TSFEL extraction for all patients")
                                         tsfel_features = [target_label for target_label in final_features if target_label not in static_feats]
-                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col)
+                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col, n_jobs = n_jobs)
                                         static_global_df = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
     
                                         # robustness verification
@@ -716,29 +716,33 @@ for mode_run in mode_names:
                                     )
 
                                 else:
-                                    print("!!!!!!!!!!!!!!! LOG df_clean_3 !!!!!!!!!!!!!! : unique encounterIds =", df_clean_3.select("encounterId").unique().shape[0])
-                                    print(
-                                        f"[TIME INIT] About to run sgkf_init.split with X_init shape={X_init.shape}, "
-                                        f"y_init shape={y_init.shape}, groups_init shape={groups_init.shape if 'groups_init' in dir() else 'NOT DEFINED YET'}",
-                                        flush=True,
+                                    logger.debug(
+                                        "LOG df_clean_3 unique encounterIds: %d",
+                                        df_clean_3.select("encounterId").unique().shape[0],
+                                    )
+                                    logger.debug(
+                                        "TIME INIT: sgkf_init.split X_init shape=%s, y_init shape=%s",
+                                        X_init.shape,
+                                        y_init.shape,
                                     )
                                     groups_init = df_clean_3[patient_col].to_numpy()
-                                    print(
-                                        f"[TIME INIT] groups_init shape={groups_init.shape}, dtype={groups_init.dtype}",
-                                        flush=True,
+                                    logger.debug(
+                                        "TIME INIT: groups_init shape=%s, dtype=%s",
+                                        groups_init.shape,
+                                        groups_init.dtype,
                                     )
                                     train_init_idx, test_init_idx = next(sgkf_init.split(X=X_init, y=y_init, groups=groups_init))
-                                    print(
-                                        f"[TIME INIT] sgkf_init.split DONE -> train_init_idx len={len(train_init_idx)}, "
-                                        f"test_init_idx len={len(test_init_idx)}",
-                                        flush=True,
+                                    logger.debug(
+                                        "TIME INIT: train_init_idx len=%d, test_init_idx len=%d",
+                                        len(train_init_idx),
+                                        len(test_init_idx),
                                     )
                                     train_init_patients = df_clean_3[train_init_idx].select(patient_col).unique()
                                     test_init_patients = df_clean_3[test_init_idx].select(patient_col).unique()
-                                    print(
-                                        f"[TIME INIT] train_init_patients count={train_init_patients.shape[0]}, "
-                                        f"test_init_patients count={test_init_patients.shape[0]}",
-                                        flush=True,
+                                    logger.debug(
+                                        "TIME INIT: train=%d patients, test=%d patients",
+                                        train_init_patients.shape[0],
+                                        test_init_patients.shape[0],
                                     )
                                     if config_models.extraction_type == 'TSFEL':
                                         train_init_tsfel = complete_tsfel_df.join(train_init_patients, on=patient_col, how='inner').sort(patient_col)
@@ -747,29 +751,29 @@ for mode_run in mode_names:
                                         y = train_init_tsfel[target_col].to_numpy()
                                         groups = train_init_tsfel[patient_col].to_numpy()
                                     elif config_models.extraction_type == 'time':
-                                        print(
-                                            f"[TIME INIT] extraction_type='time', building train_init_df and test_holdout_df...",
-                                            flush=True,
+                                        logger.debug(
+                                            "TIME INIT: extraction_type='time', building train/holdout dataframes"
                                         )
-                                        print(
-                                            f"[TIME INIT] df_clean_3 type={type(df_clean_3).__name__}, "
-                                            f"train_init_idx type={type(train_init_idx).__name__}",
-                                            flush=True,
+                                        logger.debug(
+                                            "TIME INIT: df_clean_3 type=%s, train_init_idx type=%s",
+                                            type(df_clean_3).__name__,
+                                            type(train_init_idx).__name__,
                                         )
                                         train_init_df = df_clean_3[train_init_idx].sort([patient_col, time_col])
                                         test_holdout_df = df_clean_3[test_init_idx].sort([patient_col, time_col])
-                                        print(
-                                            f"[TIME INIT] train_init_df rows={len(train_init_df)}, "
-                                            f"test_holdout_df rows={len(test_holdout_df)}",
-                                            flush=True,
+                                        logger.debug(
+                                            "TIME INIT: train_init_df rows=%d, test_holdout_df rows=%d",
+                                            len(train_init_df),
+                                            len(test_holdout_df),
                                         )
                                         X = train_init_df
                                         y = train_init_df[target_col].to_numpy()
                                         groups = train_init_df[patient_col].to_numpy()
-                                        print(
-                                            f"[TIME INIT] X type={type(X).__name__}, y shape={y.shape}, "
-                                            f"groups shape={groups.shape}",
-                                            flush=True,
+                                        logger.debug(
+                                            "TIME INIT: X type=%s, y shape=%s, groups shape=%s",
+                                            type(X).__name__,
+                                            y.shape,
+                                            groups.shape,
                                         )
 
                                 update_progress("Building and preprocessing the 5 folds")
@@ -842,9 +846,50 @@ for mode_run in mode_names:
 
                                     fold_processing_config["corr_threshold"] = corr_threshold
 
-                                    # Add train/holdout data to config before Phase 1.
-                                    fold_processing_config["train_init"] = train_init_tsfel
-                                    fold_processing_config["holdout_init"] = test_holdout_tsfel
+                                    # ---- Global corr/var filtering (once, not per fold) ----
+                                    tsfel_features_for_filter = [
+                                        col for col in train_init_tsfel.columns
+                                        if col not in [extract.ID_COL, target_col]
+                                    ]
+
+                                    # If Boruta cache exists, corr/var was already applied
+                                    # during the first run; skip redundant re-execution.
+                                    boruta_crossfold_path = exp.get_boruta_crossfold_path()
+                                    boruta_cached = config_boruta and boruta_crossfold_path.exists()
+
+                                    if boruta_cached:
+                                        update_progress(
+                                            "Skipping corr/var filtering "
+                                            "(Boruta cache exists)"
+                                        )
+                                        fold_processing_config["train_init"] = train_init_tsfel
+                                        fold_processing_config["holdout_init"] = test_holdout_tsfel
+                                        fold_processing_config["corrvar_features"] = tsfel_features_for_filter
+                                    else:
+                                        update_progress(
+                                            "Applying global correlation/variance filtering"
+                                        )
+                                        train_corrvar, test_corrvar, corrvar_features = (
+                                            extract_feat.filtrage_corr_var(
+                                                train_init_tsfel,
+                                                test_holdout_tsfel,
+                                                patient_col,
+                                                target_col,
+                                                corr_threshold=corr_threshold,
+                                                static_features=static_feats,
+                                                keep_static=KEEP_STATIC,
+                                                log_correlation_decisions = False,
+                                            )
+                                        )
+                                        print(
+                                            f"[CORR/VAR GLOBAL] {len(tsfel_features_for_filter)} -> "
+                                            f"{len(corrvar_features)} features after filtering."
+                                        )
+
+                                        # Add filtered train/holdout data to config before Phase 1.
+                                        fold_processing_config["train_init"] = train_corrvar
+                                        fold_processing_config["holdout_init"] = test_corrvar
+                                        fold_processing_config["corrvar_features"] = corrvar_features
 
                                     # ---- Phase 1: Boruta cross-fold feature resolution ----
                                     if config_boruta:
@@ -1080,14 +1125,17 @@ for mode_run in mode_names:
 
                                 np.save(exp.get_var_path(), final_features)
                                 print("All 5 folds were computed successfully!")
-                                print(f"[DEBUG] Fold groups: {folds_groups}")
-                                print(
-                                    "[DEBUG] Holdout shapes: "
-                                    f"{[X_fold.shape for X_fold in folds_X_holdout]}"
+                                logger.debug(
+                                    "Fold groups: %s",
+                                    [g.shape for g in folds_groups],
                                 )
-                                print(
-                                    "[DEBUG] Holdout patients: "
-                                    f"{len(holdout_patient_ids)}"
+                                logger.debug(
+                                    "Holdout shapes: %s",
+                                    [X_fold.shape for X_fold in folds_X_holdout],
+                                )
+                                logger.debug(
+                                    "Holdout patients: %d",
+                                    len(holdout_patient_ids),
                                 )
 
                                 model_name = config_models.models_name
@@ -1235,12 +1283,12 @@ for mode_run in mode_names:
                                             training_groups_fold
                                         ).reshape(-1)
 
-                                        print(
-                                            f"[DEBUG FOLD GROUPS] "
-                                            f"rows={len(training_groups_fold)}, "
-                                            f"unique_groups={np.unique(training_groups_fold).size}, "
-                                            f"dtype={training_groups_fold.dtype}, "
-                                            f"first_values={training_groups_fold[:10]}"
+                                        logger.debug(
+                                            "FOLD GROUPS: rows=%d, unique=%d, dtype=%s, first=%s",
+                                            len(training_groups_fold),
+                                            np.unique(training_groups_fold).size,
+                                            training_groups_fold.dtype,
+                                            training_groups_fold[:10],
                                         )
 
                                         assert len(training_groups_fold) == len(x_training_fold), (
@@ -1259,7 +1307,11 @@ for mode_run in mode_names:
                                         if os.path.exists(model_path_fold) and os.path.getsize(model_path_fold) > 0:
                                             print(f'--> Previously trained model found at {model_path_fold}. Skipping to the next fold.')
                                             continue
-                                        print(f'\n[DEBUG TRAIN - Fold {training_fold_index + 1}] x_training_fold shape: {x_training_fold.shape}')
+                                        logger.debug(
+                                            'TRAIN Fold %d: x_training_fold shape=%s',
+                                            training_fold_index + 1,
+                                            x_training_fold.shape,
+                                        )
                                         X_train_final_fold, y_train_final = (x_training_fold, y_training_fold)
                                         groups_final_fold = training_groups_fold
                                         X_calib, y_calib = (None, None)
@@ -1274,7 +1326,11 @@ for mode_run in mode_names:
                                             else:
                                                 print(f'    [INFO] Calibration enabled ({calibration_mode.value}). Splitting the fold with StratifiedGroupKFold...')
                                                 current_groups = np.asarray(training_groups_fold)
-                                                print(f"[DEBUG GROUPS] Number of rows: {len(current_groups)}, Unique groups: {len(np.unique(current_groups))}")
+                                                logger.debug(
+                                                    "GROUPS: rows=%d, unique=%d",
+                                                    len(current_groups),
+                                                    len(np.unique(current_groups)),
+                                                )
                                                 skf_calib = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=seed)
                                                 train_idx_calib, calib_idx = next(skf_calib.split(x_training_fold, y_training_fold, groups=training_groups_fold))
                                                 X_train_final_fold = x_training_fold[train_idx_calib]
@@ -1282,7 +1338,11 @@ for mode_run in mode_names:
                                                 groups_final_fold = np.asarray(training_groups_fold)[train_idx_calib]
                                                 X_calib = x_training_fold[calib_idx]
                                                 y_calib = y_training_fold[calib_idx]
-                                                print(f'    [DEBUG] Shapes - base training set: {X_train_final_fold.shape}, calibration set: {X_calib.shape}')
+                                                logger.debug(
+                                                    'Shapes - train: %s, calib: %s',
+                                                    X_train_final_fold.shape,
+                                                    X_calib.shape,
+                                                )
                                         print(f'    [LEARNING CURVE] Starting the unified learning-curve stage loop...')
                                         X_validation_fold_lc = folds_X_validation[training_fold_index]
                                         X_val_np = X_validation_fold_lc.to_numpy() if hasattr(X_validation_fold_lc, 'to_numpy') else np.asarray(X_validation_fold_lc)
@@ -1322,7 +1382,9 @@ for mode_run in mode_names:
                                                         if denominator > 0 and numerator > 0:
                                                             beta = numerator / denominator
                                                             final_model_to_save = training.apply_prior_calibration(final_model_to_save, beta)
-                                                            print(f'    [DEBUG] Prior Calibration OK (beta = {beta:.4f})')
+                                                            logger.debug(
+                                                                'Prior Calibration OK (beta = %.4f)', beta
+                                                            )
                                                         else:
                                                             print(f'    [WARNING] Cannot compute beta because a class is missing.')
                                                     else:
@@ -1715,11 +1777,11 @@ for mode_run in mode_names:
                                     "out-of-fold calibration curve..."
                                 )
 
-                                print(
-                                    "DEBUG OOF SIZES -> "
-                                    f"y_true: {len(all_y_validation_global)}, "
-                                    f"uncalib: {len(all_probas_uncalib)}, "
-                                    f"calib: {len(all_probas_calib)}"
+                                logger.debug(
+                                    "OOF SIZES: y_true=%d, uncalib=%d, calib=%d",
+                                    len(all_y_validation_global),
+                                    len(all_probas_uncalib),
+                                    len(all_probas_calib),
                                 )
 
                                 sfu.calibration_curve_homemade(
@@ -1785,9 +1847,9 @@ for mode_run in mode_names:
                                             plt.plot(sorted_Cs, coefficient_path, alpha=0.7)
                                             plt.axvline(x=best_c, color='black', linestyle='--', linewidth=2, label=f'C optimal (Fold {fold_idx_L1 + 1}) = {best_c:.4f}')
                                             plt.xscale('log')
-                                            plt.xlabel('Paramètre de régularisation C (Log Scale)')
+                                            plt.xlabel('Regularization parameter C (Log Scale)')
                                             plt.ylabel(f'Coefficients ({n_features} features)')
-                                            plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimisé (Warm Start)')
+                                            plt.title(f'L1 Regularization Path - Fold {fold_idx_L1 + 1}\nOptimized (Warm Start)')
                                             plt.grid(True, which='both', ls='-', alpha=0.5)
                                             plt.legend()
                                             if save_figure.value:
@@ -2513,7 +2575,7 @@ for mode_run in mode_names:
                                         # Reorder to match holdout sample order via inner join with order DataFrame
                                         print("[COMPARISON] Reordering static features to match holdout order...", flush=True)
 
-                                        # Conversion propre des PIDs numpy/list en Int64
+                                        # Clean conversion of numpy/list PIDs to Int64
                                         clean_pids = np.asarray(holdout_pids, dtype=np.int64).ravel()
 
                                         order_df = pl.DataFrame({
@@ -2533,7 +2595,7 @@ for mode_run in mode_names:
 
                                         # Age: < 40, [40-55], [55-70], > 70
                                         print("[COMPARISON] Computing Age labels...", flush=True)
-                                        # Remplacement des éventuels nulls en NaN pour le type numérique
+                                        # Replace potential nulls with NaN for numeric type
                                         age_raw = holdout_static_aligned["age"].fill_null(np.nan).to_numpy()
                                         age_labels = np.where(
                                             np.isnan(age_raw), "Unknown",
@@ -2545,7 +2607,7 @@ for mode_run in mode_names:
 
                                         # Admission type: Medical, Scheduled Surgery, Unscheduled Surgery
                                         print("[COMPARISON] Computing Admission Type labels...", flush=True)
-                                        # Remplace les null par "Unknown" directement dans Polars
+                                        # Replace nulls with "Unknown" directly in Polars
                                         admission_labels = (
                                             holdout_static_aligned["admission_type"]
                                             .fill_null("Unknown")
@@ -2556,7 +2618,7 @@ for mode_run in mode_names:
                                         # ICU GHM categories
                                         print("[COMPARISON] Computing ICU GHM labels...", flush=True)
                                         
-                                        # 1. Extraction du premier élément de la liste si c'est une List(String), ou conversion directe
+                                        # 1. Extract the first list element if it's a List(String), or direct conversion
                                         icu_ghm_series = holdout_static_aligned["icu_ghm"]
                                         
                                         if icu_ghm_series.dtype == pl.List:

@@ -1,3 +1,12 @@
+"""Path utilities for managing experiment artifacts and data paths.
+
+Provides the ``Experiment`` class, which centralizes path generation for
+models, outputs, preprocessed inputs, selected variables, and resampled
+datasets. The class generates consistent, configuration-driven directory
+structures to keep results from different targets, preprocessing modes,
+feature sets, populations, seeds, and calibration settings isolated.
+"""
+
 from pathlib import Path
 
 import joblib
@@ -377,7 +386,7 @@ class Experiment:
         )
 
         if not file_path.exists():
-            raise FileNotFoundError(f"Fichier introuvable : {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
 
         return model_name, joblib.load(file_path)
 
