@@ -910,69 +910,95 @@ def _keep_positive_level_for_binary_features(
     )
     return filtered
 
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import polars as pl
+from tableone import TableOne
+
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import polars as pl
+from tableone import TableOne
+
+
 def build_tableone(
     df_clean: pl.DataFrame,
+    df_static_source: pl.DataFrame,  # <-- NOUVEAU PARAMÈTRE
     categorical_data: pl.DataFrame,
-    patient_col: str,
+    patient_col: str,  # Ex: "encounterId"
     target_col: str,
     final_features: list[str],
     generated_dummy_columns: list[str],
     categorical_source_columns: list[str],
     config_mode_name: str,
     output_dir: Path,
+    top_n_ghm: int | None = 5,
 ) -> TableOne:
-    """Build and export a cohort TableOne with explicit variable sections.
+    
+    # -------------------------------------------------------------------------
+    # 0. MERGE DES DATASETS ET CALCUL DU FLAG SEPSIS (Polars)
+    # -------------------------------------------------------------------------
+    df_clean = df_clean.with_columns(pl.col("encounterId").cast(pl.Int64))
+    df_static_source = df_static_source.with_columns(pl.col("encounterId").cast(pl.Int64))
+    # Récupération de 'los', 'icu_DA', 'icu_DP_code' via Inner Merge sur patient_col (encounterId)
+    required_cols = [patient_col, "los", "icu_DA", "icu_DP_code", "sapsii"]
+    
+    # Sélection proactive des colonnes utiles du dataset source pour éviter les doublons
+    static_to_merge = df_static_source.select(
+        [c for c in required_cols if c in df_static_source.columns]
+    )
 
-    The input dataframe is reduced to one observation per patient. Original
-    categorical columns are merged back after one-hot encoded columns are
-    removed. The exported table separates continuous and categorical
-    variables into visually distinct sections.
+    df_clean = df_clean.join(
+        static_to_merge,
+        on=patient_col,
+        how="inner"
+    )
 
-    Args:
-        df_clean: Fully preprocessed dataframe, potentially containing several
-            rows per patient.
-        categorical_data: Original categorical variables collected before
-            one-hot encoding.
-        patient_col: Patient identifier column.
-        target_col: Binary outcome column.
-        final_features: Features retained after preprocessing.
-        generated_dummy_columns: Dummy columns generated during categorical
-            encoding.
-        categorical_source_columns: Original categorical variables to display
-            in the descriptive table.
-        config_mode_name: Windowing or resampling configuration name.
-        output_dir: Directory in which the table files are written.
+    codes_cim = [
+        "R57.2", "R65.1", "A02.1", "A22.7", "A26.7", "A32.7", "A42.7",
+        "B37.7", "O85", "A40.0", "A40.1", "A40.2", "A40.3", "A40.8",
+        "A40.9", "A41.0", "A41.1", "A41.2", "A41.3", "A41.4", "A41.5",
+        "A41.8", "A41.9", "P36.00", "P36.10", "P36.20", "P36.30", "P36.40",
+        "P36.50", "P36.90",
+    ]
 
-    Returns:
-        The original TableOne object containing the computed statistics.
-        The exported HTML, CSV, and LaTeX files contain the additional
-        continuous and categorical section headers.
+    # Construction de la colonne Sepsis au niveau patient
+    sepsis_df = (
+        df_clean.group_by(patient_col).agg(
+            (
+                pl.col("icu_DA")
+                .list.eval(pl.element().is_in(codes_cim))
+                .list.any()
+                | pl.col("icu_DP_code").is_in(codes_cim)
+            )
+            .any()
+            .cast(pl.Int8)
+            .alias("sepsis")
+        )
+    )
 
-    Raises:
-        ValueError: If no static feature is available for description.
-    """
     selected_columns = list(
         dict.fromkeys(
             [
                 patient_col,
                 target_col,
                 *final_features,
+                "sapsii", 
+                "los", 
             ]
         )
     )
 
-    # Compute one boolean value per patient from the complete stay.
-    # For had_dialyse this means:
-    #   any source column is True on any row of the stay.
     flags_df = _build_patient_level_clinical_flags(
         dataframe=df_clean,
         patient_col=patient_col,
     )
 
-    df_static = (
-        df_clean
-        .select(selected_columns)
-        .unique(subset=[patient_col], keep="first")
+    df_static = df_clean.select(selected_columns).unique(
+        subset=[patient_col], keep="first"
     )
 
     static_features = build_static_feature_list(
@@ -984,9 +1010,9 @@ def build_tableone(
 
     pd_static = df_static.to_pandas()
 
-    # Keep GHM and entry mode dummy columns for TableOne; drop only others
     keep_for_tableone = {
-        col for col in generated_dummy_columns
+        col
+        for col in generated_dummy_columns
         if col.startswith("icu_ghm_") or col.startswith("icu_mode_entree_")
     }
     drop_columns = [
@@ -997,9 +1023,7 @@ def build_tableone(
     pd_static = pd_static.drop(columns=drop_columns)
 
     pd_categorical = (
-        categorical_data
-        .unique(subset=[patient_col], keep="first")
-        .to_pandas()
+        categorical_data.unique(subset=[patient_col], keep="first").to_pandas()
     )
 
     pd_static = pd_static.merge(
@@ -1009,18 +1033,22 @@ def build_tableone(
         suffixes=("", "_categorical"),
     )
 
-    # The original categorical values are merged back for TableOne, so their
-    # values must be translated independently from the model dummy columns.
+    # Fusion avec la variable Sepsis calculée
+    pd_static = pd_static.merge(
+        sepsis_df.to_pandas(), on=patient_col, how="left"
+    )
+
     pd_static = _translate_tableone_categories(pd_static)
 
-    # Drop columns that contain array/list values (e.g. icu_ghm as a list).
-    # TableOne's pd.isnull() fails on cell values that are arrays.
+    # Nettoyage des colonnes complexes/listes
     for col in pd_static.columns:
         sample = pd_static[col].dropna().iloc[0:1]
-        if len(sample) > 0 and isinstance(sample.iloc[0], (list, np.ndarray, pl.Series)):
+        if len(sample) > 0 and isinstance(
+            sample.iloc[0], (list, np.ndarray, pl.Series)
+        ):
             pd_static = pd_static.drop(columns=[col])
 
-    # Merge patient-level flags (convert bool to int for TableOne compat)
+    # Merge patient-level flags
     if not flags_df.is_empty():
         pd_flags = flags_df.to_pandas()
         for flag_col in pd_flags.columns:
@@ -1034,16 +1062,28 @@ def build_tableone(
             how="left",
         )
 
+    # -------------------------------------------------------------------------
+    # 1. GESTION DU SAPS II ET DE SES MANQUANTS
+    # -------------------------------------------------------------------------
+    if "sapsii" in pd_static.columns:
+        pd_static["sapsii"] = pd.to_numeric(
+            pd_static["sapsii"], errors="coerce"
+        )
+        pd_static["sapsii_missing"] = (
+            pd_static["sapsii"].isna().astype(int)
+        )
+
     continuous_features = [
         feature
         for feature in [
             "age",
+            "sapsii",
             "score_glasgow",
             "real_time_hours",
             "observed_duration",
+            "los",
         ]
-        if feature in static_features
-        and feature in pd_static.columns
+        if feature in static_features or feature in pd_static.columns
     ]
 
     for feature in continuous_features:
@@ -1059,7 +1099,7 @@ def build_tableone(
         and feature not in continuous_features
     ]
 
-    for feature in ["gender", target_col]:
+    for feature in ["gender", target_col, "sepsis", "sapsii_missing"]:
         if (
             feature in pd_static.columns
             and feature not in categorical_features
@@ -1067,7 +1107,6 @@ def build_tableone(
         ):
             categorical_features.append(feature)
 
-    # Add patient-level clinical flags as categorical variables
     clinical_flags = [
         "had_dialyse",
         "had_vasoactive_drugs",
@@ -1082,23 +1121,57 @@ def build_tableone(
         ):
             categorical_features.append(flag)
 
-    # Dedummy icu_ghm columns into a single categorical column
-    # Build reverse map: dummy label -> display label (identity since labels
-    # are already human-readable English strings from GHM_CODE_TO_LABEL).
+    # Dedummying des variables GHM / Entrée
     pd_static = _dedummy_categorical_columns(
         dataframe=pd_static,
         prefix="icu_ghm_",
         output_column="icu_ghm",
     )
-
-    # Dedummy icu_mode_entree columns into a single categorical column
     pd_static = _dedummy_categorical_columns(
         dataframe=pd_static,
         prefix="icu_mode_entree_",
         output_column="icu_mode_entree",
     )
 
-    # Add the reconstructed categorical columns
+    # -------------------------------------------------------------------------
+    # Extraction des Top 5 GHM en variables binaires décalées
+    # -------------------------------------------------------------------------
+    if "icu_ghm" in pd_static.columns:
+        top_5_ghm = (
+            pd_static["icu_ghm"]
+            .dropna()[
+                ~pd_static["icu_ghm"]
+                .dropna()
+                .str.lower()
+                .isin(["others", "unknown", "autre", "autres"])
+            ]
+            .value_counts()
+            .head(5)
+            .index.tolist()
+        )
+
+        for ghm_label in top_5_ghm:
+            display_col_name = f"{ghm_label}"
+            pd_static[display_col_name] = (pd_static["icu_ghm"] == ghm_label).astype(int)
+            
+            if display_col_name not in categorical_features:
+                categorical_features.append(display_col_name)
+
+        pd_static = pd_static.drop(columns=["icu_ghm"])
+        if "icu_ghm" in categorical_features:
+            categorical_features.remove("icu_ghm")
+
+    # -------------------------------------------------------------------------
+    # 2. FILTRAGE DES CATEGORIES DE ICU_GHM
+    # -------------------------------------------------------------------------
+    if "icu_ghm" in pd_static.columns and top_n_ghm is not None:
+        top_ghm_cats = (
+            pd_static["icu_ghm"].value_counts().head(top_n_ghm).index.tolist()
+        )
+        pd_static["icu_ghm"] = pd_static["icu_ghm"].apply(
+            lambda x: x if x in top_ghm_cats else "Autres GHM"
+        )
+
     for reconstructed_col in ["icu_ghm", "icu_mode_entree"]:
         if (
             reconstructed_col in pd_static.columns
@@ -1107,8 +1180,7 @@ def build_tableone(
         ):
             categorical_features.append(reconstructed_col)
 
-    # Sort categories by descending frequency so TableOne displays them
-    # from most common to least common.
+    # Tri des catégories par fréquence
     for col in ["icu_ghm", "icu_mode_entree", "gender"]:
         if col in pd_static.columns:
             freq_order = pd_static[col].value_counts().index.tolist()
@@ -1127,16 +1199,11 @@ def build_tableone(
             "No static features are available for the descriptive table."
         )
 
-    # Identify only genuine 0/1 indicators. Multi-level categorical variables
-    # such as gender and entry mode keep all their categories.
     binary_indicator_features = _find_binary_indicator_features(
         dataframe=pd_static,
         categorical_features=categorical_features,
     )
 
-    # Ensure ALL columns in pd_static are simple scalar types for TableOne.
-    # TableOne's pd.isnull() fails on array-like or boolean dtypes.
-    # Preserve ordered categorical columns (used for frequency-based sorting).
     _ordered_categorical_cols = {
         col
         for col in pd_static.columns
@@ -1147,13 +1214,19 @@ def build_tableone(
         if pd.api.types.is_bool_dtype(pd_static[col]):
             pd_static[col] = pd_static[col].astype(int)
         elif pd.api.types.is_numeric_dtype(pd_static[col]):
-            # Keep numeric as-is (already handled for continuous features)
             pass
         elif col not in _ordered_categorical_cols:
             pd_static[col] = pd_static[col].astype(str)
 
-    # Rename columns with human-readable display names for TableOne only.
-    # The modelling pipeline and feature lists remain unaffected.
+    TABLEONE_COLUMN_DISPLAY_NAMES.update(
+        {
+            "sapsii": "SAPS II Score",
+            "sapsii_missing": "SAPS II Missing",
+            "sepsis": "Sepsis Diagnosis",
+            "los": "Length of Stay (hours)",
+        }
+    )
+
     rename_mask: dict[str, str] = {
         col: display_name
         for col, display_name in TABLEONE_COLUMN_DISPLAY_NAMES.items()
@@ -1161,12 +1234,13 @@ def build_tableone(
     }
     pd_static = pd_static.rename(columns=rename_mask)
 
-    # Update describe_columns and feature lists to use display names.
     _rename_feature = lambda name: rename_mask.get(name, name)
     continuous_features = [_rename_feature(f) for f in continuous_features]
     categorical_features = [_rename_feature(f) for f in categorical_features]
     describe_columns = [_rename_feature(f) for f in describe_columns]
-    binary_indicator_features = [_rename_feature(f) for f in binary_indicator_features]
+    binary_indicator_features = [
+        _rename_feature(f) for f in binary_indicator_features
+    ]
 
     table = TableOne(
         data=pd_static,
@@ -1189,9 +1263,6 @@ def build_tableone(
         categorical_features=categorical_features,
     )
 
-    # Sort multi-level categorical rows by descending frequency (Overall col).
-    # TableOne ignores pandas Categorical order and sorts alphabetically,
-    # so we must reorder the result manually.
     _sort_cols = {"ICU Disease Group", "ICU Entry Mode"}
     formatted_table = _sort_categorical_rows_by_frequency(
         table_dataframe=formatted_table,
@@ -1201,14 +1272,8 @@ def build_tableone(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    formatted_table.to_html(
-        output_dir / "tableone_static_features.html",
-    )
-    formatted_table.to_csv(
-        output_dir / "tableone_static_features.csv",
-    )
-    formatted_table.to_latex(
-        output_dir / "tableone_static_features.tex",
-    )
+    formatted_table.to_html(output_dir / "tableone_static_features.html")
+    formatted_table.to_csv(output_dir / "tableone_static_features.csv")
+    formatted_table.to_latex(output_dir / "tableone_static_features.tex")
 
     return table

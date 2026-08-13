@@ -1,7 +1,10 @@
 """Feature extraction, selection, and correlation analysis utilities."""
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TypeAlias
+
+import json
 
 import gc
 import logging
@@ -11,6 +14,70 @@ import resource
 import warnings
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_VARIABLE_NUMBER_LOG_PATH = Path("log_variable_number.json")
+
+
+def _deep_update_dict(destination: dict, source: dict) -> None:
+    """Recursively merge ``source`` into ``destination`` in place."""
+    for key, value in source.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(destination.get(key), dict)
+        ):
+            _deep_update_dict(destination[key], value)
+        else:
+            destination[key] = value
+
+
+def _update_variable_number_log(
+    updates: dict,
+    log_path: str | os.PathLike | None = None,
+    *,
+    reset: bool = False,
+) -> Path:
+    """Persist feature-count journal information as JSON.
+
+    The journal is intentionally lightweight and records only counts and
+    thresholds required to document the feature-selection pipeline. Existing
+    sections are preserved unless ``reset`` is True.
+
+    Args:
+        updates: Nested dictionary to merge into the journal.
+        log_path: Optional path to the JSON file. Defaults to
+            ``log_variable_number.json`` in the current working directory.
+        reset: Whether to discard an existing journal before applying updates.
+
+    Returns:
+        The resolved journal path.
+    """
+    path = Path(log_path) if log_path is not None else DEFAULT_VARIABLE_NUMBER_LOG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if reset or not path.exists():
+        data: dict = {}
+    else:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    _deep_update_dict(data, updates)
+
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            data,
+            handle,
+            indent=4,
+            ensure_ascii=False,
+            sort_keys=False,
+        )
+        handle.write("\n")
+
+    logger.info("Feature-count journal updated: %s", path)
+    return path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -169,7 +236,7 @@ def _validate_regular_sampling(
         )
     
 def _log_memory(label: str) -> None:
-    """Print the process peak resident memory with immediate flushing.
+    """Log the process peak resident memory.
 
     On Linux, ``ru_maxrss`` is reported in KiB. This helper deliberately uses
     only the standard library so it remains available in constrained jobs.
@@ -178,10 +245,11 @@ def _log_memory(label: str) -> None:
         label: Short label prefixed in the log line.
     """
     max_rss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(
-        f"[MEMORY] {label}: pid={os.getpid()}, "
-        f"peak_rss={max_rss_kib / 1024:.1f} MiB",
-        flush=True,
+    logger.debug(
+        "[MEMORY] %s: pid=%d, peak_rss=%.1f MiB",
+        label,
+        os.getpid(),
+        max_rss_kib / 1024,
     )
 
 
@@ -201,7 +269,7 @@ def _safe_save_figure(
     if parent:
         os.makedirs(parent, exist_ok=True)
     fig.savefig(path, dpi=dpi)
-    print(f"Saved: {path} (dpi={dpi})", flush=True)
+    logger.info("Saved: %s (dpi=%d)", path, dpi)
 
 
 def _compute_numeric_correlation(
@@ -747,7 +815,7 @@ def drop_correlated_by_explainability(
             decision_lines.append(line)
 
             if log_decisions:
-                print(line, flush=True)
+                logger.info(line)
 
     if decision_log_path is not None:
         parent = os.path.dirname(decision_log_path)
@@ -1270,6 +1338,7 @@ def filtrage_corr_var(
     log_correlation_decisions: bool = True,
     correlation_decision_log_path: str | None = None,
     keep_static: bool = True,
+    variable_number_log_path: str | os.PathLike | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
     """Remove correlated and zero-variance TSFEL features.
 
@@ -1309,6 +1378,10 @@ def filtrage_corr_var(
             When True, static features are excluded from variance and
             correlation filtering and always kept in the final result.
             Defaults to True.
+        variable_number_log_path:
+            Optional JSON journal path used to record the number of features
+            before filtering, after variance filtering, and after correlation
+            filtering. Defaults to ``log_variable_number.json``.
 
     Returns:
         A tuple containing:
@@ -1366,6 +1439,8 @@ def filtrage_corr_var(
             "No feature is available for correlation filtering."
         )
 
+    n_initial_features = len(feature_columns)
+
     missing_test_features = (
         set(feature_columns) - set(dataset_test.columns)
     )
@@ -1418,6 +1493,7 @@ def filtrage_corr_var(
         test_features=test_dynamic,
         threshold=0.0,
     )
+    n_after_variance_dynamic = len(var_features)
 
     # Step 2: Audit feature-family recognition before making decisions.
     audit_explainability_recognition(
@@ -1445,6 +1521,7 @@ def filtrage_corr_var(
     ]
 
     dynamic_selected = train_uncorrelated.columns.tolist()
+    n_after_correlation_dynamic = len(dynamic_selected)
 
     # Reinject preserved static features at the end.
     all_selected_features = [*static_in_features, *dynamic_selected]
@@ -1495,6 +1572,30 @@ def filtrage_corr_var(
     )
     logger.debug(
         "Number of remaining features: %d", len(all_selected_features)
+    )
+
+    _update_variable_number_log(
+        {
+            "initial_features": {
+                "dynamic": len(dynamic_features),
+                "static": len(static_in_features),
+                "total": n_initial_features,
+            },
+            "after_variance": {
+                "dynamic": n_after_variance_dynamic,
+                "static": len(static_in_features),
+                "total": n_after_variance_dynamic + len(static_in_features),
+                "variance_threshold": 0.0,
+            },
+            "after_correlation": {
+                "dynamic": n_after_correlation_dynamic,
+                "static": len(static_in_features),
+                "total": len(all_selected_features),
+                "correlation_threshold": float(corr_threshold),
+            },
+        },
+        log_path=variable_number_log_path,
+        reset=True,
     )
 
     return (
@@ -1947,7 +2048,7 @@ def grouper_colonnes_par_variable_source(
         if strict:
             raise ValueError(message)
 
-        print(f"[WARNING] {message}", flush=True)
+        logger.warning(message)
 
     empty_sources = [
         source
@@ -1956,10 +2057,9 @@ def grouper_colonnes_par_variable_source(
     ]
 
     if empty_sources:
-        print(
-            "[WARNING] No TSFEL output found for source feature(s): "
-            f"{empty_sources}",
-            flush=True,
+        logger.warning(
+            "No TSFEL output found for source feature(s): %s",
+            empty_sources,
         )
 
     return root_map
@@ -1986,17 +2086,18 @@ def _log_source_feature_groups(
         if source in root_map
     ]
 
-    print(
-        "[BLOCK GROUPING] "
-        f"{total_columns} TSFEL feature(s) grouped into "
-        f"{len(ordered_sources)} source variable(s):",
-        flush=True,
+    logger.info(
+        "[BLOCK GROUPING] %d TSFEL feature(s) grouped into "
+        "%d source variable(s):",
+        total_columns,
+        len(ordered_sources),
     )
 
     for source in ordered_sources:
-        print(
-            f"  - {source}: {len(root_map[source])} TSFEL feature(s)",
-            flush=True,
+        logger.info(
+            "  - %s: %d TSFEL feature(s)",
+            source,
+            len(root_map[source]),
         )
 
     return ordered_sources
@@ -2101,15 +2202,16 @@ def calculer_matrice_correlation(
     corr_pl = pl.from_pandas(corr_matrix, include_index=False)
 
     if correlated_pairs:
-        print(
-            f"Found {len(correlated_pairs)} feature pair(s) with "
-            f"|correlation| >= {threshold}:"
+        logger.warning(
+            "Found %d feature pair(s) with |correlation| >= %s:",
+            len(correlated_pairs),
+            threshold,
         )
         for col_a, col_b, corr_value in correlated_pairs:
-            print(f"  {col_a}  <->  {col_b}:  {corr_value:.4f}")
+            logger.info("  %s  <->  %s:  %.4f", col_a, col_b, corr_value)
     else:
-        print(
-            f"No feature pair with |correlation| >= {threshold}."
+        logger.info(
+            "No feature pair with |correlation| >= %s.", threshold
         )
 
     return corr_pl, correlated_pairs
@@ -2551,9 +2653,8 @@ def afficher_correlation_par_blocs(
                 f"{sorted(missing)}"
             )
         corr_matrix = corr_matrix.loc[ordered_cols, ordered_cols]
-        print(
+        logger.info(
             "[STEP 2.1] Reusing precomputed correlation matrix.",
-            flush=True,
         )
 
     normal_dir = (
@@ -2624,12 +2725,12 @@ def afficher_correlation_par_blocs(
             )
 
         for detail in static_details.itertuples(index=False):
-            print(
-                "[STATIC CORR] "
-                f"{detail.static_feature} x {detail.temporal_feature}: "
-                f"corr={detail.correlation:+.6f}, "
-                f"via {detail.temporal_tsfel_column!r}",
-                flush=True,
+            logger.info(
+                "[STATIC CORR] %s x %s: corr=%+.6f, via %r",
+                detail.static_feature,
+                detail.temporal_feature,
+                detail.correlation,
+                detail.temporal_tsfel_column,
             )
 
     # Individual images are now reserved for temporal x temporal blocks.
@@ -2654,10 +2755,9 @@ def afficher_correlation_par_blocs(
     if max_cross_heatmaps is not None:
         candidates = candidates[:max_cross_heatmaps]
 
-    print(
-        f"[STEP 2.2] Rendering {len(candidates)} temporal x temporal "
-        "cross-block pair(s).",
-        flush=True,
+    logger.info(
+        "[STEP 2.2] Rendering %d temporal x temporal cross-block pair(s).",
+        len(candidates),
     )
 
     normal_count = 0
@@ -2702,22 +2802,25 @@ def afficher_correlation_par_blocs(
                 )
             threshold_count += 1
 
-        print(
-            f"[BLOCK {rank}/{len(candidates)}] "
-            f"{source_a} x {source_b}: "
-            f"{len(root_map[source_a])} x "
-            f"{len(root_map[source_b])}, "
-            f"max |corr|={max_abs:.4f}",
-            flush=True,
+        logger.info(
+            "[BLOCK %d/%d] %s x %s: %d x %d, max |corr|=%.4f",
+            rank,
+            len(candidates),
+            source_a,
+            source_b,
+            len(root_map[source_a]),
+            len(root_map[source_b]),
+            max_abs,
         )
         del sub_corr
 
-    print(
+    logger.info(
         "[STEP 2] Correlation figures complete: "
-        f"Normal temporal blocks={normal_count}, "
-        f"Threshold temporal blocks={threshold_count}, "
-        f"static summary={'generated' if static_roots and temporal_roots else 'not generated'}.",
-        flush=True,
+        "Normal temporal blocks=%d, Threshold temporal blocks=%d, "
+        "static summary=%s.",
+        normal_count,
+        threshold_count,
+        "generated" if static_roots and temporal_roots else "not generated",
     )
 
 def generer_map_correlation_complete(
@@ -2795,13 +2898,13 @@ def generer_map_correlation_complete(
                 f"{sorted(missing)}"
             )
         corr_matrix = corr_matrix.loc[ordered_cols, ordered_cols]
-        print("[STEP 3.1] Reusing precomputed correlation matrix.", flush=True)
+        logger.info("[STEP 3.1] Reusing precomputed correlation matrix.")
 
     n_features = len(ordered_cols)
     if n_features <= max_full_heatmap_features:
-        print(
-            f"[STEP 3.2] Rendering complete map ({n_features} features)...",
-            flush=True,
+        logger.info(
+            "[STEP 3.2] Rendering complete map (%d features)...",
+            n_features,
         )
         fig, ax = plt.subplots(figsize=(16, 14))
         sns.heatmap(
@@ -2838,11 +2941,13 @@ def generer_map_correlation_complete(
             "all_correlations",
         )
         os.makedirs(blocks_dir, exist_ok=True)
-        print(
-            f"[STEP 3.2] Complete map skipped: {n_features} features exceed "
-            f"the safe limit of {max_full_heatmap_features}. "
-            f"Generating at most {max_block_heatmaps} block map(s).",
-            flush=True,
+        logger.info(
+            "[STEP 3.2] Complete map skipped: %d features exceed "
+            "the safe limit of %d. "
+            "Generating at most %d block map(s).",
+            n_features,
+            max_full_heatmap_features,
+            max_block_heatmaps,
         )
 
         candidates: list[tuple[float, str, str]] = []
@@ -2958,7 +3063,7 @@ def estimate_correlation_threshold(
     if corr_matrix is None:
         _, corr_matrix = _compute_numeric_correlation(df)
     else:
-        print("[STEP 1.1] Reusing precomputed correlation matrix.", flush=True)
+        logger.info("[STEP 1.1] Reusing precomputed correlation matrix.")
 
     thresholds = np.arange(0.05, 1.0, threshold_step)
     vars_remaining: list[int] = []
@@ -3013,10 +3118,10 @@ def estimate_correlation_threshold(
     del fig, ax
     gc.collect()
 
-    print(f"Estimated optimal threshold: {elbow_threshold:.2f}", flush=True)
-    print(
-        f"Remaining variables at this threshold: {vars_remaining[elbow_idx]}",
-        flush=True,
+    logger.info("Estimated optimal threshold: %.2f", elbow_threshold)
+    logger.info(
+        "Remaining variables at this threshold: %d",
+        vars_remaining[elbow_idx],
     )
     return elbow_threshold, results_df
 
@@ -3063,17 +3168,18 @@ def generate_correlation_analysis(
     """
     os.makedirs(output_folder, exist_ok=True)
 
-    print("=" * 60, flush=True)
-    print("Preparing reusable correlation matrix...", flush=True)
-    print("=" * 60, flush=True)
-    numeric_df, corr_matrix_pd = _compute_numeric_correlation(df)
+    logger.info("=" * 60)
+    logger.info("Preparing reusable correlation matrix...")
+    logger.info("=" * 60)
 
-    print("=" * 60, flush=True)
-    print(
-        "Step 1: Estimating optimal correlation threshold...",
-        flush=True,
-    )
-    print("=" * 60, flush=True)
+    static_set = set(static_features) if static_features else set()
+    dynamic_cols = [col for col in df.columns if col not in static_set]
+
+    numeric_df, corr_matrix_pd = _compute_numeric_correlation(df[dynamic_cols])
+
+    logger.info("=" * 60)
+    logger.info("Step 1: Estimating optimal correlation threshold...")
+    logger.info("=" * 60)
     estimated_threshold, elbow_results = estimate_correlation_threshold(
         df=numeric_df,
         threshold_step=threshold_step,
@@ -3093,12 +3199,9 @@ def generate_correlation_analysis(
             f"got {final_threshold}."
         )
 
-    print("\n" + "=" * 60, flush=True)
-    print(
-        "Step 2: Generating Normal_Mode and Threshold_Mode blocks...",
-        flush=True,
-    )
-    print("=" * 60, flush=True)
+    logger.info("\n" + "=" * 60)
+    logger.info("Step 2: Generating Normal_Mode and Threshold_Mode blocks...")
+    logger.info("=" * 60)
 
     df_pl = pl.from_pandas(numeric_df, include_index=False)
     afficher_correlation_par_blocs(
@@ -3118,10 +3221,10 @@ def generate_correlation_analysis(
     # unmasked and a threshold-masked version in the corresponding folders.
     n_features = corr_matrix_pd.shape[0]
     if n_features <= max_full_heatmap_features:
-        print(
-            f"[GLOBAL MAP] {n_features} features <= "
-            f"{max_full_heatmap_features}: rendering both modes.",
-            flush=True,
+        logger.info(
+            "[GLOBAL MAP] %d features <= %d: rendering both modes.",
+            n_features,
+            max_full_heatmap_features,
         )
         for mode, threshold_value in (
             ("Normal_Mode", None),
@@ -3175,25 +3278,19 @@ def generate_correlation_analysis(
             del fig, ax, image, matrix
             gc.collect()
     else:
-        print(
-            f"[GLOBAL MAP] Skipped: {n_features} > "
-            f"{max_full_heatmap_features}.",
-            flush=True,
+        logger.info(
+            "[GLOBAL MAP] Skipped: %d > %d.",
+            n_features,
+            max_full_heatmap_features,
         )
 
-    print("\n" + "=" * 60, flush=True)
-    print("Analysis complete!", flush=True)
-    print(f"  Threshold used: {final_threshold:.2f}", flush=True)
-    print(
-        f"  Normal maps: {output_folder}/Normal_Mode/",
-        flush=True,
-    )
-    print(
-        f"  Threshold maps: {output_folder}/Threshold_Mode/",
-        flush=True,
-    )
+    logger.info("\n" + "=" * 60)
+    logger.info("Analysis complete!")
+    logger.info("  Threshold used: %.2f", final_threshold)
+    logger.info("  Normal maps: %s/Normal_Mode/", output_folder)
+    logger.info("  Threshold maps: %s/Threshold_Mode/", output_folder)
     _log_memory("analysis complete")
-    print("=" * 60, flush=True)
+    logger.info("=" * 60)
 
     return {
         "optimal_threshold": final_threshold,
@@ -3384,7 +3481,7 @@ def collect_boruta_features_for_fold(
     """Run Boruta for one fold and return the selected feature list.
 
     This helper is used in the first phase of cross-fold Boruta selection:
-    each fold runs correlation/variance filtering followed by Boruta, and the
+    each fold runs Boruta, and the
     resulting feature list is collected. After all folds have been processed,
     the frequency of each feature across folds is analysed to determine a
     unified feature set.
@@ -3416,9 +3513,12 @@ def collect_boruta_features_for_fold(
     patient_col = kwargs["patient_col"]
     target_col = kwargs["target_col"]
     train_init_tsfel = kwargs["train_init"]
-    static_feats = kwargs.get("static_feats", [])
+    static_feats = kwargs.get("static_feats", []) or []
     keep_static = kwargs.get("keep_static", True)
     boruta_filter = kwargs.get("boruta_filter", False)
+    variable_number_log_path = kwargs.get(
+        "variable_number_log_path"
+    )
 
     # Retrieve patient identifiers for the current fold.
     train_patients = (
@@ -3470,6 +3570,27 @@ def collect_boruta_features_for_fold(
         keep_static=keep_static,
     )
 
+    selected_static = set(boruta_features).intersection(static_feats)
+    n_static_selected = len(selected_static)
+    n_dynamic_selected = len(boruta_features) - n_static_selected
+
+    _update_variable_number_log(
+        {
+            "boruta": {
+                "perc": 90,
+                "max_iter": 100,
+                "folds": {
+                    str(fold_idx + 1): {
+                        "dynamic": n_dynamic_selected,
+                        "static": n_static_selected,
+                        "total": len(boruta_features),
+                    }
+                },
+            }
+        },
+        log_path=variable_number_log_path,
+    )
+
     return list(boruta_features)
 
 
@@ -3512,6 +3633,9 @@ def resolve_boruta_crossfold_features(
         frequency threshold across all folds.
     """
     boruta_filter = kwargs.get("boruta_filter", False)
+    variable_number_log_path = kwargs.get(
+        "variable_number_log_path"
+    )
 
     boruta_crossfold_path = exp.get_boruta_crossfold_path()
     
@@ -3522,6 +3646,24 @@ def resolve_boruta_crossfold_features(
         logger.debug(
             "BORUTA: Loaded %d features from cache.", len(features)
         )
+
+        static_feats = set(kwargs.get("static_feats", []) or [])
+        n_static_selected = len(set(features).intersection(static_feats))
+
+        _update_variable_number_log(
+            {
+                "boruta": {
+                    "final": {
+                        "dynamic": len(features) - n_static_selected,
+                        "static": n_static_selected,
+                        "total": len(features),
+                        "loaded_from_cache": True,
+                    }
+                }
+            },
+            log_path=variable_number_log_path,
+        )
+
         return features
 
     if not boruta_filter:
@@ -3575,6 +3717,32 @@ def resolve_boruta_crossfold_features(
         fold_feature_lists=fold_boruta_feature_lists,
         n_folds=5,
         frequency_threshold=boruta_freq_threshold,
+    )
+
+    static_feats = set(kwargs.get("static_feats", []) or [])
+    n_static_selected = len(
+        set(boruta_crossfold_features).intersection(static_feats)
+    )
+
+    _update_variable_number_log(
+        {
+            "boruta": {
+                "frequency_threshold": float(boruta_freq_threshold),
+                "minimum_folds_required": int(
+                    np.ceil(boruta_freq_threshold * 5)
+                ),
+                "final": {
+                    "dynamic": (
+                        len(boruta_crossfold_features)
+                        - n_static_selected
+                    ),
+                    "static": n_static_selected,
+                    "total": len(boruta_crossfold_features),
+                    "loaded_from_cache": False,
+                },
+            }
+        },
+        log_path=variable_number_log_path,
     )
 
     # Save the unified feature list.

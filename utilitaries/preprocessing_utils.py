@@ -7,8 +7,11 @@ downsampling, correlation/variance filtering, and Boruta feature selection.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import joblib
 import numpy as np
@@ -960,25 +963,25 @@ def process_time_fold(
     expected_length = kwargs["expected_length"]
     exp = kwargs["exp"]
 
-    print(
-        f"\n[TIME FOLD {fold_idx + 1}/5] === process_time_fold START ===",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d/5] === process_time_fold START ===, "
+        "balance_method=%r, expected_length=%d, final_features count=%d",
+        fold_idx + 1,
+        balance_method,
+        expected_length,
+        len(final_features),
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] balance_method={balance_method!r}, "
-        f"expected_length={expected_length}, "
-        f"final_features count={len(final_features)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] train_init_df rows=%d, holdout_init_df rows=%d",
+        fold_idx + 1,
+        len(train_init_df),
+        len(holdout_init_df),
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] train_init_df rows={len(train_init_df)}, "
-        f"holdout_init_df rows={len(holdout_init_df)}",
-        flush=True,
-    )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] train_idx length={len(train_idx)}, "
-        f"test_idx length={len(test_idx)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] train_idx length=%d, test_idx length=%d",
+        fold_idx + 1,
+        len(train_idx),
+        len(test_idx),
     )
 
     # Extract and sort train, validation, and holdout observations.
@@ -986,23 +989,28 @@ def process_time_fold(
     test_df = train_init_df[test_idx].sort([patient_col, time_col])
     holdout_df = holdout_init_df.sort([patient_col, time_col])
 
-    print(
-        f"[TIME FOLD {fold_idx + 1}] After split -> train_df rows={len(train_df)}, "
-        f"test_df rows={len(test_df)}, holdout_df rows={len(holdout_df)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] After split -> train_df rows=%d, "
+        "test_df rows=%d, holdout_df rows=%d",
+        fold_idx + 1,
+        len(train_df),
+        len(test_df),
+        len(holdout_df),
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] After split -> train unique patients="
-        f"{train_df[patient_col].n_unique()}, "
-        f"test unique patients={test_df[patient_col].n_unique()}, "
-        f"holdout unique patients={holdout_df[patient_col].n_unique()}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] After split -> train unique patients=%d, "
+        "test unique patients=%d, holdout unique patients=%d",
+        fold_idx + 1,
+        train_df[patient_col].n_unique(),
+        test_df[patient_col].n_unique(),
+        holdout_df[patient_col].n_unique(),
     )
 
     # Apply custom patient-level balancing before sequence construction.
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Entering balancing step with method={balance_method!r}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] Entering balancing step with method=%r",
+        fold_idx + 1,
+        balance_method,
     )
     if balance_method in ["downsampling_homemade", ""]:
         train_df, _ = equilibrer_dataset_tabulaire(
@@ -1012,46 +1020,52 @@ def process_time_fold(
             method=balance_method,
             seed=seed,
         )
-        print(
-            f"[TIME FOLD {fold_idx + 1}] After balancing -> train_df rows={len(train_df)}, "
-            f"unique patients={train_df[patient_col].n_unique()}",
-            flush=True,
+        logger.debug(
+            "[TIME FOLD %d] After balancing -> train_df rows=%d, "
+            "unique patients=%d",
+            fold_idx + 1,
+            len(train_df),
+            train_df[patient_col].n_unique(),
         )
     else:
-        print(
-            f"[TIME FOLD {fold_idx + 1}] Skipping early balancing (method={balance_method!r}), "
-            f"will apply imbalanced-learn after build_sequences.",
-            flush=True,
+        logger.debug(
+            "[TIME FOLD %d] Skipping early balancing (method=%r), "
+            "will apply imbalanced-learn after build_sequences.",
+            fold_idx + 1,
+            balance_method,
         )
 
     # Fit scaling on training rows and transform validation and holdout rows.
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Entering scaling step...",
-        flush=True,
-    )
+    logger.debug("[TIME FOLD %d] Entering scaling step...", fold_idx + 1)
     train_df, test_df, holdout_df = scaling(
         train_df,
         test_df,
         holdout_df,
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] After scaling -> train_df rows={len(train_df)}, "
-        f"test_df rows={len(test_df)}, holdout_df rows={len(holdout_df)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] After scaling -> train_df rows=%d, "
+        "test_df rows=%d, holdout_df rows=%d",
+        fold_idx + 1,
+        len(train_df),
+        len(test_df),
+        len(holdout_df),
     )
 
     # Guarantee the same alphabetical feature order for every sequence.
     ordered_feature_names = sorted(list(final_features))
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Ordered feature names ({len(ordered_feature_names)}): "
-        f"{ordered_feature_names}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] Ordered feature names (%d): %s",
+        fold_idx + 1,
+        len(ordered_feature_names),
+        ordered_feature_names,
     )
 
     # Convert patient observations into fixed-length 3D sequences.
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for TRAIN (patients={train_df[patient_col].n_unique()})...",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] Entering build_sequences for TRAIN "
+        "(patients=%d)...",
+        fold_idx + 1,
+        train_df[patient_col].n_unique(),
     )
     X_train_fold, y_train_fold = build_sequences(
         train_df,
@@ -1060,15 +1074,20 @@ def process_time_fold(
         expected_length,
         ordered_feature_names,
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] build_sequences TRAIN DONE -> X_train shape={X_train_fold.shape}, "
-        f"y_train positives={int(y_train_fold.sum())}/{len(y_train_fold)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] build_sequences TRAIN DONE -> X_train shape=%s, "
+        "y_train positives=%d/%d",
+        fold_idx + 1,
+        X_train_fold.shape,
+        int(y_train_fold.sum()),
+        len(y_train_fold),
     )
 
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for VALIDATION (patients={test_df[patient_col].n_unique()})...",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] Entering build_sequences for VALIDATION "
+        "(patients=%d)...",
+        fold_idx + 1,
+        test_df[patient_col].n_unique(),
     )
     X_test_fold, y_test_fold = build_sequences(
         test_df,
@@ -1077,15 +1096,20 @@ def process_time_fold(
         expected_length,
         ordered_feature_names,
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] build_sequences VALIDATION DONE -> X_test shape={X_test_fold.shape}, "
-        f"y_test positives={int(y_test_fold.sum())}/{len(y_test_fold)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] build_sequences VALIDATION DONE -> X_test shape=%s, "
+        "y_test positives=%d/%d",
+        fold_idx + 1,
+        X_test_fold.shape,
+        int(y_test_fold.sum()),
+        len(y_test_fold),
     )
 
-    print(
-        f"[TIME FOLD {fold_idx + 1}] Entering build_sequences for HOLDOUT (patients={holdout_df[patient_col].n_unique()})...",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] Entering build_sequences for HOLDOUT "
+        "(patients=%d)...",
+        fold_idx + 1,
+        holdout_df[patient_col].n_unique(),
     )
     X_holdout_fold, y_holdout = build_sequences(
         holdout_df,
@@ -1094,10 +1118,13 @@ def process_time_fold(
         expected_length,
         ordered_feature_names,
     )
-    print(
-        f"[TIME FOLD {fold_idx + 1}] build_sequences HOLDOUT DONE -> X_holdout shape={X_holdout_fold.shape}, "
-        f"y_holdout positives={int(y_holdout.sum())}/{len(y_holdout)}",
-        flush=True,
+    logger.debug(
+        "[TIME FOLD %d] build_sequences HOLDOUT DONE -> X_holdout shape=%s, "
+        "y_holdout positives=%d/%d",
+        fold_idx + 1,
+        X_holdout_fold.shape,
+        int(y_holdout.sum()),
+        len(y_holdout),
     )
 
     # Preserve the patient order used by the sequence builder.
@@ -1162,9 +1189,10 @@ def process_time_fold(
         groups_fold = patients_time_fold
 
     # Count and replace remaining NaN values before training and inference.
-    print(
-        "Total number of NaN values in the training fold: "
-        f"{np.isnan(X_train_fold).sum()}"
+    logger.debug(
+        "[TIME FOLD %d] Total number of NaN values in the training fold: %d",
+        fold_idx + 1,
+        np.isnan(X_train_fold).sum(),
     )
 
     X_train_fold = np.nan_to_num(X_train_fold, nan=0.0)

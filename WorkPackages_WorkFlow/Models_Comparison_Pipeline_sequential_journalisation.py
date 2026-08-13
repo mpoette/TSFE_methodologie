@@ -148,14 +148,12 @@ pl.Config.set_tbl_cols(-1)
 
 mode_names = ["score", "wp1", "wp2", "wp3"]
 mode_names = ["wp1","score"]
-# mode_names = ["test_robustesse"]
 # mode_names = ["score"]
-mode_names = ["end_game"]
-mode_names = ["TSFEL"]
-n_jobs = -1
+mode_names = ["LR"]
 RUN_COMPARISON = False
-RUN_TRAINING = True
-RUN_LASSO = True
+RUN_TRAINING = False
+RUN_LASSO = False
+RUN_INTERPRETABILITY = True
 RUN_TEST = True
 POPULATION = "Tout"
 SAVE_FIGURE = True
@@ -180,16 +178,16 @@ for mode_run in mode_names:
         model_names = ["IGS2"]
         stratify_modes = ["target_col"]
         optuna_run_options = [False]
-        feature_modes = ["Mode IGS2"]
+        feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
-    elif mode_run == "SVC_LR":
+    elif mode_run == "LR":
         mode_duplicates = "prio_first"
         target_labels = ["Survie à 28 jours"]
-        model_names = ["SVC TSFEL", "Logistic Regression Lasso TSFEL"]
+        model_names = ["Logistic Regression Lasso TSFEL"]
         stratify_modes = ["target_col"]
         WINDOWING_MODE = "24h début réanimation sans remplissage"
-        optuna_run_options = [False, True]
-        feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
+        optuna_run_options = [True]
+        feature_modes = ["Mode Commonly Used Without pmsi"]
         balancing_methods = ["Aucune Méthode"]
     elif mode_run == "TSFEL":
         mode_duplicates = "prio_first"
@@ -232,6 +230,10 @@ for mode_run in mode_names:
         for stratification_choice in stratify_modes:
             STRATIFY_MODE = stratification_choice
             for feature_mode in feature_modes:
+                if feature_mode == "Mode IGS2":
+                    n_jobs = -1
+                else:
+                    n_jobs = 8
                 for model_choice in model_names:
                     if model_choice in ["Logistic Regression Lasso TSFEL"]:
                         optuna_choices = [False]
@@ -503,7 +505,6 @@ for mode_run in mode_names:
                                         target_col,
                                         *categorical_source_columns,
                                     ]).unique()
-                                    n_jobs = 8
 
                                 (
                                     df_clean_3,
@@ -540,6 +541,7 @@ for mode_run in mode_names:
                                         categorical_source_columns=tableone_categorical_columns,
                                         config_mode_name=config_mode.name,
                                         output_dir=tableone_output_dir,
+                                        df_static_source = pl.read_parquet(os.path.join(DATASET_PATH, "df_static_full_clean.parquet"))
                                     )
 
                                 X_init = df_clean_3.select(final_features).to_numpy()
@@ -879,6 +881,7 @@ for mode_run in mode_names:
                                                 static_features=static_feats,
                                                 keep_static=KEEP_STATIC,
                                                 log_correlation_decisions = False,
+                                                variable_number_log_path = compare_figs_dir / Path("log_variable_number.json")
                                             )
                                         )
                                         print(
@@ -2000,7 +2003,7 @@ for mode_run in mode_names:
 
                                     "e90_oof": calibration_stats["e90"],
 
-                                    "eMax_oof": calibration_stats["eMax"],
+                                    # "eMax_oof": calibration_stats["eMax"],
 
                                     # =========================================================
                                     # Complete fold information
@@ -2063,11 +2066,19 @@ for mode_run in mode_names:
 
                                     holdout_probas_uncalib_per_model = []
                                     holdout_probas_calib_per_model = []
-                                    fold_models_for_shap = []
+
+                                    # Fold-specific TSFEL estimators used later for interpretability.
+                                    fold_models_for_interpretability = []
+
+                                    # ============================================================
+                                    # HOLDOUT PREDICTIONS FOR EACH FOLD MODEL
+                                    # ============================================================
 
                                     for holdout_fold_idx in range(5):
                                         X_test_holdout_fold = (
-                                            folds_X_holdout[holdout_fold_idx]
+                                            folds_X_holdout[
+                                                holdout_fold_idx
+                                            ]
                                         )
 
                                         model_path = exp.get_model_path(
@@ -2079,6 +2090,10 @@ for mode_run in mode_names:
                                             ),
                                         )
 
+                                        # --------------------------------------------------------
+                                        # Clinical score mode
+                                        # --------------------------------------------------------
+
                                         if is_score_mode:
                                             fold_uncalibrated_probabilities = (
                                                 np.asarray(
@@ -2086,9 +2101,14 @@ for mode_run in mode_names:
                                                     dtype=float,
                                                 ).reshape(-1)
                                             )
+
                                             fold_calibrated_probabilities = (
                                                 fold_uncalibrated_probabilities.copy()
                                             )
+
+                                        # --------------------------------------------------------
+                                        # Temporal models
+                                        # --------------------------------------------------------
 
                                         elif (
                                             config_models.models_name
@@ -2128,6 +2148,10 @@ for mode_run in mode_names:
                                                 )
                                             )
 
+                                        # --------------------------------------------------------
+                                        # TSFEL models
+                                        # --------------------------------------------------------
+
                                         elif (
                                             config_models.extraction_type
                                             == "TSFEL"
@@ -2148,7 +2172,7 @@ for mode_run in mode_names:
                                                 )
                                             )
 
-                                            fold_models_for_shap.append(
+                                            fold_models_for_interpretability.append(
                                                 joblib.load(model_path)
                                             )
 
@@ -2157,6 +2181,10 @@ for mode_run in mode_names:
                                                 "Unsupported holdout model: "
                                                 f"{config_models.models_name}"
                                             )
+
+                                        # --------------------------------------------------------
+                                        # Retrieve uncalibrated / calibrated probabilities
+                                        # --------------------------------------------------------
 
                                         if not is_score_mode:
                                             fold_uncalibrated_probabilities = (
@@ -2168,8 +2196,10 @@ for mode_run in mode_names:
                                                 ).reshape(-1)
                                             )
 
-                                            raw_fold_calibrated = result.get(
-                                                "probas_calib"
+                                            raw_fold_calibrated = (
+                                                result.get(
+                                                    "probas_calib"
+                                                )
                                             )
 
                                             if raw_fold_calibrated is None:
@@ -2185,7 +2215,9 @@ for mode_run in mode_names:
                                                 )
 
                                         if (
-                                            len(fold_uncalibrated_probabilities)
+                                            len(
+                                                fold_uncalibrated_probabilities
+                                            )
                                             != len(y_test_holdout)
                                         ):
                                             raise ValueError(
@@ -2196,9 +2228,14 @@ for mode_run in mode_names:
                                         holdout_probas_uncalib_per_model.append(
                                             fold_uncalibrated_probabilities
                                         )
+
                                         holdout_probas_calib_per_model.append(
                                             fold_calibrated_probabilities
                                         )
+
+                                    # ============================================================
+                                    # ENSEMBLE OF THE FIVE FOLD MODELS
+                                    # ============================================================
 
                                     holdout_probas_uncalib_per_model = (
                                         np.stack(
@@ -2206,6 +2243,7 @@ for mode_run in mode_names:
                                             axis=0,
                                         )
                                     )
+
                                     holdout_probas_calib_per_model = (
                                         np.stack(
                                             holdout_probas_calib_per_model,
@@ -2218,157 +2256,249 @@ for mode_run in mode_names:
                                             axis=0
                                         )
                                     )
+
                                     holdout_probas_calib = (
                                         holdout_probas_calib_per_model.mean(
                                             axis=0
                                         )
                                     )
 
+                                    # ============================================================
+                                    # CANONICAL HOLDOUT ORDER
+                                    # ============================================================
+
+                                    # Sort the holdout by patient ID before any holdout evaluation.
+                                    #
+                                    # This provides a deterministic patient order across experiments.
+                                    # When two models are evaluated on the same holdout population and
+                                    # bootstrap uses the same random seed, identical bootstrap indices
+                                    # therefore correspond to identical patients.
+                                    holdout_patient_ids = np.asarray(
+                                        holdout_patient_ids
+                                    ).reshape(-1)
+
+                                    y_test_holdout = np.asarray(
+                                        y_test_holdout
+                                    ).reshape(-1)
+
+                                    holdout_sort_idx = np.argsort(
+                                        holdout_patient_ids
+                                    )
+
+                                    holdout_patient_ids = (
+                                        holdout_patient_ids[
+                                            holdout_sort_idx
+                                        ]
+                                    )
+
+                                    y_test_holdout = (
+                                        y_test_holdout[
+                                            holdout_sort_idx
+                                        ]
+                                    )
+
+                                    holdout_probas_uncalib = (
+                                        holdout_probas_uncalib[
+                                            holdout_sort_idx
+                                        ]
+                                    )
+
+                                    holdout_probas_calib = (
+                                        holdout_probas_calib[
+                                            holdout_sort_idx
+                                        ]
+                                    )
+
+                                    # Axis 0 = fold model
+                                    # Axis 1 = patient
+                                    holdout_probas_uncalib_per_model = (
+                                        holdout_probas_uncalib_per_model[
+                                            :,
+                                            holdout_sort_idx,
+                                        ]
+                                    )
+
+                                    holdout_probas_calib_per_model = (
+                                        holdout_probas_calib_per_model[
+                                            :,
+                                            holdout_sort_idx,
+                                        ]
+                                    )
+
                                     holdout_probabilities = (
                                         holdout_probas_calib
-                                        if effective_calibration
+                                        if calibration.value
                                         else holdout_probas_uncalib
                                     )
 
-                                    # Generate the same performance figures as for OOF,
-                                    # but in a dedicated holdout directory.
-                                    holdout_figure_results = sfu.plot_all_figs(
-                                        probas_uncalib=(
-                                            holdout_probas_uncalib
-                                        ),
-                                        probas_calib=(
-                                            holdout_probas_calib
-                                            if effective_calibration
-                                            else None
-                                        ),
-                                        y_test=y_test_holdout,
-                                        config_models=config_models,
-                                        calibration=effective_calibration,
-                                        calibration_mode=(
-                                            calibration_mode.value
-                                        ),
-                                        save_figure=save_figure.value,
-                                        output_dir=holdout_output_dir,
-                                        transparent=config_transparent,
-                                    )
-                                    if not is_score_mode:
-                                        # 1. Generate train probabilities for each fold
-                                        #    (each model predicts on its own training set)
-                                        train_probas_uncalib_per_fold = []
-                                        train_probas_calib_per_fold = []
+                                    # ============================================================
+                                    # HOLDOUT PERFORMANCE FIGURES
+                                    # ============================================================
 
-                                        for tr_fold_idx in range(5):
-                                            _model_path = exp.get_model_path(
-                                                config_models.models_name,
-                                                tr_fold_idx,
-                                                extension,
-                                                uses_optuna_config=uses_optuna_config,
-                                            )
-
-                                            if config_models.models_name == "InceptionTimeModified":
-                                                _result = evaluate.evaluate_inception_fold(
-                                                    folds_X_train[tr_fold_idx],
-                                                    folds_y_train[tr_fold_idx],
-                                                    _model_path,
-                                                )
-                                            elif config_models.models_name == "LstmTimeModified":
-                                                _result = evaluate.evaluate_lstm_fold(
-                                                    tr_fold_idx,
-                                                    folds_X_train[tr_fold_idx],
-                                                    folds_y_train[tr_fold_idx],
-                                                    _model_path,
-                                                )
-                                            elif config_models.models_name == "VanillaTransformerModified":
-                                                _result = evaluate.evaluate_vanilla_transformer_fold(
-                                                    tr_fold_idx,
-                                                    folds_X_train[tr_fold_idx],
-                                                    folds_y_train[tr_fold_idx],
-                                                    _model_path,
-                                                )
-                                            elif config_models.extraction_type == "TSFEL":
-                                                _result = evaluate.evaluate_tsfel_fold(
-                                                    tr_fold_idx,
-                                                    folds_X_train[tr_fold_idx],
-                                                    folds_X_train[tr_fold_idx],
-                                                    folds_y_train[tr_fold_idx],
-                                                    folds_y_train[tr_fold_idx],
-                                                    _model_path,
-                                                    calibration.value,
-                                                )
-                                            else:
-                                                continue
-
-                                            train_probas_uncalib_per_fold.append(
-                                                np.asarray(_result["probas_uncalib"], dtype=float).ravel()
-                                            )
-                                            train_probas_calib_per_fold.append(
-                                                np.asarray(_result["probas_calib"], dtype=float).ravel()
-                                            )
-
-                                        # 2. Pool train probabilities (concatenation, same strategy as OOF)
-                                        all_train_probas_uncalib = np.concatenate(train_probas_uncalib_per_fold)
-                                        all_train_probas_calib = np.concatenate(train_probas_calib_per_fold)
-                                        all_train_y = np.concatenate(
-                                            [folds_y_train[i] for i in range(5)]
+                                    holdout_figure_results = (
+                                        sfu.plot_all_figs(
+                                            probas_uncalib=(
+                                                holdout_probas_uncalib
+                                            ),
+                                            probas_calib=(
+                                                holdout_probas_calib
+                                                if calibration.value
+                                                else None
+                                            ),
+                                            y_test=(
+                                                y_test_holdout
+                                            ),
+                                            config_models=(
+                                                config_models
+                                            ),
+                                            calibration=(
+                                                calibration.value
+                                            ),
+                                            calibration_mode=(
+                                                calibration_mode.value
+                                                if calibration.value
+                                                else ""
+                                            ),
+                                            save_figure=(
+                                                save_figure.value
+                                            ),
+                                            output_dir=(
+                                                holdout_output_dir
+                                            ),
+                                            transparent=(
+                                                config_transparent
+                                            ),
                                         )
+                                    )
 
-                                        # 3. Plot calibration curves: OOF (raw/calibrated) vs holdout (raw/calibrated)
+                                    # ============================================================
+                                    # CALIBRATION CURVES: OOF VS HOLDOUT
+                                    # ============================================================
+
+                                    if not is_score_mode:
+                                        curve_specs = [
+                                            {
+                                                "probas": (
+                                                    all_probas_uncalib
+                                                ),
+                                                "y_true": (
+                                                    all_y_validation_global
+                                                ),
+                                                "name": "Uncalibrated",
+                                                "extra_info": "OOF",
+                                            },
+                                            {
+                                                "probas": (
+                                                    holdout_probas_uncalib
+                                                ),
+                                                "y_true": (
+                                                    y_test_holdout
+                                                ),
+                                                "name": "Uncalibrated",
+                                                "extra_info": "holdout",
+                                            },
+                                        ]
+
+                                        if calibration.value:
+                                            curve_specs.insert(
+                                                1,
+                                                {
+                                                    "probas": (
+                                                        all_probas_calib
+                                                    ),
+                                                    "y_true": (
+                                                        all_y_validation_global
+                                                    ),
+                                                    "name": "Calibrated",
+                                                    "extra_info": "OOF",
+                                                },
+                                            )
+
+                                            curve_specs.append(
+                                                {
+                                                    "probas": (
+                                                        holdout_probas_calib
+                                                    ),
+                                                    "y_true": (
+                                                        y_test_holdout
+                                                    ),
+                                                    "name": "Calibrated",
+                                                    "extra_info": "holdout",
+                                                }
+                                            )
+
                                         sfu.plot_calibration_curves(
-                                            curve_specs=[
-                                                {
-                                                    "probas": all_probas_uncalib,
-                                                    "y_true": all_y_validation_global,
-                                                    "name": "Uncalibrated",
-                                                    "extra_info": "OOF",
-                                                },
-                                                {
-                                                    "probas": all_probas_calib,
-                                                    "y_true": all_y_validation_global,
-                                                    "name": "Calibrated",
-                                                    "extra_info": "OOF",
-                                                },
-                                                {
-                                                    "probas": holdout_probas_uncalib,
-                                                    "y_true": y_test_holdout,
-                                                    "name": "Uncalibrated",
-                                                    "extra_info": "holdout",
-                                                },
-                                                {
-                                                    "probas": holdout_probas_calib,
-                                                    "y_true": y_test_holdout,
-                                                    "name": "Calibrated",
-                                                    "extra_info": "holdout",
-                                                },
-                                            ],
-                                            y_true=all_y_validation_global,
-                                            title="Calibration: OOF vs Holdout",
-                                            save_figure=save_figure.value,
-                                            output_dir=holdout_output_dir,
-                                            filename="calibration_oof_vs_holdout.png",
-                                            transparent=config_transparent,
+                                            curve_specs=(
+                                                curve_specs
+                                            ),
+                                            y_true=(
+                                                all_y_validation_global
+                                            ),
+                                            title=(
+                                                "Calibration: OOF vs Holdout"
+                                            ),
+                                            save_figure=(
+                                                save_figure.value
+                                            ),
+                                            output_dir=(
+                                                holdout_output_dir
+                                            ),
+                                            filename=(
+                                                "calibration_oof_vs_holdout.png"
+                                            ),
+                                            transparent=(
+                                                config_transparent
+                                            ),
                                         )
 
                                         plt.close("all")
 
+                                    # ============================================================
+                                    # HOLDOUT METRICS + BOOTSTRAP
+                                    # ============================================================
+
                                     # F1 and MCC are evaluated at the threshold selected
                                     # exclusively from pooled OOF predictions.
                                     holdout_metric_functions = {
-                                        "auc": roc_auc_score,
-                                        "auprc": average_precision_score,
-                                        "brier": brier_score_loss,
-                                        "f1": partial(
-                                            postproc.f1_at_fixed_threshold,
-                                            threshold=best_t,
-                                        ),
-                                        "mcc": partial(
-                                            postproc.mcc_at_fixed_threshold,
-                                            threshold=best_t,
-                                        ),
-                                    }
+                                         "auc": (
+                                             roc_auc_score
+                                         ),
+                                         "auprc": (
+                                             average_precision_score
+                                         ),
+                                         "brier": (
+                                             brier_score_loss
+                                         ),
+                                         "f1": partial(
+                                             postproc.f1_at_fixed_threshold,
+                                             threshold=best_t,
+                                         ),
+                                         "mcc": partial(
+                                             postproc.mcc_at_fixed_threshold,
+                                             threshold=best_t,
+                                         ),
+                                         "calibration_slope": (
+                                             postproc.calibration_slope
+                                         ),
+                                         "calibration_intercept": (
+                                             postproc.calibration_intercept
+                                         ),
+                                         "ici": (
+                                             postproc.ici_score
+                                         ),
+                                         "e90": (
+                                             postproc.e90_score
+                                         ),
+                                        #  "eMax": (
+                                        #      postproc.eMax_score
+                                        #  ),
+                                     }
 
                                     holdout_bootstrap_results = (
                                         postproc.bootstrap_holdout_metrics(
-                                            y_true=y_test_holdout,
+                                            y_true=(
+                                                y_test_holdout
+                                            ),
                                             probabilities=(
                                                 holdout_probabilities
                                             ),
@@ -2388,7 +2518,10 @@ for mode_run in mode_names:
                                         + "=" * 20
                                     )
 
-                                    for metric_name, metric_result in (
+                                    for (
+                                        metric_name,
+                                        metric_result,
+                                    ) in (
                                         holdout_bootstrap_results[
                                             "summary"
                                         ].items()
@@ -2401,77 +2534,19 @@ for mode_run in mode_names:
                                             f"{metric_result['ci_upper']:.4f}]"
                                         )
 
-                                    shap_holdout_results = None
+                                    # ============================================================
+                                    # SAVE HOLDOUT RESULTS BEFORE INTERPRETABILITY
+                                    # ============================================================
 
-                                    # Save results before SHAP computation (SHAP may
-                                    # take a very long time for certain models such
-                                    # as SVC, so we ensure results are persisted).
-                                    output_dir.mkdir(
-                                        parents=True,
-                                        exist_ok=True,
-                                    )
-
-                                    joblib.dump(
-                                        all_results,
-                                        output_dir / "all_res.joblib",
-                                    )
-
-                                    # The current beeswarm implementation targets
-                                    # tabular TSFEL models. Temporal 3D explanations
-                                    # require a separate time-aggregation convention.
-                                    # Skip SHAP for SVC TSFEL because the
-                                    # PermutationExplainer is prohibitively slow
-                                    # (tens of hours per fold for ~3k samples).
-                                    if (
-                                        not is_score_mode
-                                        and config_models.extraction_type
-                                        == "TSFEL"
-                                        and config_models.models_name
-                                        != "SVC TSFEL"
-                                    ):
-                                        update_progress(
-                                            "Computing ensemble SHAP values "
-                                            "on the holdout"
-                                        )
-
-                                        shap_holdout_results = (
-                                            postproc.shap_holdout_ensemble(
-                                                models=(
-                                                    fold_models_for_shap
-                                                ),
-                                                X_test_per_model=(
-                                                    folds_X_holdout
-                                                ),
-                                                feature_names_per_model=(
-                                                    folds_feature_names
-                                                ),
-                                                model_name=(
-                                                    config_models.models_name
-                                                ),
-                                                savefig=(
-                                                    save_figure.value
-                                                ),
-                                                folder=(
-                                                    holdout_output_dir
-                                                ),
-                                                transparent=(
-                                                    config_transparent
-                                                ),
-                                                seed=seed,
-                                            )
-                                        )
+                                    interpretability_holdout_results = None
 
                                     all_results.update(
                                         {
                                             "y_true_holdout": (
-                                                np.asarray(
-                                                    y_test_holdout
-                                                ).reshape(-1)
+                                                y_test_holdout
                                             ),
                                             "holdout_patient_ids": (
-                                                np.asarray(
-                                                    holdout_patient_ids
-                                                ).reshape(-1)
+                                                holdout_patient_ids
                                             ),
                                             "probas_uncalib_holdout_per_model": (
                                                 holdout_probas_uncalib_per_model
@@ -2497,14 +2572,12 @@ for mode_run in mode_names:
                                             "holdout_figure_results": (
                                                 holdout_figure_results
                                             ),
-                                            "shap_holdout": (
-                                                shap_holdout_results
+                                            "interpretability_holdout": (
+                                                None
                                             ),
                                         }
                                     )
 
-                                    # Save final results (includes SHAP results
-                                    # when they were computed above).
                                     output_dir.mkdir(
                                         parents=True,
                                         exist_ok=True,
@@ -2514,6 +2587,175 @@ for mode_run in mode_names:
                                         all_results,
                                         output_dir / "all_res.joblib",
                                     )
+
+                                    # ============================================================
+                                    # INTERPRETABILITY
+                                    # ============================================================
+
+                                    if (
+                                        not is_score_mode
+                                        and config_models.extraction_type
+                                        == "TSFEL"
+                                    ):
+                                        model_name = (
+                                            config_models.models_name
+                                        )
+
+                                        # Check if interpretability artifacts already exist
+                                        # to avoid expensive recomputation.
+                                        interpretability_cached = False
+
+                                        if model_name in {
+                                            "Random Forest TSFEL",
+                                            "XGBoost TSFEL",
+                                        }:
+                                            interpretability_cached = (
+                                                holdout_output_dir
+                                                / "holdout_ensemble_treeshap_importance.csv"
+                                            ).exists()
+
+                                        elif (
+                                            model_name
+                                            == "Logistic Regression Lasso TSFEL"
+                                        ):
+                                            interpretability_cached = (
+                                                holdout_output_dir
+                                                / "holdout_ensemble_linear_coefficients.csv"
+                                            ).exists()
+
+                                        if interpretability_cached:
+                                            update_progress(
+                                                "Interpretability artifacts already "
+                                                "exist, loading from cache"
+                                            )
+
+                                            cached_results_path = (
+                                                output_dir / "all_res.joblib"
+                                            )
+
+                                            if cached_results_path.exists():
+                                                cached_results = joblib.load(
+                                                    cached_results_path
+                                                )
+
+                                                interpretability_holdout_results = (
+                                                    cached_results.get(
+                                                        "interpretability_holdout"
+                                                    )
+                                                )
+                                            else:
+                                                interpretability_cached = False
+
+                                        if (
+                                            not interpretability_cached
+                                            and RUN_INTERPRETABILITY
+                                        ):
+                                            # --------------------------------------------------------
+                                            # Random Forest / XGBoost -> TreeSHAP
+                                            # --------------------------------------------------------
+
+                                            if model_name in {
+                                                "Random Forest TSFEL",
+                                                "XGBoost TSFEL",
+                                            }:
+                                                update_progress(
+                                                    "Computing ensemble TreeSHAP values "
+                                                    "on the holdout"
+                                                )
+
+                                                interpretability_holdout_results = (
+                                                    postproc.shap_tree_holdout_ensemble(
+                                                        models=(
+                                                            fold_models_for_interpretability
+                                                        ),
+                                                        X_test_per_model=(
+                                                            folds_X_holdout
+                                                        ),
+                                                        feature_names_per_model=(
+                                                            folds_feature_names
+                                                        ),
+                                                        model_name=(
+                                                            model_name
+                                                        ),
+                                                        savefig=(
+                                                            save_figure.value
+                                                        ),
+                                                        folder=(
+                                                            holdout_output_dir
+                                                        ),
+                                                        transparent=(
+                                                            config_transparent
+                                                        ),
+                                                    )
+                                                )
+
+                                            # --------------------------------------------------------
+                                            # Logistic regression + Lasso -> coefficients
+                                            # --------------------------------------------------------
+
+                                            elif (
+                                                model_name
+                                                == "Logistic Regression Lasso TSFEL"
+                                            ):
+                                                update_progress(
+                                                    "Computing fold-aggregated "
+                                                    "linear coefficients"
+                                                )
+
+                                                interpretability_holdout_results = (
+                                                    postproc.linear_coefficients_holdout_ensemble(
+                                                        models=(
+                                                            fold_models_for_interpretability
+                                                        ),
+                                                        feature_names_per_model=(
+                                                            folds_feature_names
+                                                        ),
+                                                        savefig=(
+                                                            save_figure.value
+                                                        ),
+                                                        folder=(
+                                                            holdout_output_dir
+                                                        ),
+                                                    )
+                                                )
+                                                csv_filepath = holdout_output_dir / "holdout_ensemble_linear_coefficients.csv"
+                                                postproc.plot_odds_ratios_with_others(csv_file  = csv_filepath,
+                                                                    save = True,
+                                                                    folder = holdout_output_dir,
+                                                                    title = None
+                                                                    )
+                                                postproc.plot_aggregated_odds_ratios(csv_file  = csv_filepath,
+                                                                    save = True,
+                                                                    folder = holdout_output_dir,
+                                                                    title = None
+                                                                    )
+
+                                            # --------------------------------------------------------
+                                            # SVC -> no interpretability analysis
+                                            # --------------------------------------------------------
+
+                                            elif (
+                                                model_name
+                                                == "SVC TSFEL"
+                                            ):
+                                                update_progress(
+                                                    "Skipping interpretability for SVC"
+                                                )
+
+                                        # ============================================================
+                                        # FINAL SAVE
+                                        # ============================================================
+
+                                        all_results[
+                                            "interpretability_holdout"
+                                        ] = (
+                                            interpretability_holdout_results
+                                        )
+
+                                        joblib.dump(
+                                            all_results,
+                                            output_dir / "all_res.joblib",
+                                        )
 
                                 if RUN_COMPARISON:
                                     # List of all candidate models to evaluate.
@@ -2546,7 +2788,7 @@ for mode_run in mode_names:
 
                                         # Global model comparison
                                         print("[COMPARISON] Running generate_comparative_report...", flush=True)
-                                        sfu.generate_comparative_report(
+                                        sfu.old_generate_comparative_report(
                                             comparisons,
                                             save_dir=comparison_output_directory,
                                             table_format='fancy_grid'

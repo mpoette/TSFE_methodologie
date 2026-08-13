@@ -28,6 +28,7 @@ from sklearn.metrics import (
     precision_recall_curve,
     auc
     )
+from pathlib import Path
 
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
@@ -43,6 +44,30 @@ from utilitaries.postprocessing_utils import (
 )
 
 
+def _show_title(title, default_title, ax=None):
+    """Display a figure title based on the ``title`` argument.
+
+    Args:
+        title:
+            The raw ``title`` value passed by the caller.  When it equals
+            ``...`` (the sentinel default), ``default_title`` is displayed.
+            When it is ``None``, no title is shown.  Any other value is
+            treated as a custom string and displayed directly.
+        default_title:
+            The automatic title used when ``title`` is omitted.
+        ax:
+            Optional matplotlib Axes. When provided, ``ax.set_title()`` is
+            used instead of ``plt.title()`` so subplots are correctly targeted.
+    """
+    effective_title = default_title if title is ... else title
+    if effective_title is None:
+        return
+    if ax is not None:
+        ax.set_title(effective_title)
+    else:
+        plt.title(effective_title)
+
+
 def plot_collected_learning_curve(
     sample_sizes,
     train_matrix,
@@ -51,6 +76,7 @@ def plot_collected_learning_curve(
     folder="",
     savefig=True,
     transparent=True,
+    title=...,
 ):
     """Plot a learning curve aggregated across multiple training folds.
 
@@ -118,10 +144,9 @@ def plot_collected_learning_curve(
         label="OOF Volatility (± 1 STD)",
     )
 
-    plt.title(
+    _show_title(
+        title,
         f"Learning Curve — {model_name} (Embedded Fold Splitting)",
-        fontsize=13,
-        fontweight="bold",
     )
     plt.xlabel("Number of Training Samples (Aggregated)")
     plt.ylabel("AUC-ROC Score")
@@ -732,7 +757,7 @@ def get_calibration_stats(probas, y_test):
         y_test (array-like): Binary ground-truth labels encoded as 0 and 1.
     
     Returns:
-        dict: A dictionary containing intercept, slope, brier, ici, e90, eMax,
+        dict: A dictionary containing intercept, slope, brier, ici, e90
               the Polars binned DataFrame ('binned_df'), and bin coordinates ('x', 'obs_rate', 'pred_mean').
     """
     probas, y_test = _validate_calibration_inputs(
@@ -791,7 +816,7 @@ def get_calibration_stats(probas, y_test):
         "brier": float(brier_score_loss(y_test, probas)),
         "ici": float(np.sum(bin_errors * bin_weights)),
         "e90": float(np.percentile(bin_errors, 90)),
-        "eMax": float(np.max(bin_errors)),
+        # "eMax": float(np.max(bin_errors)),
         "binned_df": fixed_brier_df,
         "x": fixed_brier_pd["x"].to_numpy(),
         "obs_rate": fixed_brier_pd["obs_rate"].to_numpy(),
@@ -917,9 +942,9 @@ def compute_binary_metrics(
         "e90": float(
             calibration_stats["e90"]
         ),
-        "eMax": float(
-            calibration_stats["eMax"]
-        ),
+        # "eMax": float(
+        #     calibration_stats["eMax"]
+        # ),
     }
 
 def summarize_fold_metrics(
@@ -972,9 +997,9 @@ def summarize_fold_metrics(
 
     return summary
 
-def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
+def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent, title=...):
     """Plot a receiver operating characteristic curve and compute its AUC.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -988,7 +1013,10 @@ def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
             Directory in which the figure should be written.
         transparent:
             Whether the saved figure should use a transparent background.
-    
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
+
     Returns:
         A tuple containing the ROC AUC, false-positive rates, true-positive
         rates, and decision thresholds.
@@ -1003,20 +1031,20 @@ def roc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
 
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title(f'ROC Curve for model {model_name}')
+    _show_title(title, f'ROC Curve for model {model_name}')
     plt.legend(loc='lower right')
     plt.grid(True)
     if save_figure :
-        plt.savefig(output_dir / Path("roc_curve"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("roc_curve.png"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return auc_final, fpr, tpr, thresholds
 
-def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
+def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, transparent, title=...):
     """Plot a precision-recall curve and compute its area.
-    
+
     The positive-class prevalence is displayed as the no-skill baseline, which
     makes the figure especially useful for imbalanced binary datasets.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -1030,7 +1058,10 @@ def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
             Directory in which the figure files should be written.
         transparent:
             Whether the saved figures should use a transparent background.
-    
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
+
     Returns:
         A tuple containing the area under the precision-recall curve,
         precision values, recall values, and decision thresholds.
@@ -1039,48 +1070,48 @@ def prc_curve_homemade(probas, y_test, model_name, save_figure, output_dir, tran
     # Note: scikit-learn returns thresholds in ascending order
     # and appends precision=1.0 and recall=0.0 without a matching threshold.
     precision, recall, thresholds = precision_recall_curve(y_test, probas)
-    
     # 2. Compute AUPRC with trapezoidal integration
+
     auprc_final = auc(recall, precision)
-    
+
     # 3. Compute the baseline (chance level)
     # Unlike ROC, whose chance level is always 0.5, the PRC baseline
     # depends on the proportion of positive samples in the dataset.
+
     baseline = sum(y_test) / len(y_test)
-    
     # 4. Build the figure
+
     plt.figure(figsize=(6, 6))
     plt.plot(recall, precision, label=f'PRC {model_name} (OOF AUPRC = {auprc_final:.3f})', color='blue', linewidth=2)
-    
     # Horizontal baseline representing chance
     plt.axhline(y=baseline, linestyle='--', color='green', label=f'Chance (Ratio Positifs = {baseline:.3f})')
 
     plt.xlabel('Recall (True Positive Rate / Sensitivity)')
     plt.ylabel('Precision (Positive Predictive Value)')
-    plt.title(f'Precision-Recall Curve for model {model_name}')
+    _show_title(title, f'Precision-Recall Curve for model {model_name}')
     plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05]) # Add a small upper margin
-    plt.legend(loc='lower left') # PRC curves commonly decrease toward the right
+    plt.ylim([0.0, 1.05])
+    plt.legend(loc='lower left')
     plt.grid(True)
-    
+
     if save_figure:
         path = Path(output_dir)
         path.mkdir(parents=True, exist_ok=True)
         plt.savefig(path / "prc_curve.png", dpi=300, bbox_inches="tight", transparent=transparent)
         plt.savefig(path / "prc_curve.pdf", bbox_inches="tight", transparent=transparent)
-        
+
     plt.show()
-    
+
     return auprc_final, precision, recall, thresholds
 
-def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, transparent):
+def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, transparent, title=...):
     """Plot class-conditional probability densities and quantify separation.
-    
+
     Kernel density estimates are created for survivors and deaths. The
     function computes their non-overlapping area, compares class-specific
     uncertainty, measures the difference between mean predicted risks, and
     estimates a decision threshold from the first density intersection.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -1094,7 +1125,10 @@ def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, trans
             Directory in which the figure should be written.
         transparent:
             Whether the saved figure should use a transparent background.
-    
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
+
     Returns:
         A tuple containing the non-overlapping density area, the absolute
         difference between class standard deviations, the absolute difference
@@ -1102,7 +1136,6 @@ def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, trans
     """
     plt.figure()
 
-    # Split probabilities by observed class
     p0 = probas[y_test == 0]
     p1 = probas[y_test == 1]
 
@@ -1111,7 +1144,7 @@ def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, trans
 
     plt.xlabel("Predicted probability")
     plt.ylabel("Density")
-    plt.title(f"Score distribution (KDE) for {model_name}")
+    _show_title(title, f"Score distribution (KDE) for {model_name}")
     plt.legend()
     plt.grid()
 
@@ -1130,12 +1163,12 @@ def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, trans
     overlap_area = np.trapezoid(intersection, x)
     non_overlap_area = 1.0 - overlap_area
 
-    plt.text(0.5, 0.9, f"Non-overlapping area: {non_overlap_area:.1%}", 
+    plt.text(0.5, 0.9, f"Non-overlapping area: {non_overlap_area:.1%}",
              transform=plt.gca().transAxes, ha='center', va='top',
              bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8, edgecolor='gray'))
-    
+
     if save_figure :
-        plt.savefig(output_dir / Path("kde_plot"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("kde_plot.png"), dpi = 300, bbox_inches="tight", transparent=transparent)
     plt.show()
 
     # --- SHAPE IMBALANCE ANALYSIS ---
@@ -1169,13 +1202,13 @@ def kde_plot_homemade(probas, y_test, model_name, save_figure, output_dir, trans
         print(f"[{model_name}] No decision threshold found (curves do not cross).")
     return non_overlap_area, asymmetric_uncertainty, mean_risk_diff, mean_p1
 
-def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
+def brier_evolution(probas, y_test, save_figure, output_dir, transparent, title=...):
     """Analyze Brier scores across fixed risk brackets and patient deciles.
-    
+
     The function computes the global Brier score and generates four figures:
     Brier score by fixed risk bracket, Brier score by patient decile,
     calibration by patient decile, and calibration by fixed risk bracket.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -1187,7 +1220,11 @@ def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
             Directory in which the figures should be written.
         transparent:
             Whether the saved figures should use a transparent background.
-    
+        title:
+            Optional figure title prefix. Omit (default ``...``) to keep the
+            automatic titles, pass ``None`` to remove them, or provide a custom
+            string prepended to each subtitle.
+
     Returns:
         The global Brier score.
     """
@@ -1265,12 +1302,11 @@ def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
     ax2.plot(fixed_brier_pd["x"], fixed_brier_pd["brier_mean"], marker="o")
     ax2.set_ylabel("Mean Brier score")
 
-    plt.title(f"Brier score by fixed risk brackets")
+    _show_title(title, "Brier score by fixed risk brackets", ax=ax1)
     plt.tight_layout()
     if save_figure:
-        plt.savefig(output_dir / Path("brier_per_risk_bracket"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("brier_per_risk_bracket.png"), dpi=300, bbox_inches="tight", transparent=transparent)
     plt.show()
-
 
     fig, ax1 = plt.subplots(figsize=(7, 5))
 
@@ -1282,56 +1318,51 @@ def brier_evolution(probas, y_test, save_figure, output_dir, transparent):
     ax2.plot(decile_brier_pd["x"], decile_brier_pd["brier_mean"], marker="o")
     ax2.set_ylabel("Mean Brier score")
 
-    plt.title(f"Brier score by patient deciles")
+    _show_title(title, "Brier score by patient deciles", ax=ax1)
     plt.tight_layout()
     if save_figure:
-        plt.savefig(output_dir / Path("brier_per_decile"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("brier_per_decile.png"), dpi=300, bbox_inches="tight", transparent=transparent)
     plt.show()
-
 
     fig, ax1 = plt.subplots(figsize=(7, 5))
 
-    # Patient histogram
-    ax1.bar(decile_brier_pd["x"], decile_brier_pd["n"], alpha=0.3, color='grey', edgecolor='black')
+    ax1.bar(decile_brier_pd["x"], decile_brier_pd["n"], alpha=0.3, color="grey", edgecolor="black")
     ax1.set_xlabel("Patient decile")
     ax1.set_ylabel("Number of patients")
 
-    # Calibration curve
     ax2 = ax1.twinx()
     ax2.plot(decile_brier_pd["x"], decile_brier_pd["obs_rate"], marker="o", label="Predicted risk", color="black")
     ax2.plot(decile_brier_pd["x"], decile_brier_pd["pred_mean"], marker="s", label="Observed mortality", color="black", linestyle="--")
     ax2.set_ylabel("Mortality (Observed rate vs Predicted risk)")
 
-    plt.title(f"Calibration Curve by patient deciles")
+    _show_title(title, "Calibration Curve by patient deciles", ax=ax1)
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure:
-        plt.savefig(output_dir / Path("calib_per_decile"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("calib_per_decile.png"), dpi=300, bbox_inches="tight", transparent=transparent)
     plt.show()
-
 
     fig, ax1 = plt.subplots(figsize=(7, 5))
 
-    # Patient histogram (fixed-risk brackets)
-    ax1.bar(fixed_brier_pd["x"], fixed_brier_pd["n"], width=0.08, alpha=0.3, color='grey', edgecolor='black')
+    ax1.bar(fixed_brier_pd["x"], fixed_brier_pd["n"], width=0.08, alpha=0.3, color="grey", edgecolor="black")
     ax1.set_xlabel("Predicted risk (10% brackets)")
     ax1.set_ylabel("Number of patients")
     ax1.set_xlim(0, 1)
 
-    # Calibration curve (right y-axis)
     ax2 = ax1.twinx()
     ax2.plot(fixed_brier_pd["x"], fixed_brier_pd["obs_rate"], marker="o", label="Mean predicted risk", color="black", linestyle="-")
     ax2.plot(fixed_brier_pd["x"], fixed_brier_pd["pred_mean"], marker="s", label="Observed mortality", color="black", linestyle="--")
     ax2.set_ylabel("Mortality (Observed rate vs Predicted risk)")
-    ax2.set_ylim(0, 1) 
+    ax2.set_ylim(0, 1)
 
-    plt.title(f"Calibration Curve by fixed risk brackets")
+    _show_title(title, "Calibration Curve by fixed risk brackets", ax=ax1)
     fig.legend(loc="center right", bbox_to_anchor=(0.9, 0.5))
     plt.tight_layout()
     if save_figure:
-        plt.savefig(output_dir / Path("calib_per_risk_bracket"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("calib_per_risk_bracket.png"), dpi=300, bbox_inches="tight", transparent=transparent)
     plt.show()
     return global_brier
+
 
 def calibration_per_risk_brackets(
     probas,
@@ -1339,7 +1370,8 @@ def calibration_per_risk_brackets(
     save_figure=False,
     output_dir=None,
     transparent=False,
-    model_name="Model"
+    model_name="Model",
+    title=...,
 ):
     """Plot a calibration curve aggregated by fixed 10% risk brackets using get_calibration_stats.
 
@@ -1350,6 +1382,9 @@ def calibration_per_risk_brackets(
         output_dir (str or Path, optional): Path where the PNG will be saved. Defaults to None.
         transparent (bool, optional): Whether the background should be transparent when saved. Defaults to False.
         model_name (str, optional): Model name displayed in file name. Defaults to "Model".
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
 
     Returns:
         dict: The dictionary containing computed calibration statistics and data.
@@ -1401,7 +1436,7 @@ def calibration_per_risk_brackets(
         f"Slope: {stats['slope']:.2f}\n"
         f"ICI: {stats['ici']:.3f}\n"
         f"E90: {stats['e90']:.3f}\n"
-        f"EMax: {stats['eMax']:.3f}\n"
+        # f"EMax: {stats['eMax']:.3f}\n"
         f"Brier: {stats['brier']:.3f}"
     )
 
@@ -1424,6 +1459,9 @@ def calibration_per_risk_brackets(
 
     # Legend & Layout
     fig.legend(loc="center right", bbox_to_anchor=(0.88, 0.5))
+
+    _show_title(title, f"Calibration Curve - {model_name}", ax=ax1)
+
     fig.tight_layout()
 
     # 4. Save & Close
@@ -1442,9 +1480,9 @@ def calibration_per_risk_brackets(
 
     return stats
 
-def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, transparent):
+def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, transparent, title=...):
     """Evaluate the F1 score over a grid of decision thresholds.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -1458,7 +1496,10 @@ def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, tran
             Directory in which the figure should be written.
         transparent:
             Whether the saved figure should use a transparent background.
-    
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
+
     Returns:
         A tuple containing the highest F1 score and its associated threshold.
     """
@@ -1474,20 +1515,20 @@ def f1_score_evolution(probas, y_test, model_name, save_figure, output_dir, tran
             best_t = t
     plt.figure(figsize=(6, 6))
     plt.plot(_thresholds, f1s)
-    plt.xlabel('Threshold')
-    plt.ylabel('F1 score')
-    plt.title(f"F1 score evolution vs Threshold for model {model_name}")
+    plt.xlabel("Threshold")
+    plt.ylabel("F1 score")
+    _show_title(title, f"F1 score evolution vs Threshold for model {model_name}")
     plt.grid()
     if save_figure:
-        plt.savefig(output_dir / Path("threshold_evolution"), dpi = 300, bbox_inches="tight", transparent=transparent)
+        plt.savefig(output_dir / Path("threshold_evolution.png"), dpi=300, bbox_inches="tight", transparent=transparent)
     plt.show()
     print(f'The best F1 score of{best_f1: .2f} is reached at threshold{best_t: .2f}')
     return best_f1, best_t
 
 
-def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, output_dir, transparent):
+def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, output_dir, transparent, title=...):
     """Plot a confusion matrix at a selected probability threshold.
-    
+
     Args:
         probas:
             Predicted probabilities for the positive class.
@@ -1503,7 +1544,10 @@ def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, o
             Directory in which the figure should be written.
         transparent:
             Whether the saved figure should use a transparent background.
-    
+        title:
+            Optional figure title. Omit (default ``...``) to keep the automatic
+            title, pass ``None`` to remove it, or provide a custom string.
+
     Returns:
         A tuple containing the predicted binary labels and the Matthews
         correlation coefficient.
@@ -1512,12 +1556,12 @@ def confusion_matrix_homemade(probas, y_test, best_t, model_name, save_figure, o
     mcc = matthews_corrcoef(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred)
     plt.figure()
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    plt.title(f'Confusion matrix of model {model_name}  (threshold={ best_t: .2f}, MCC = {mcc})')
-    if save_figure :
-        plt.savefig(output_dir / Path("confusion_matrix"), dpi = 300, bbox_inches="tight", transparent=transparent, facecolor = "white")
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    _show_title(title, f"Confusion matrix of model {model_name}  (threshold={ best_t: .2f}, MCC = {mcc})")
+    if save_figure:
+        plt.savefig(output_dir / Path("confusion_matrix.png"), dpi=300, bbox_inches="tight", transparent=transparent, facecolor="white")
     plt.show()
     return y_pred, mcc
 
@@ -1726,13 +1770,19 @@ def compare_models_figure(figname, max_cols=3, savefig = False, folder = "", **p
         axes[j].axis('off')
     plt.tight_layout()
     if savefig:
-        plt.savefig(f"{folder}/comparison_{figname}", dpi=300, bbox_inches="tight")
+        save_name = f"comparison_{figname}"
+        if not save_name.lower().endswith(".png"):
+            save_name += ".png"
+        plt.savefig(f"{folder}/{save_name}", dpi=300, bbox_inches="tight")
     plt.show()
 
 def _build_holdout_metric_functions(
     threshold=0.5,
 ):
     """Return metric functions compatible with bootstrap_holdout_metrics.
+
+    Includes standard prediction metrics (AUC, AUPRC, F1, MCC, Brier) and
+    calibration metrics (intercept, slope, ICI, E90, EMax).
 
     Args:
         threshold:
@@ -1746,6 +1796,14 @@ def _build_holdout_metric_functions(
     from sklearn.metrics import (
         brier_score_loss,
         roc_auc_score,
+    )
+
+    from utilitaries.postprocessing_utils import (
+        calibration_intercept,
+        calibration_slope,
+        e90_score,
+        # eMax_score,
+        ici_score,
     )
 
     def _auprc(y_true, probas):
@@ -1764,6 +1822,11 @@ def _build_holdout_metric_functions(
             mcc_at_fixed_threshold,
             threshold=threshold,
         ),
+        "calibration_intercept": calibration_intercept,
+        "calibration_slope": calibration_slope,
+        "ici": ici_score,
+        "e90": e90_score,
+        # "eMax": eMax_score,
     }
 
 
@@ -1844,6 +1907,8 @@ def compute_subgroup_holdout_metrics(
     results = []
 
     for label in unique_labels:
+        if subgroup_names and label not in subgroup_names:
+            continue
         mask = subgroup_labels == label
         sub_probas = probas[mask]
         sub_y_true = y_true[mask]
@@ -1921,42 +1986,10 @@ def generate_subgroup_comparative_report(
     seed=42,
     save_dir=None,
     table_format="fancy_grid",
+    model_names_map=None,
+    title = ...
 ):
-    """Generate a comparative holdout report across patient subgroups.
-
-    Convenience wrapper that chains
-    :func:`compute_subgroup_holdout_metrics` and
-    :func:`generate_comparative_report` in **"holdout"** mode.  Holdout
-    predictions are split by subgroup, bootstrap confidence intervals are
-    computed per subgroup, and a collective report (tables + figures) is
-    generated.
-
-    Args:
-        probas:
-            Array-like of predicted probabilities for the positive class.
-        y_true:
-            Array-like of binary ground-truth labels.
-        subgroup_labels:
-            Array-like of categorical subgroup identifiers (same length as
-            ``probas``).
-        subgroup_names:
-            Optional mapping from raw subgroup label to a human-readable name.
-        n_bootstrap:
-            Number of bootstrap resamples per subgroup.
-        confidence_level:
-            Confidence level for percentile intervals.
-        seed:
-            Random seed for reproducibility.
-        save_dir:
-            Optional output directory for figures and tables.
-        table_format:
-            Console table format passed to :func:`tabulate`.
-
-    Returns:
-        A pandas DataFrame containing formatted metric values (with
-        estimate [CI95%]) per subgroup, as returned by
-        :func:`generate_comparative_report`.
-    """
+    """Generate a comparative holdout report across patient subgroups."""
     subgroup_results = compute_subgroup_holdout_metrics(
         probas=probas,
         y_true=y_true,
@@ -1972,15 +2005,500 @@ def generate_subgroup_comparative_report(
         save_dir=save_dir,
         table_format=table_format,
         evaluation_mode="holdout",
+        model_names_map=model_names_map,
+        title = title,
     )
 
 
-def generate_comparative_report(
+def _plot_metrics_bar_group(
+    ax,
+    metrics,
+    data_list,
+    metric_display_names,
+    width,
+    default_colors,
+    color_offset=0,
+    title=None,
+):
+    """Plot a single group of metrics (discrimination or calibration) as grouped bars.
+
+    Args:
+        ax:
+            Matplotlib Axes to draw onto.
+        metrics:
+            List of metric keys to display on the x-axis.
+        data_list:
+            List of dictionaries with keys ``"name"``, ``"estimates"``,
+            ``"ci_lower"``, and ``"ci_upper"`` (all mapping metric names to
+            float values).
+        metric_display_names:
+            Mapping from metric key to human-readable label.
+        width:
+            Width of a single bar.
+        default_colors:
+            Color palette to draw from.
+        color_offset:
+            Index offset into ``default_colors``.
+        title:
+            Optional subplot title.
+    """
+    x = np.arange(len(metrics))
+    label_offset = width * (len(data_list) - 1) / 2 if len(data_list) > 1 else 0
+
+    for idx, entry in enumerate(data_list):
+        color_idx = (idx + color_offset) % len(default_colors)
+        color = default_colors[color_idx]
+
+        estimates = np.array([entry["estimates"][m] for m in metrics])
+        ci_lower = np.array([entry["ci_lower"][m] for m in metrics])
+        ci_upper = np.array([entry["ci_upper"][m] for m in metrics])
+
+        lower_err = np.maximum(0, estimates - ci_lower)
+        upper_err = np.maximum(0, ci_upper - estimates)
+
+        ax.bar(
+            x + idx * width,
+            estimates,
+            width,
+            label=entry["name"],
+            color=color,
+            yerr=[lower_err, upper_err],
+            capsize=3,
+        )
+
+    ax.set_xticks(x + label_offset)
+    ax.set_xticklabels(
+        [metric_display_names[m] for m in metrics],
+        rotation=35,
+        ha="right",
+        fontsize=10,
+    )
+    if title is not None:
+        ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.set_ylim(bottom=0)
+
+
+def plot_holdout_metrics_barplot(
+    configurations,
+    save_dir=None,
+    model_names_map=None,
+    color_offset=0,
+):
+    """Plot grouped bar charts with 95% CI error bars split into discrimination
+    and calibration metrics.
+    """
+    configurations = list(configurations)
+
+    if not configurations:
+        return
+
+    default_names_map = {
+        "IGS2": "IGS2",
+        "Logistic_Regression_Lasso_TSFEL": "L1-LR",
+        "SVC_TSFEL": "SVC",
+        "RandomForest_TSFEL": "Random Forest",
+        "XGBoost_TSFEL": "XGBoost",
+        "InceptionTimeModified": "Inception Time",
+        "LstmTimeModified": "LSTM",
+        "VanillaTransformer": "Vanilla Transformer",
+    }
+    names_map = default_names_map.copy()
+    if model_names_map is not None:
+        names_map.update(model_names_map)
+
+    discrimination_metrics = ["auc", "auprc", "f1", "mcc"]
+    calibration_metrics = [
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
+        "ici",
+        "e90",
+    ]
+
+    metric_display_names = {
+        "auc": "AUC ROC",
+        "auprc": "AUPRC",
+        "f1": "F1-Score",
+        "mcc": "MCC",
+        "brier": "Brier",
+        "calibration_intercept": "|Intercept|",
+        "calibration_slope": "|Slope - 1|",
+        "ici": "ICI",
+        "e90": "E90",
+    }
+
+    all_metrics = discrimination_metrics + calibration_metrics
+    model_data = []
+
+    for name, config in configurations:
+
+        bootstrap = config.get("bootstrap_holdout")
+        if bootstrap is None:
+            continue
+
+        display_name = names_map.get(name, name)
+        summary = bootstrap.get("summary", {})
+        data = {
+            "name": display_name,
+            "estimates": {},
+            "ci_lower": {},
+            "ci_upper": {},
+        }
+
+        for metric in all_metrics:
+            entry = summary.get(metric, {})
+            est = float(entry.get("estimate", 0.0))
+            low = float(entry.get("ci_lower", 0.0))
+            upp = float(entry.get("ci_upper", 0.0))
+
+            if metric == "calibration_intercept":
+                est = abs(est)
+                low, upp = min(abs(low), abs(upp)), max(abs(low), abs(upp))
+            elif metric == "calibration_slope":
+                est = abs(est - 1.0)
+                d1, d2 = abs(low - 1.0), abs(upp - 1.0)
+                low, upp = min(d1, d2), max(d1, d2)
+
+            data["estimates"][metric] = est
+            data["ci_lower"][metric] = low
+            data["ci_upper"][metric] = upp
+
+        model_data.append(data)
+
+    if not model_data:
+        return
+
+    n_models = len(model_data)
+    default_colors = sns.color_palette("tab10", 10)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), layout="constrained")
+
+    width = 0.8 / max(n_models, 1)
+
+    _plot_metrics_bar_group(
+        ax=ax1,
+        metrics=discrimination_metrics,
+        data_list=model_data,
+        metric_display_names=metric_display_names,
+        width=width,
+        default_colors=default_colors,
+        color_offset=color_offset,
+    )
+    _plot_metrics_bar_group(
+        ax=ax2,
+        metrics=calibration_metrics,
+        data_list=model_data,
+        metric_display_names=metric_display_names,
+        width=width,
+        default_colors=default_colors,
+        color_offset=color_offset,
+    )
+
+    ax1.set_ylabel("Score (Higher is better)")
+    ax2.set_ylabel("Distance / Error (Lower is better)")
+
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=min(n_models, 5),
+        fontsize=10,
+    )
+
+    if save_dir is not None:
+        output_path = Path(save_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output_path / "holdout_metrics_barplot.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+    return fig
+
+def plot_dataset_comparison_barplot(
+    model_name,
+    dataset_configurations,
+    save_dir=None,
+    title=...,
+):
+    """For a single model, plot grouped bar charts with 95% CI error bars split
+    into discrimination and calibration metrics, comparing datasets.
+    """
+    dataset_configurations = list(dataset_configurations)
+
+    if not dataset_configurations:
+        return
+
+    display_model_name = model_name
+
+    discrimination_metrics = ["auc", "auprc", "f1", "mcc"]
+    calibration_metrics = [
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
+        "ici",
+        "e90",
+    ]
+
+    metric_display_names = {
+        "auc": "AUC ROC",
+        "auprc": "AUPRC",
+        "f1": "F1-Score",
+        "mcc": "MCC",
+        "brier": "Brier",
+        "calibration_intercept": "|Intercept|",
+        "calibration_slope": "|Slope - 1|",
+        "ici": "ICI",
+        "e90": "E90",
+    }
+
+    all_metrics = discrimination_metrics + calibration_metrics
+
+    dataset_data = []
+
+    for ds_name, config in dataset_configurations:
+        bootstrap = config.get("bootstrap_holdout")
+        if bootstrap is None:
+            continue
+
+        summary = bootstrap.get("summary", {})
+        data = {
+            "name": ds_name,
+            "estimates": {},
+            "ci_lower": {},
+            "ci_upper": {},
+        }
+
+        for metric in all_metrics:
+            entry = summary.get(metric, {})
+            est = float(entry.get("estimate", 0.0))
+            low = float(entry.get("ci_lower", 0.0))
+            upp = float(entry.get("ci_upper", 0.0))
+
+            if metric == "calibration_intercept":
+                est = abs(est)
+                low, upp = min(abs(low), abs(upp)), max(abs(low), abs(upp))
+            elif metric == "calibration_slope":
+                est = abs(est - 1.0)
+                d1, d2 = abs(low - 1.0), abs(upp - 1.0)
+                low, upp = min(d1, d2), max(d1, d2)
+
+            data["estimates"][metric] = est
+            data["ci_lower"][metric] = low
+            data["ci_upper"][metric] = upp
+
+        dataset_data.append(data)
+
+    if not dataset_data:
+        return
+
+    n_datasets = len(dataset_data)
+    default_colors = sns.color_palette("tab10", max(n_datasets, 10))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), layout="constrained")
+
+    width = 0.8 / max(n_datasets, 1)
+
+    _plot_metrics_bar_group(
+        ax=ax1,
+        metrics=discrimination_metrics,
+        data_list=dataset_data,
+        metric_display_names=metric_display_names,
+        width=width,
+        default_colors=default_colors,
+    )
+    _plot_metrics_bar_group(
+        ax=ax2,
+        metrics=calibration_metrics,
+        data_list=dataset_data,
+        metric_display_names=metric_display_names,
+        width=width,
+        default_colors=default_colors,
+    )
+
+    ax1.set_ylabel("Score (Higher is better)")
+    ax2.set_ylabel("Distance / Error (Lower is better)")
+
+    _show_title(title, f"Dataset Comparison - {display_model_name}", ax1)
+
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=min(n_datasets, 5),
+        fontsize=10,
+    )
+
+    if save_dir is not None:
+        output_path = Path(save_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(
+            c if c.isalnum() or c in ("_", "-", " ") else "_"
+            for c in display_model_name
+        )
+        fig.savefig(
+            output_path / f"{safe_name}_dataset_comparison.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+    return fig
+
+def plot_comparative_axes(
+    configurations,
+    axes,
+    evaluation_mode="holdout",
+    y_true_base=None,
+    model_names_map=None,
+    color_offset=0,
+    show_legend=True,
+):
+    """
+    Plot ROC, precision-recall and calibration curves
+    on three existing Matplotlib axes.
+    """
+
+    ax_roc, ax_prc, ax_cal = axes
+
+    for item in plot_data_list:
+        name = item["name"]
+        color = item["color"]
+        prefix = item["label_prefix"]
+
+        # ROC
+        ax_roc.plot(
+            item["fpr"],
+            item["tpr"],
+            color=color,
+            linewidth=2.0,
+            label=(
+                f"{name} "
+                f"({prefix} AUC={item['auc_val']:.3f})"
+            ),
+        )
+
+        # PR curve
+        ax_prc.plot(
+            item["recall"],
+            item["precision"],
+            color=color,
+            linewidth=2.0,
+            label=(
+                f"{name} "
+                f"({prefix} AUPRC={item['auprc_val']:.3f}, "
+                f"prev={item['prevalence']:.1%})"
+            ),
+        )
+
+        # Baseline PR propre au sous-groupe
+        ax_prc.axhline(
+            y=item["prevalence"],
+            color=color,
+            linestyle="--",
+            linewidth=1,
+            alpha=0.6,
+        )
+
+        # Calibration
+        ax_cal.plot(
+            item["mpv"],
+            item["fop"],
+            marker="o",
+            markersize=4,
+            color=color,
+            linewidth=2.0,
+            label=name,
+        )
+
+    # Référence ROC : hasard
+    ax_roc.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        color="gray",
+        linewidth=1.0,
+        label="Chance",
+    )
+
+    # Référence calibration parfaite
+    ax_cal.plot(
+        [0, 1],
+        [0, 1],
+        linestyle=":",
+        color="black",
+        linewidth=1.0,
+        label="Perfect calibration",
+    )
+
+    # ROC
+    ax_roc.set(
+        title="ROC curves",
+        xlabel="False Positive Rate",
+        ylabel="True Positive Rate",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    # PR
+    ax_prc.set(
+        title="Precision–recall curves",
+        xlabel="Recall",
+        ylabel="Precision",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    # Calibration
+    ax_cal.set(
+        title="Calibration curves",
+        xlabel="Mean Predicted Probability",
+        ylabel="Observed Fraction of Positives",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    for ax in axes:
+        ax.grid(
+            True,
+            linestyle=":",
+            linewidth=0.7,
+            alpha=0.5,
+        )
+
+    if show_legend:
+        ax_roc.legend(
+            loc="lower right",
+            fontsize=8,
+            frameon=False,
+        )
+
+        ax_prc.legend(
+            loc="lower left",
+            fontsize=8,
+            frameon=False,
+        )
+
+        ax_cal.legend(
+            loc="upper left",
+            fontsize=8,
+            frameon=False,
+        )
+
+def old_generate_comparative_report(
     configurations,
     y_true_base=None,
     save_dir=None,
     table_format="fancy_grid",
     evaluation_mode="oof",
+    model_names_map=None,
+    title=...,
+    color_offset = 0,
 ):
     """Generate comparison tables and collective OOF or Holdout figures.
 
@@ -2002,6 +2520,13 @@ def generate_comparative_report(
         evaluation_mode:
             Either ``"oof"`` to use out-of-fold results (default) or
             ``"holdout"`` to use independent holdout results.
+        model_names_map:
+            Optional dictionary mapping technical model names to formatted
+            display names (e.g. {"Logistic_Regression_Lasso_TSFEL": "L1-LR"}).
+        title:
+            Optional figure title prefix. Omit (default ``...``) to keep the
+            automatic titles, pass ``None`` to remove them, or provide a custom
+            string prepended to each subtitle.
 
     Returns:
         A pandas DataFrame containing formatted metric values.
@@ -2012,6 +2537,24 @@ def generate_comparative_report(
         )
 
     configurations = list(configurations)
+
+    # ---- Display Names Mapping ----
+    # Mapping par défaut si aucun dictionnaire explicite n'est transmis
+    default_names_map = {
+        "IGS2": "IGS2",
+        "Logistic_Regression_Lasso_TSFEL": "L1-LR",  # ou "Logistic Regression"
+        "SVC_TSFEL": "SVC",
+        "RandomForest_TSFEL": "Random Forest",
+        "XGBoost_TSFEL": "XGBoost",
+        "InceptionTimeModified": "Inception Time",
+        "LstmTimeModified": "LSTM",
+        "VanillaTransformer": "Vanilla Transformer",
+    }
+    
+    # On fusionne avec les éventuels surcharges utilisateur
+    names_map = default_names_map.copy()
+    if model_names_map is not None:
+        names_map.update(model_names_map)
 
     predefined_order = [
         "IGS2",
@@ -2073,9 +2616,12 @@ def generate_comparative_report(
 
     results = {}
     plot_data_list = []
-    reference_y = None
+    # reference_y = None
 
     for idx, (name, config) in enumerate(configurations):
+        # Récupération du nom d'affichage propre
+        display_name = names_map.get(name, name)
+
         probas = np.asarray(
             require_key(config, probas_key, name),
             dtype=float,
@@ -2095,8 +2641,8 @@ def generate_comparative_report(
                 f"lengths: {len(probas)} != {len(y_true)}."
             )
 
-        if reference_y is None:
-            reference_y = y_true
+        # if reference_y is None:
+        #     reference_y = y_true
 
         color = config.get(
             "color",
@@ -2132,39 +2678,31 @@ def generate_comparative_report(
             summary = bootstrap["summary"]
             auc_val = float(summary["auc"]["estimate"])
             auprc_val = float(summary["auprc"]["estimate"])
-            # For holdout calibration stats, compute from probas/y_true directly
             cal_stats = get_calibration_stats(probas, y_true)
             intercept_val = cal_stats["intercept"]
             slope_val = cal_stats["slope"]
             ici_val = cal_stats["ici"]
 
         # ---- Results table ----
-        if evaluation_mode == "oof":
-            results[name] = {
-                "AUC ROC": format_metric(config, "auc", name),
-                "AUPRC": format_metric(config, "auprc", name),
-                "F1-Score": format_metric(config, "f1_score", name),
-                "MCC": format_metric(config, "mcc", name),
-                "Brier": format_metric(config, "brier", name),
-                "Intercept": format_metric(config, "calibration_intercept", name),
-                "Slope": format_metric(config, "calibration_slope", name),
-                "ICI": format_metric(config, "ici", name),
-                "E90": format_metric(config, "e90", name),
-                "EMax": format_metric(config, "eMax", name),
-            }
-        else:
-            results[name] = {
-                "AUC ROC": format_metric(config, "auc", name),
-                "AUPRC": format_metric(config, "auprc", name),
-                "F1-Score": format_metric(config, "f1", name),
-                "MCC": format_metric(config, "mcc", name),
-                "Brier": format_metric(config, "brier", name),
-            }
+        metrics_dict = {
+            "AUC ROC": format_metric(config, "auc", name),
+            "AUPRC": format_metric(config, "auprc", name),
+            "F1-Score": format_metric(config, "f1_score" if evaluation_mode == "oof" else "f1", name),
+            "MCC": format_metric(config, "mcc", name),
+            "Brier": format_metric(config, "brier", name),
+            "Intercept": format_metric(config, "calibration_intercept", name),
+            "Slope": format_metric(config, "calibration_slope", name),
+            "ICI": format_metric(config, "ici", name),
+            "E90": format_metric(config, "e90", name),
+        }
+
+        # On utilise le display_name comme clé dans le tableau final
+        results[display_name] = metrics_dict
 
         label_prefix = "OOF" if evaluation_mode == "oof" else "Holdout"
-
+        prevalence = float(np.mean(y_true))
         plot_data_list.append({
-            "name": name,
+            "name": display_name,  # On utilise le nom d'affichage pour les légendes des graphiques
             "color": color,
             "fpr": fpr,
             "tpr": tpr,
@@ -2174,90 +2712,952 @@ def generate_comparative_report(
             "auprc_val": auprc_val,
             "fop": fop,
             "mpv": mpv,
+            "prevalence" : prevalence,
             "intercept_val": intercept_val,
             "slope_val": slope_val,
             "ici_val": ici_val,
             "label_prefix": label_prefix,
         })
 
+    # ---- Mode label (used for titles) ----
+    mode_label = "OOF" if evaluation_mode == "oof" else "Holdout"
+
     # ---- Figures ----
-    fig_roc, ax_roc = plt.subplots(figsize=(8, 8), layout="constrained")
-    fig_prc, ax_prc = plt.subplots(figsize=(8, 8), layout="constrained")
-    fig_cal, ax_cal = plt.subplots(figsize=(8, 8), layout="constrained")
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(15, 5),
+        layout="constrained",
+    )
 
-    for item in plot_data_list:
-        prefix = item["label_prefix"]
-        ax_roc.plot(
-            item["fpr"], item["tpr"],
-            label=f"{item['name']} ({prefix} AUC = {item['auc_val']:.3f})",
-            color=item["color"], linewidth=2,
-        )
-        ax_prc.plot(
-            item["recall"], item["precision"],
-            label=f"{item['name']} ({prefix} AUPRC = {item['auprc_val']:.3f})",
-            color=item["color"], linewidth=2,
-        )
-        cal_label = (
-            f"{item['name']} "
-            f"(Int={item['intercept_val']:.2f}, "
-            f"Slope={item['slope_val']:.2f}, "
-            f"ICI={item['ici_val']:.3f})"
-        )
-        ax_cal.plot(
-            item["mpv"], item["fop"], "s-",
-            label=cal_label, color=item["color"], linewidth=2,
-        )
+    plot_comparative_axes(
+        plot_data_list=plot_data_list,
+        axes=axes,
+        show_legend=True,
+    )
 
-    # ROC styling
-    ax_roc.plot([0, 1], [0, 1], linestyle="--", label="Chance", color="gray")
-    ax_roc.set_xlabel("False Positive Rate (FPR)")
-    ax_roc.set_ylabel("True Positive Rate (TPR)")
-    ax_roc.set_xlim(0.0, 1.0)
-    ax_roc.set_ylim(0.0, 1.05)
-    ax_roc.grid(True, linestyle=":", alpha=0.6)
-    ax_roc.legend(loc="lower right", fontsize=9)
-
-    # PRC styling
-    baseline = float(np.mean(reference_y)) if reference_y is not None else 0.5
-    ax_prc.axhline(y=baseline, linestyle="--", color="green", alpha=0.7,
-                    label=f"Chance (Pos Ratio = {baseline:.3f})")
-    ax_prc.set_xlabel("Recall (Sensitivity)")
-    ax_prc.set_ylabel("Precision (PPV)")
-    ax_prc.set_xlim(0.0, 1.0)
-    ax_prc.set_ylim(0.0, 1.05)
-    ax_prc.grid(True, linestyle=":", alpha=0.6)
-    ax_prc.legend(loc="upper right", fontsize=9)
-
-    # Calibration styling
-    ax_cal.plot([0, 1], [0, 1], "k:", alpha=0.7, label="Perfect calibration")
-    ax_cal.set_xlabel("Mean Predicted Probability")
-    ax_cal.set_ylabel("True Fraction of Positives")
-    ax_cal.set_xlim(0.0, 1.0)
-    ax_cal.set_ylim(0.0, 1.05)
-    ax_cal.grid(True, linestyle=":", alpha=0.6)
-    ax_cal.legend(loc="upper left", fontsize=9)
+    if title is not None:
+        fig.suptitle(
+            f"{title} — {mode_label} comparison",
+            fontsize=14,
+            fontweight="bold",
+        )
 
     # ---- Table ----
     results_df = pd.DataFrame(results).T
-    mode_label = "OOF" if evaluation_mode == "oof" else "Holdout"
     print(f"\n=== {mode_label} PERFORMANCE COMPARISON TABLE ===")
     print(tabulate(results_df, headers="keys", tablefmt=table_format, showindex=True))
 
-    # ---- Save ----
     if save_dir is not None:
         output_path = Path(save_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        fig_roc.savefig(output_path / f"collective_roc_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
-        fig_prc.savefig(output_path / f"collective_prc_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
-        fig_cal.savefig(output_path / f"collective_calibration_curve_{mode_label.lower()}.png", dpi=300, bbox_inches="tight")
-        with open(output_path / f"results_table_{mode_label.lower()}.tex", "w", encoding="utf-8") as output_file:
-            output_file.write(tabulate(results_df, headers="keys", tablefmt="latex_booktabs", showindex=True))
+
+        fig.savefig(
+            output_path / f"collective_performance_{mode_label.lower()}.pdf",
+            bbox_inches="tight",
+        )
+
+        fig.savefig(
+            output_path / f"collective_performance_{mode_label.lower()}.png",
+            dpi=600,
+            bbox_inches="tight",
+        )
+
+        with open(
+            output_path / f"results_table_{mode_label.lower()}.tex",
+            "w",
+            encoding="utf-8",
+        ) as output_file:
+            output_file.write(
+                tabulate(
+                    results_df,
+                    headers="keys",
+                    tablefmt="latex_booktabs",
+                    showindex=True,
+                )
+            )
+
+    # ---- Holdout barplot with CI ----
+    fig_bar = None
+    if evaluation_mode == "holdout":
+        fig_bar = plot_holdout_metrics_barplot(
+            configurations=configurations,
+            save_dir=save_dir,
+            model_names_map = model_names_map,
+            color_offset = color_offset
+        )
 
     plt.show()
-    plt.close(fig_roc)
-    plt.close(fig_prc)
-    plt.close(fig_cal)
+    plt.close(fig)
+
+    if fig_bar is not None:
+        plt.close(fig_bar)
+    
+    return results_df
+
+
+
+
+
+
+
+
+
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import roc_curve, precision_recall_curve
+from tabulate import tabulate
+
+
+def plot_comparative_axes(
+    plot_data_list,
+    axes,
+    show_legend=True,
+):
+    ax_roc, ax_prc, ax_cal = axes
+
+    for item in plot_data_list:
+        name = item["name"]
+        color = item["color"]
+        prefix = item["label_prefix"]
+
+        ax_roc.plot(
+            item["fpr"],
+            item["tpr"],
+            color=color,
+            linewidth=1.8,
+            label=f"{name} ({prefix} AUC={item['auc_val']:.3f})",
+        )
+
+        ax_prc.plot(
+            item["recall"],
+            item["precision"],
+            color=color,
+            linewidth=1.8,
+            label=(
+                f"{name} "
+                f"(AUPRC={item['auprc_val']:.3f}, "
+                f"prev={item['prevalence']:.1%})"
+            ),
+        )
+
+        ax_prc.axhline(
+            y=item["prevalence"],
+            color=color,
+            linestyle=":",
+            linewidth=0.8,
+            alpha=0.45,
+        )
+
+        ax_cal.plot(
+            item["mpv"],
+            item["fop"],
+            marker="o",
+            markersize=3.5,
+            color=color,
+            linewidth=1.8,
+            label=name,
+        )
+
+    ax_roc.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        color="gray",
+        linewidth=1.0,
+        label="Chance",
+    )
+
+    ax_cal.plot(
+        [0, 1],
+        [0, 1],
+        linestyle=":",
+        color="black",
+        linewidth=1.0,
+        label="Perfect calibration",
+    )
+
+    ax_roc.set(
+        title="ROC curves",
+        xlabel="False Positive Rate",
+        ylabel="True Positive Rate",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    ax_prc.set(
+        title="Precision–recall curves",
+        xlabel="Recall",
+        ylabel="Precision",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    ax_cal.set(
+        title="Calibration curves",
+        xlabel="Mean Predicted Probability",
+        ylabel="Observed Fraction of Positives",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    for ax in axes:
+        ax.grid(
+            True,
+            linestyle=":",
+            linewidth=0.7,
+            alpha=0.45,
+        )
+
+    if show_legend:
+        ax_roc.legend(
+            loc="lower right",
+            fontsize=8,
+            frameon=False,
+        )
+        ax_prc.legend(
+            loc="lower left",
+            fontsize=8,
+            frameon=False,
+        )
+        ax_cal.legend(
+            loc="upper left",
+            fontsize=8,
+            frameon=False,
+        )
+
+
+def generate_comparative_report(
+    configurations,
+    y_true_base=None,
+    save_dir=None,
+    table_format="fancy_grid",
+    evaluation_mode="oof",
+    model_names_map=None,
+    title=...,
+    color_offset=0,
+    axes=None,
+    show=True,
+):
+    if evaluation_mode not in ("oof", "holdout"):
+        raise ValueError(
+            f"evaluation_mode must be 'oof' or 'holdout', "
+            f"got {evaluation_mode!r}."
+        )
+
+    configurations = list(configurations)
+
+    default_names_map = {
+        "IGS2": "IGS2",
+        "Logistic_Regression_Lasso_TSFEL": "L1-LR",
+        "SVC_TSFEL": "SVC",
+        "RandomForest_TSFEL": "Random Forest",
+        "XGBoost_TSFEL": "XGBoost",
+        "InceptionTimeModified": "Inception Time",
+        "LstmTimeModified": "LSTM",
+        "VanillaTransformer": "Vanilla Transformer",
+    }
+
+    names_map = default_names_map.copy()
+
+    if model_names_map is not None:
+        names_map.update(model_names_map)
+
+    predefined_order = [
+        "IGS2",
+        "Logistic_Regression_Lasso_TSFEL",
+        "SVC_TSFEL",
+        "RandomForest_TSFEL",
+        "XGBoost_TSFEL",
+        "InceptionTimeModified",
+        "LstmTimeModified",
+    ]
+
+    def get_sort_key(item):
+        model_name = item[0]
+
+        if model_name in predefined_order:
+            return 0, predefined_order.index(model_name)
+
+        return 1, model_name
+
+    def require_key(config, key, model_name):
+        if key not in config:
+            raise KeyError(
+                f"{model_name}: required result key '{key}' is missing."
+            )
+
+        return config[key]
+
+    if evaluation_mode == "oof":
+        y_true_key = "y_true_oof"
+        probas_key = "probas_oof"
+    else:
+        y_true_key = "y_true_holdout"
+        probas_key = "probas_holdout"
+
+    def format_metric(config, metric_name, model_name):
+        if evaluation_mode == "oof":
+            mean_value = float(
+                require_key(
+                    config,
+                    f"{metric_name}_mean",
+                    model_name,
+                )
+            )
+
+            std_value = float(
+                require_key(
+                    config,
+                    f"{metric_name}_std",
+                    model_name,
+                )
+            )
+
+            return f"{mean_value:.3f} ± {std_value:.3f}"
+
+        bootstrap = require_key(
+            config,
+            "bootstrap_holdout",
+            model_name,
+        )
+
+        summary = bootstrap["summary"]
+        entry = summary[metric_name]
+
+        estimate = float(entry["estimate"])
+        ci_lower = float(entry["ci_lower"])
+        ci_upper = float(entry["ci_upper"])
+
+        return f"{estimate:.3f} [{ci_lower:.3f}, {ci_upper:.3f}]"
+
+    configurations = sorted(
+        configurations,
+        key=get_sort_key,
+    )
+
+    default_colors = sns.color_palette(
+        "tab10",
+        n_colors=max(len(configurations), 10),
+    )
+
+    results = {}
+    plot_data_list = []
+    label_prefix = "OOF" if evaluation_mode == "oof" else "Holdout"
+
+    for idx, (name, config) in enumerate(configurations):
+        display_name = names_map.get(name, name)
+
+        probas = np.asarray(
+            require_key(config, probas_key, name),
+            dtype=float,
+        ).ravel()
+
+        current_y = (
+            y_true_base
+            if y_true_base is not None
+            else require_key(config, y_true_key, name)
+        )
+
+        y_true = np.asarray(current_y, dtype=int).ravel()
+
+        if probas.shape[0] != y_true.shape[0]:
+            raise ValueError(
+                f"{name}: probas and y_true have different lengths: "
+                f"{len(probas)} != {len(y_true)}."
+            )
+
+        prevalence = float(np.mean(y_true))
+
+        constant_predictions = np.all(probas == probas[0])
+
+        if constant_predictions:
+            fpr = np.array([0.0, 1.0])
+            tpr = np.array([0.0, 1.0])
+
+            precision = np.array([
+                1.0,
+                prevalence,
+                prevalence,
+            ])
+
+            recall = np.array([
+                0.0,
+                0.0,
+                1.0,
+            ])
+
+            fop = np.array([prevalence])
+            mpv = np.array([float(probas[0])])
+
+        else:
+            fpr, tpr, _ = roc_curve(
+                y_true,
+                probas,
+            )
+
+            precision, recall, _ = precision_recall_curve(
+                y_true,
+                probas,
+            )
+
+            fop, mpv = calibration_curve(
+                y_true,
+                probas,
+                n_bins=10,
+                strategy="uniform",
+            )
+
+        if evaluation_mode == "oof":
+            auc_val = float(
+                require_key(config, "auc_oof", name)
+            )
+
+            auprc_val = float(
+                require_key(config, "auprc_oof", name)
+            )
+
+            intercept_val = float(
+                require_key(
+                    config,
+                    "calibration_intercept_oof",
+                    name,
+                )
+            )
+
+            slope_val = float(
+                require_key(
+                    config,
+                    "calibration_slope_oof",
+                    name,
+                )
+            )
+
+            ici_val = float(
+                require_key(config, "ici_oof", name)
+            )
+
+        else:
+            bootstrap = require_key(
+                config,
+                "bootstrap_holdout",
+                name,
+            )
+
+            summary = bootstrap["summary"]
+
+            auc_val = float(
+                summary["auc"]["estimate"]
+            )
+
+            auprc_val = float(
+                summary["auprc"]["estimate"]
+            )
+
+            cal_stats = get_calibration_stats(
+                probas,
+                y_true,
+            )
+
+            intercept_val = float(
+                cal_stats["intercept"]
+            )
+
+            slope_val = float(
+                cal_stats["slope"]
+            )
+
+            ici_val = float(
+                cal_stats["ici"]
+            )
+
+        metrics_dict = {
+            "AUC ROC": format_metric(
+                config,
+                "auc",
+                name,
+            ),
+            "AUPRC": format_metric(
+                config,
+                "auprc",
+                name,
+            ),
+            "F1-Score": format_metric(
+                config,
+                "f1_score"
+                if evaluation_mode == "oof"
+                else "f1",
+                name,
+            ),
+            "MCC": format_metric(
+                config,
+                "mcc",
+                name,
+            ),
+            "Brier": format_metric(
+                config,
+                "brier",
+                name,
+            ),
+            "Intercept": format_metric(
+                config,
+                "calibration_intercept",
+                name,
+            ),
+            "Slope": format_metric(
+                config,
+                "calibration_slope",
+                name,
+            ),
+            "ICI": format_metric(
+                config,
+                "ici",
+                name,
+            ),
+            "E90": format_metric(
+                config,
+                "e90",
+                name,
+            ),
+        }
+
+        results[display_name] = metrics_dict
+
+        color = config.get(
+            "color",
+            default_colors[
+                (idx + color_offset) % len(default_colors)
+            ],
+        )
+
+        plot_data_list.append({
+            "name": display_name,
+            "color": color,
+            "fpr": fpr,
+            "tpr": tpr,
+            "auc_val": auc_val,
+            "recall": recall,
+            "precision": precision,
+            "auprc_val": auprc_val,
+            "fop": fop,
+            "mpv": mpv,
+            "prevalence": prevalence,
+            "intercept_val": intercept_val,
+            "slope_val": slope_val,
+            "ici_val": ici_val,
+            "label_prefix": label_prefix,
+        })
+
+    results_df = pd.DataFrame(results).T
+
+    print(
+        f"\n=== {label_prefix} PERFORMANCE "
+        "COMPARISON TABLE ==="
+    )
+
+    print(
+        tabulate(
+            results_df,
+            headers="keys",
+            tablefmt=table_format,
+            showindex=True,
+        )
+    )
+
+    owns_figure = axes is None
+
+    if owns_figure:
+        fig, axes = plt.subplots(
+            1,
+            3,
+            figsize=(15, 5),
+            layout="constrained",
+        )
+    else:
+        fig = axes[0].figure
+
+    plot_comparative_axes(
+        plot_data_list=plot_data_list,
+        axes=axes,
+        show_legend=owns_figure,
+    )
+
+    if owns_figure:
+        if title is ...:
+            fig.suptitle(
+                f"{label_prefix} Performance Comparison",
+                fontsize=14,
+                fontweight="bold",
+            )
+        elif title is not None:
+            fig.suptitle(
+                f"{title} — {label_prefix}",
+                fontsize=14,
+                fontweight="bold",
+            )
+
+    fig_bar = None
+
+    if save_dir is not None and owns_figure:
+        output_path = Path(save_dir)
+        output_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fig.savefig(
+            output_path
+            / f"collective_performance_{label_prefix.lower()}.pdf",
+            bbox_inches="tight",
+        )
+
+        fig.savefig(
+            output_path
+            / f"collective_performance_{label_prefix.lower()}.png",
+            dpi=600,
+            bbox_inches="tight",
+        )
+
+        with open(
+            output_path
+            / f"results_table_{label_prefix.lower()}.tex",
+            "w",
+            encoding="utf-8",
+        ) as output_file:
+            output_file.write(
+                tabulate(
+                    results_df,
+                    headers="keys",
+                    tablefmt="latex_booktabs",
+                    showindex=True,
+                )
+            )
+
+    if (
+        evaluation_mode == "holdout"
+        and owns_figure
+    ):
+        fig_bar = plot_holdout_metrics_barplot(
+            configurations=configurations,
+            save_dir=save_dir,
+            model_names_map=model_names_map,
+            color_offset=color_offset,
+        )
+
+    if owns_figure and show:
+        plt.show()
+
+    if owns_figure:
+        plt.close(fig)
+
+    if fig_bar is not None:
+        plt.close(fig_bar)
 
     return results_df
 
 
+def plot_comparative_axes(
+    plot_data_list,
+    axes,
+    show_legend=False,
+):
+    ax_roc, ax_prc, ax_cal = axes
+
+    for item in plot_data_list:
+        name = item["name"]
+        color = item["color"]
+
+        # ROC
+        ax_roc.plot(
+            item["fpr"],
+            item["tpr"],
+            color=color,
+            linewidth=1.8,
+            label=name,
+        )
+
+        # PRC
+        ax_prc.plot(
+            item["recall"],
+            item["precision"],
+            color=color,
+            linewidth=1.8,
+        )
+
+        ax_prc.axhline(
+            y=item["prevalence"],
+            color=color,
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.5,
+        )
+
+        # Calibration
+        ax_cal.plot(
+            item["mpv"],
+            item["fop"],
+            marker="o",
+            markersize=3.5,
+            color=color,
+            linewidth=1.8,
+        )
+
+    # Chance ROC
+    ax_roc.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        color="gray",
+        linewidth=1.0,
+    )
+
+    # Perfect calibration
+    ax_cal.plot(
+        [0, 1],
+        [0, 1],
+        linestyle=":",
+        color="black",
+        linewidth=1.0,
+    )
+
+    ax_roc.set(
+        xlabel="False Positive Rate",
+        ylabel="True Positive Rate",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    ax_prc.set(
+        xlabel="Recall",
+        ylabel="Precision",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    ax_cal.set(
+        xlabel="Mean Predicted Probability",
+        ylabel="Observed Fraction of Positives",
+        xlim=(0.0, 1.0),
+        ylim=(0.0, 1.02),
+    )
+
+    for ax in axes:
+        ax.grid(
+            True,
+            linestyle=":",
+            linewidth=0.7,
+            alpha=0.45,
+        )
+
+    # Une seule légende : correspondance couleur <-> sous-groupe
+    # uniquement sur la colonne ROC/AUC
+    if show_legend:
+        ax_roc.legend(
+            loc="lower right",
+            fontsize=8,
+            frameon=False,
+            handlelength=2.2,
+        )
+
+def plot_subgroup_comparative_grid(
+    subgroup_reports,
+    model_title=None,
+    model_names_map=None,
+    save_path=None,
+    figsize_per_row=(14, 4.5),
+    dpi=600,
+    show=True,
+):
+    """
+    Display subgroup performance as a grid.
+
+    Rows correspond to subgroup variables.
+    Columns correspond to ROC, Precision-Recall and Calibration curves.
+    """
+
+    if not subgroup_reports:
+        raise ValueError(
+            "subgroup_reports cannot be empty."
+        )
+
+    subgroup_reports = dict(subgroup_reports)
+
+    row_names = list(subgroup_reports.keys())
+    n_rows = len(row_names)
+
+    fig_width, row_height = figsize_per_row
+
+    fig, axes = plt.subplots(
+        nrows=n_rows,
+        ncols=3,
+        figsize=(fig_width, n_rows * row_height),
+        squeeze=False,
+        layout="constrained",
+    )
+
+    panel_letters = iter(
+        "abcdefghijklmnopqrstuvwxyz"
+    )
+
+    column_titles = [
+        "ROC curves",
+        "Precision–recall curves",
+        "Calibration curves",
+    ]
+
+    for row_idx, (
+        subgroup_name,
+        configurations,
+    ) in enumerate(subgroup_reports.items()):
+
+        row_axes = axes[row_idx, :]
+
+        generate_comparative_report(
+            configurations=configurations,
+            evaluation_mode="holdout",
+            model_names_map=model_names_map,
+
+            # IMPORTANT :
+            # pas de titre automatique
+            title=None,
+
+            axes=row_axes,
+            show=False,
+        )
+
+        # Supprime explicitement tout titre éventuellement ajouté
+        # par une fonction appelée plus bas.
+        for ax in row_axes:
+            _show_title(
+                title=None,
+                default_title="",
+                ax=ax,
+            )
+
+        # Lettres (a), (b), ...
+        for ax in row_axes:
+            ax.text(
+                0.02,
+                0.98,
+                f"({next(panel_letters)})",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=10,
+                fontweight="bold",
+            )
+
+        # Titre de ligne
+        row_axes[0].annotate(
+            subgroup_name,
+            xy=(-0.28, 0.5),
+            xycoords="axes fraction",
+            ha="center",
+            va="center",
+            rotation=90,
+            fontsize=10,
+            fontweight="bold",
+        )
+
+        # Une seule légende :
+        # uniquement dans la figure ROC
+        row_axes[0].legend(
+            loc="lower right",
+            fontsize=7,
+            frameon=False,
+            handlelength=2.2,
+        )
+
+        # Suppression explicite des éventuelles légendes PRC / calibration
+        for ax in row_axes[1:]:
+            legend = ax.get_legend()
+
+            if legend is not None:
+                legend.remove()
+
+    # Titres de colonnes seulement sur la première ligne
+    for col_idx, column_title in enumerate(column_titles):
+        axes[0, col_idx].set_title(
+            column_title,
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
+        )
+
+    # PAS DE SUPTITLE
+    # Le titre général sera ajouté dans LaTeX.
+
+    if save_path is not None:
+        save_path = Path(save_path)
+
+        save_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fig.savefig(
+            save_path,
+            bbox_inches="tight",
+        )
+
+        fig.savefig(
+            save_path.with_suffix(".png"),
+            dpi=dpi,
+            bbox_inches="tight",
+        )
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def generate_subgroup_grid_from_configs(
+    probas,
+    y_true,
+    subgroup_configs,
+    n_bootstrap=2000,
+    confidence_level=0.95,
+    seed=42,
+    model_title=None,
+    model_names_map=None,
+    save_path=None,
+    figsize_per_row=(14, 4.5),
+    dpi=600,
+    show=True,
+):
+    subgroup_reports = {}
+
+    for subgroup_config in subgroup_configs:
+        subgroup_name = subgroup_config["name"]
+        subgroup_labels = subgroup_config["labels"]
+        subgroup_names = subgroup_config.get("names")
+
+        subgroup_reports[subgroup_name] = (
+            compute_subgroup_holdout_metrics(
+                probas=probas,
+                y_true=y_true,
+                subgroup_labels=subgroup_labels,
+                subgroup_names=subgroup_names,
+                n_bootstrap=n_bootstrap,
+                confidence_level=confidence_level,
+                seed=seed,
+            )
+        )
+
+    return plot_subgroup_comparative_grid(
+        subgroup_reports=subgroup_reports,
+        model_title=model_title,
+        model_names_map=model_names_map,
+        save_path=save_path,
+        figsize_per_row=figsize_per_row,
+        dpi=dpi,
+        show=show,
+    )
