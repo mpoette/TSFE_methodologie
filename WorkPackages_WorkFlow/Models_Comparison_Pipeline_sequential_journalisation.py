@@ -147,12 +147,11 @@ warnings.filterwarnings(
 pl.Config.set_tbl_cols(-1)
 
 mode_names = ["score", "wp1", "wp2", "wp3"]
-mode_names = ["wp1","score"]
-# mode_names = ["score"]
+mode_names = ["wp3_test"]
 mode_names = ["LR"]
 RUN_COMPARISON = False
-RUN_TRAINING = False
-RUN_LASSO = False
+RUN_TRAINING = True
+RUN_LASSO = True
 RUN_INTERPRETABILITY = True
 RUN_TEST = True
 POPULATION = "Tout"
@@ -183,7 +182,7 @@ for mode_run in mode_names:
     elif mode_run == "LR":
         mode_duplicates = "prio_first"
         target_labels = ["Survie à 28 jours"]
-        model_names = ["Logistic Regression Lasso TSFEL"]
+        model_names = ["XGBoost TSFEL"]
         stratify_modes = ["target_col"]
         WINDOWING_MODE = "24h début réanimation sans remplissage"
         optuna_run_options = [True]
@@ -215,7 +214,16 @@ for mode_run in mode_names:
         stratify_modes = ["target_col", "h24-j28"]
         optuna_run_options = [False]
         feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
-        balancing_methods = ["Aucune Méthode", "DownSampling 50-50", "UpSampling 50-50"]
+        balancing_methods = ["Aucune Méthode"]
+
+    elif mode_run == "wp2_test":
+        WINDOWING_MODE =  "24h fin réanimation sans remplissage"
+        target_labels = ["Survie à 28 jours"]
+        model_names = ["LstmTimeModified", "XGBoost TSFEL","Logistic Regression Lasso TSFEL"]
+        stratify_modes = ["target_col"]
+        optuna_run_options = [False]
+        feature_modes = ["Mode Commonly Used Without pmsi"]
+        balancing_methods = ["Aucune Méthode"]
 
     elif mode_run == "wp3":
         WINDOWING_MODE =  "resampling aléatoire 'lomax' prio 24h sans remplissage"
@@ -224,7 +232,16 @@ for mode_run in mode_names:
         stratify_modes = ["target_col", "h24-j28"]
         optuna_run_options = [False]
         feature_modes = ["Mode IGS2", "Mode Commonly Used Without pmsi"]
-        balancing_methods = ["Aucune Méthode", "DownSampling 50-50", "UpSampling 50-50"]
+        balancing_methods = ["Aucune Méthode"]
+    
+    elif mode_run == "wp3_test":
+        WINDOWING_MODE =  "resampling aléatoire 'lomax' prio 24h sans remplissage"
+        target_labels = ["Survie à 28 jours"]
+        model_names = ["LstmTimeModified", "XGBoost TSFEL", "Logistic Regression Lasso TSFEL"]
+        stratify_modes = ["target_col"]
+        optuna_run_options = [False]
+        feature_modes = ["Mode Commonly Used Without pmsi"]
+        balancing_methods = ["Aucune Méthode"]
     for target_label in target_labels:
         TARGET_LABEL = target_label
         for stratification_choice in stratify_modes:
@@ -397,8 +414,9 @@ for mode_run in mode_names:
                                     df_merged.select("encounterId").unique().shape[0],
                                 )
                                 df_labeled = tsu.prepare_labels(df_merged, 'relative')
-                                # TODO: Move this line earlier in the pipeline.
+
                                 df_labeled = df_labeled.filter(pl.col('delta_hour') >= 0)
+                                
                                 df_labeled.columns
                                 logger.debug(
                                     "LOG df_labeled unique encounterIds: %d",
@@ -2688,6 +2706,43 @@ for mode_run in mode_names:
                                                         ),
                                                     )
                                                 )
+                                                postproc.shap_tsfel_importance_matrix(
+                                                    interpretability_holdout_results,
+                                                    savefig=True,
+                                                    folder=holdout_output_dir,
+                                                    top_raw_variables=None,
+                                                    top_descriptors=None,
+                                                )
+
+                                                postproc.shap_tsfel_importance_matrix(
+                                                    interpretability_holdout_results,
+                                                    filename = "holdout_ensemble_treeshap_tsfel_all_matrix",
+                                                    savefig=True,
+                                                    all_descriptors = True,
+                                                    folder=holdout_output_dir,
+                                                    top_raw_variables=None,
+                                                    top_descriptors=None,
+                                                )
+
+                                                postproc.shap_tsfel_importance_matrix(
+                                                    interpretability_holdout_results,
+                                                    savefig=True,
+                                                    folder=holdout_output_dir,
+                                                    top_raw_variables=None,
+                                                    top_descriptors=None,
+                                                    transpose = True
+                                                )
+
+                                                postproc.shap_tsfel_importance_matrix(
+                                                    interpretability_holdout_results,
+                                                    filename = "holdout_ensemble_treeshap_tsfel_all_matrix",
+                                                    savefig=True,
+                                                    all_descriptors = True,
+                                                    folder=holdout_output_dir,
+                                                    top_raw_variables=None,
+                                                    top_descriptors=None,
+                                                    transpose = True
+                                                )
 
                                             # --------------------------------------------------------
                                             # Logistic regression + Lasso -> coefficients
@@ -2719,12 +2774,13 @@ for mode_run in mode_names:
                                                     )
                                                 )
                                                 csv_filepath = holdout_output_dir / "holdout_ensemble_linear_coefficients.csv"
+                                                csv_filepath2 = holdout_output_dir / "holdout_ensemble_linear_cumulative_importance.csv"
                                                 postproc.plot_odds_ratios_with_others(csv_file  = csv_filepath,
                                                                     save = True,
                                                                     folder = holdout_output_dir,
                                                                     title = None
                                                                     )
-                                                postproc.plot_aggregated_odds_ratios(csv_file  = csv_filepath,
+                                                postproc.plot_aggregated_odds_ratios(csv_file  = csv_filepath2,
                                                                     save = True,
                                                                     folder = holdout_output_dir,
                                                                     title = None

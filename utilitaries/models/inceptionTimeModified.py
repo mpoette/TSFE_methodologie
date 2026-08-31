@@ -1,17 +1,17 @@
 """
-InceptionTime pour classification binaire de séries temporelles
+InceptionTime for binary classification of time series
 ================================================================
 
-Module complet et autonome intégrant :
-- Architecture InceptionTime (Fawaz et al.)
-- Entraînement avec early stopping, class weighting, calibration température
-- Fine-tuning superficiel (gel partiel des couches)
-- Évaluation robuste avec métriques calibrées
+Complete and self-contained module integrating:
+- InceptionTime architecture (Fawaz et al.)
+- Training with early stopping, class weighting, temperature calibration
+- Shallow fine-tuning (partial layer freezing)
+- Robust evaluation with calibrated metrics
 
 Usage:
     from inception_time import train_inception_time, fine_tune_inception_time, evaluate_on_test
 
-    # Entraînement from scratch
+    # Training from scratch
     model, T, history, splits = train_inception_time(X_train, y_train)
     
     # Fine-tuning
@@ -19,11 +19,11 @@ Usage:
         "best_model.pt", X_new, y_new, last_k_blocks=2
     )
     
-    # Évaluation
+    # Evaluation
     auc, brier, T = evaluate_on_test(X_test, y_test, "best_model.pt")
 
-Auteur: Adaptation avec corrections et améliorations
-Licence: MIT
+Author: Adaptation with corrections and improvements
+License: MIT
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ try:
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
-    warnings.warn("tqdm non disponible - pas de barre de progression")
+    warnings.warn("tqdm not available - no progress bar")
 
 try:
     from sklearn.metrics import roc_auc_score, brier_score_loss
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    warnings.warn("sklearn non disponible - métriques d'évaluation indisponibles")
+    warnings.warn("sklearn not available - evaluation metrics unavailable")
 
 
 # ============================================================================
@@ -58,7 +58,7 @@ except ImportError:
 # ============================================================================
 
 class Conv1dSamePadding(nn.Conv1d):
-    """Conv1D avec padding 'same' à la TensorFlow."""
+    """Conv1D with TensorFlow-like 'same' padding."""
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return conv1d_same_padding(
@@ -68,7 +68,7 @@ class Conv1dSamePadding(nn.Conv1d):
 
 
 def conv1d_same_padding(input, weight, bias, stride, dilation, groups):
-    """Implémentation du padding 'same'."""
+    """Implementation of 'same' padding."""
     kernel, dilation, stride = weight.size(2), dilation[0], stride[0]
     l_out = l_in = input.size(2)
     padding = (((l_out - 1) * stride) - l_in + (dilation * (kernel - 1)) + 1)
@@ -81,7 +81,7 @@ def conv1d_same_padding(input, weight, bias, stride, dilation, groups):
 
 
 class InceptionBlock(nn.Module):
-    """Bloc Inception avec convolutions multi-échelles et connexion résiduelle."""
+    """Inception block with multi-scale convolutions and a residual connection."""
     
     def __init__(
         self,
@@ -94,7 +94,7 @@ class InceptionBlock(nn.Module):
         num_groups: int = 8
     ) -> None:
         super().__init__()
-        assert kernel_size > 3, "kernel_size doit être > 3"
+        assert kernel_size > 3, "kernel_size must be > 3"
         
         self.use_bottleneck = bottleneck_channels > 0
         if self.use_bottleneck:
@@ -103,7 +103,7 @@ class InceptionBlock(nn.Module):
                 kernel_size=1, bias=False
             )
         
-        # Trois échelles de kernel : k, k/2, k/4
+        # Three kernel scales: k, k/2, k/4
         kernel_size_s = [kernel_size // (2 ** i) for i in range(3)]
         start_channels = bottleneck_channels if self.use_bottleneck else in_channels
         channels = [start_channels] + [out_channels] * 3
@@ -119,7 +119,7 @@ class InceptionBlock(nn.Module):
             for i in range(len(kernel_size_s))
         ])
         
-        # GroupNorm pour stabilité avec petits batchs
+        # GroupNorm for stability with small batches
         self.groupnorm = nn.GroupNorm(
             num_groups=num_groups,
             num_channels=channels[-1]
@@ -151,7 +151,7 @@ class InceptionBlock(nn.Module):
 
 
 class InceptionModel(nn.Module):
-    """Modèle InceptionTime complet pour classification binaire."""
+    """Full InceptionTime model for binary classification."""
     
     def __init__(
         self,
@@ -165,7 +165,7 @@ class InceptionModel(nn.Module):
     ) -> None:
         super().__init__()
         
-        # Sauvegarde des arguments pour reconstruction
+        # Save arguments for reconstruction
         self.input_args = {
             'num_blocks': num_blocks,
             'in_channels': in_channels,
@@ -176,17 +176,17 @@ class InceptionModel(nn.Module):
             'num_pred_classes': num_pred_classes,
         }
         
-        # Expansion des paramètres
+        # Parameter expansion
         channels = [in_channels] + self._expand_to_blocks(out_channels, num_blocks)
         bottleneck_channels = self._expand_to_blocks(bottleneck_channels, num_blocks)
         kernel_sizes = self._expand_to_blocks(kernel_sizes, num_blocks)
         
         if use_residuals == 'default':
-            # Connexion résiduelle tous les 3 blocs (standard InceptionTime)
+            # Residual connection every 3 blocks (standard InceptionTime)
             use_residuals = [True if i % 3 == 2 else False for i in range(num_blocks)]
         use_residuals = self._expand_to_blocks(use_residuals, num_blocks)
         
-        # Construction des blocs
+        # Building the blocks
         self.blocks = nn.Sequential(*[
             InceptionBlock(
                 in_channels=channels[i],
@@ -198,7 +198,7 @@ class InceptionModel(nn.Module):
             for i in range(num_blocks)
         ])
         
-        # Tête de classification
+        # Classification head
         self.linear = nn.Linear(
             in_features=channels[-1],
             out_features=num_pred_classes
@@ -206,39 +206,39 @@ class InceptionModel(nn.Module):
     
     @staticmethod
     def _expand_to_blocks(value, num_blocks: int):
-        """Convertit scalaire ou liste en liste de taille num_blocks."""
+        """Converts a scalar or list into a list of length num_blocks."""
         if isinstance(value, list):
             assert len(value) == num_blocks, f"Liste doit avoir {num_blocks} éléments"
             return value
         return [value] * num_blocks
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Global Average Pooling sur dimension temporelle
+        # Global Average Pooling over the time dimension
         x = self.blocks(x).mean(dim=-1)
         return self.linear(x)
 
 
 # ============================================================================
-# CALIBRATION TEMPÉRATURE
+# TEMPERATURE CALIBRATION
 # ============================================================================
 
 class TemperatureCalibrator(nn.Module):
     """
-    Calibrateur affine pour classification binaire.
+    Affine calibrator for binary classification.
 
-    La transformation appliquée aux logits est::
+    The transformation applied to the logits is::
 
         calibrated_logits = logits / T + bias
 
-    ``T`` corrige la confiance du modèle, tandis que ``bias`` corrige le
-    décalage global des logits, notamment celui pouvant être introduit par
-    ``pos_weight`` pendant l'entraînement.
+    ``T`` corrects the confidence of the model, while ``bias`` corrects the
+    global offset of the logits, in particular the one that can be introduced
+    by ``pos_weight`` during training.
     """
 
     def __init__(self, init_T: float = 1.0, init_bias: float = 0.0) -> None:
         super().__init__()
         if init_T <= 0:
-            raise ValueError("init_T doit être strictement positif")
+            raise ValueError("init_T must be strictly positive")
 
         self.log_T = nn.Parameter(
             torch.tensor(math.log(init_T), dtype=torch.float32)
@@ -249,11 +249,11 @@ class TemperatureCalibrator(nn.Module):
 
     @property
     def T(self) -> torch.Tensor:
-        """Retourne une température strictement positive."""
+        """Returns a strictly positive temperature."""
         return self.log_T.exp()
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """Applique la calibration affine aux logits bruts."""
+        """Applies the affine calibration to the raw logits."""
         return logits / self.T + self.bias
 
     def fit(
@@ -263,14 +263,14 @@ class TemperatureCalibrator(nn.Module):
         max_iter: int = 200
     ) -> float:
         """
-        Apprend ``T`` et ``bias`` sur le jeu de validation.
+        Learns ``T`` and ``bias`` on the validation set.
 
-        Les logits sont détachés du graphe du modèle principal et les deux
-        paramètres de calibration sont optimisés avec LBFGS en minimisant la
-        BCE non pondérée.
+        The logits are detached from the main model graph and the two
+        calibration parameters are optimized with LBFGS by minimizing the
+        unweighted BCE.
 
         Returns:
-            Valeur finale de la BCE calibrée.
+            Final value of the calibrated BCE.
         """
         logits_val = logits_val.detach()
         y_val = y_val.detach().float().reshape(-1)
@@ -312,14 +312,14 @@ class TemperatureCalibrator(nn.Module):
 # ============================================================================
 
 class TimeSeriesDataset(Dataset):
-    """Dataset PyTorch pour séries temporelles (N, T, F) -> (N, F, T)."""
+    """PyTorch dataset for time series (N, T, F) -> (N, F, T)."""
     
     def __init__(self, X: np.ndarray, y: np.ndarray):
-        assert X.ndim == 3, "X doit être (N, T, F)"
+        assert X.ndim == 3, "X must be (N, T, F)"
         if y.ndim == 2:
             y = y.reshape(-1)
         
-        # Permutation pour Conv1D : (N, T, F) -> (N, F, T)
+        # Permutation for Conv1D: (N, T, F) -> (N, F, T)
         self.X = torch.from_numpy(X).permute(0, 2, 1).contiguous().float()
         self.y = torch.from_numpy(y).float()
     
@@ -335,7 +335,7 @@ def stratified_train_val_indices(
     val_ratio: float = 0.2,
     seed: int = 42
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Split stratifié manuel pour classification binaire."""
+    """Manual stratified split for binary classification."""
     y = y.reshape(-1)
     rng = np.random.default_rng(seed)
     
@@ -361,7 +361,7 @@ def compute_pos_weight_from_indices(
     y: np.ndarray,
     train_idx: np.ndarray
 ) -> Optional[torch.Tensor]:
-    """Calcule pos_weight pour BCEWithLogitsLoss (class balancing)."""
+    """Computes pos_weight for BCEWithLogitsLoss (class balancing)."""
     ytr = y.reshape(-1)[train_idx]
     
     if set(np.unique(ytr)).issubset({0, 1}):
@@ -378,7 +378,7 @@ def _gather_logits(
     loader: DataLoader,
     device: torch.device
 ) -> torch.Tensor:
-    """Collecte les logits sur un DataLoader."""
+    """Collects the logits over a DataLoader."""
     was_training = model.training
     model.eval()
     outs = []
@@ -425,69 +425,69 @@ def train_inception_time(
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
     progress: bool = True,
     seed : int = 42,
-    X_val: Optional[np.ndarray] = None,  # <-- AJOUT : Paramètre optionnel
-    y_val: Optional[np.ndarray] = None,  # <-- AJOUT : Paramètre optionnel
+    X_val: Optional[np.ndarray] = None,  # <-- ADDED: optional parameter
+    y_val: Optional[np.ndarray] = None,  # <-- ADDED: optional parameter
 ) -> Tuple[InceptionModel, float, Dict[str, list], Dict[str, np.ndarray]]:
     """
-    Entraîne InceptionTime from scratch avec toutes les améliorations.
+    Trains InceptionTime from scratch with all the improvements.
     
     Args:
-        X: Données (N, T, F)
-        y: Labels binaires (N,) ou (N, 1)
-        val_ratio: Proportion validation
-        num_blocks: Nombre de blocs Inception
-        out_channels: Canaux sortie par bloc
-        bottleneck_channels: Canaux du bottleneck
-        kernel_sizes: Taille kernel de base
-        batch_size: Taille batch
-        epochs: Nombre d'époques max
+        X: Data (N, T, F)
+        y: Binary labels (N,) or (N, 1)
+        val_ratio: Validation proportion
+        num_blocks: Number of Inception blocks
+        out_channels: Output channels per block
+        bottleneck_channels: Bottleneck channels
+        kernel_sizes: Base kernel size
+        batch_size: Batch size
+        epochs: Maximum number of epochs
         patience: Early stopping patience
-        min_delta: Amélioration minimale pour early stopping
-        lr: Learning rate initial
-        weight_decay: Régularisation L2
-        clip_grad: Gradient clipping (None pour désactiver)
-        use_scheduler: Utiliser CosineAnnealingLR
-        calibrate: Calibrer température sur validation
-        save_best_path: Chemin sauvegarde (None pour désactiver)
-        device: Device PyTorch
-        progress: Afficher barre progression
+        min_delta: Minimum improvement for early stopping
+        lr: Initial learning rate
+        weight_decay: L2 regularization
+        clip_grad: Gradient clipping (None to disable)
+        use_scheduler: Use CosineAnnealingLR
+        calibrate: Calibrate temperature on the validation set
+        save_best_path: Save path (None to disable)
+        device: PyTorch device
+        progress: Show progress bar
     
     Returns:
         (model, T, history, splits)
-        - model: Modèle entraîné
-        - T: Température calibrée
-        - history: Historique des pertes
-        - splits: Indices train/val
+        - model: Trained model
+        - T: Calibrated temperature
+        - history: Loss history
+        - splits: train/val indices
     """
     # Validations
-    assert X.shape[0] == y.reshape(-1).shape[0], "Mismatch N entre X et y"
-    assert X.shape[2] > 0, "X doit avoir au moins 1 feature"
+    assert X.shape[0] == y.reshape(-1).shape[0], "N mismatch between X and y"
+    assert X.shape[2] > 0, "X must have at least 1 feature"
     assert X.ndim == 3, f"X doit être (N,T,F), reçu shape {X.shape}"
     
     device = torch.device(device)
-    # --- CONFIGURATION STRICTE DU DÉTERMINISME PYTORCH ---
+    # --- STRICT PYTORCH DETERMINISM CONFIGURATION ---
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # Générateur déterministe pour le DataLoader
+    # Deterministic generator for the DataLoader
     gen = torch.Generator()
     gen.manual_seed(seed)
     if X_val is not None and y_val is not None:
         assert X_val.ndim == 3, f"X_val doit être (N,T,F), reçu shape {X_val.shape}"
-        assert X_val.shape[0] == y_val.reshape(-1).shape[0], "Mismatch N entre X_val et y_val"
-        assert X_val.shape[2] == X.shape[2], "Mismatch de features entre X et X_val"
+        assert X_val.shape[0] == y_val.reshape(-1).shape[0], "N mismatch between X_val and y_val"
+        assert X_val.shape[2] == X.shape[2], "Feature mismatch between X and X_val"
         
-        # On utilise les jeux passés en paramètres directement
+        # We use the sets passed as parameters directly
         train_ds = TimeSeriesDataset(X, y)
         val_ds = TimeSeriesDataset(X_val, y_val)
         
-        # Remplissage par défaut pour éviter de casser les dictionnaires de splits retournés
+        # Default filling to avoid breaking the returned splits dictionaries
         train_idx = np.arange(len(X))
         val_idx = np.arange(len(X_val))
     else:
-        # Ancien comportement : Split stratifié automatique
+        # Previous behavior: automatic stratified split
         train_idx, val_idx = stratified_train_val_indices(y, val_ratio=val_ratio, seed=seed)
         ds = TimeSeriesDataset(X, y)
         train_ds = Subset(ds, train_idx)
@@ -509,7 +509,7 @@ def train_inception_time(
         pin_memory=(device.type == 'cuda')
     )
     
-    # Modèle
+    # Model
     in_channels = X.shape[2]
     model = InceptionModel(
         num_blocks=num_blocks,
@@ -521,7 +521,7 @@ def train_inception_time(
         num_pred_classes=1,
     ).to(device)
     
-    # Loss avec class weighting
+    # Loss with class weighting
     pos_w = compute_pos_weight_from_indices(y, train_idx)
     criterion = nn.BCEWithLogitsLoss(
         pos_weight=pos_w.to(device) if pos_w is not None else None
@@ -648,18 +648,18 @@ def train_inception_time(
                     pbar.set_postfix_str(f"Early stop @ epoch {epoch}")
                 break
     
-    # Rechargement meilleur état
+    # Reload best state
     if best_state is not None:
         model.load_state_dict(best_state)
         print(f"\n✓ Meilleur modèle chargé (epoch {best_epoch}, val_loss={best_val:.6f})")
     
-    # ========== CALIBRATION TEMPÉRATURE ==========
+    # ========== TEMPERATURE CALIBRATION ==========
     T_value = 1.0
     calibration_bias = 0.0
     model.temperature_ = T_value
     model.calibration_bias_ = calibration_bias
     if calibrate:
-        print("Calibration température sur validation...")
+        print("Temperature calibration on the validation set...")
         logits_val = _gather_logits(model, val_loader, device)
         if X_val is not None and y_val is not None:
             y_val = torch.from_numpy(y_val.reshape(-1)).float().to(device)
@@ -678,14 +678,14 @@ def train_inception_time(
         
         print(f"✓ Calibration : T = {T_value:.4f}, bias = {calibration_bias:.4f}")
         
-        # Mise à jour checkpoint avec T
+        # Update checkpoint with T
         if save_best_path is not None and os.path.exists(save_best_path):
             ckpt = torch.load(save_best_path, map_location='cpu', weights_only=False)
             ckpt['temperature'] = T_value
             ckpt['calibration_bias'] = calibration_bias
             torch.save(ckpt, save_best_path)
     
-    # Libération mémoire GPU
+    # Free GPU memory
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     
@@ -703,22 +703,22 @@ def set_trainable_last_k_blocks(
     train_linear: bool = True
 ):
     """
-    Gèle tous les blocs sauf les K derniers.
-    Utilise des hooks pour maintenir eval() sur les blocs gelés.
+    Freezes all blocks except the last K.
+    Uses hooks to keep eval() on the frozen blocks.
     """
-    assert isinstance(model.blocks, nn.Sequential), "model.blocks doit être nn.Sequential"
+    assert isinstance(model.blocks, nn.Sequential), "model.blocks must be nn.Sequential"
     num_blocks = len(model.blocks)
     k = max(0, min(last_k_blocks, num_blocks))
     
-    # Tout geler par défaut
+    # Freeze everything by default
     for p in model.parameters():
         p.requires_grad = False
     
-    # Hook pour forcer eval() même après model.train()
+    # Hook to force eval() even after model.train()
     def force_eval_mode(module, input):
         module.eval()
     
-    # Blocs gelés : eval() permanent via hook
+    # Frozen blocks: permanent eval() via hook
     for i in range(0, num_blocks - k):
         blk = model.blocks[i]
         blk.eval()
@@ -731,7 +731,7 @@ def set_trainable_last_k_blocks(
         for p in blk.parameters():
             p.requires_grad = True
     
-    # Couche linéaire
+    # Linear layer
     if train_linear:
         model.linear.train()
         for p in model.linear.parameters():
@@ -746,7 +746,7 @@ def load_model_from_checkpoint(
     ckpt_path: str,
     device: Union[str, torch.device] = None
 ) -> Tuple[InceptionModel, dict, Optional[float], float]:
-    """Charge le modèle et ses paramètres de calibration depuis un checkpoint."""
+    """Loads the model and its calibration parameters from a checkpoint."""
     device = torch.device(device) if device is not None else (
         torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     )
@@ -754,7 +754,7 @@ def load_model_from_checkpoint(
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint non trouvé : {ckpt_path}")
     
-    # PyTorch 2.6+ : weights_only=False pour compatibilité numpy
+    # PyTorch 2.6+: weights_only=False for numpy compatibility
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     init_args = ckpt['init_args']
     state_dict = ckpt.get('state_dict') or ckpt.get('model_state_dict')
@@ -792,23 +792,23 @@ def fine_tune_inception_time(
     seed : int = 42,
 ) -> Tuple[InceptionModel, float, Dict[str, list], Dict[str, np.ndarray]]:
     """
-    Fine-tuning superficiel : gel des blocs profonds, entraînement des derniers.
+    Shallow fine-tuning: freeze deep blocks, train the last ones.
     
     Args:
-        model_or_ckpt: Chemin checkpoint OU modèle pré-entraîné
-        X_ft: Nouvelles données (N, T, F)
-        y_ft: Nouveaux labels
-        last_k_blocks: Nombre de blocs à dégeler (depuis la fin)
-        train_linear: Entraîner la couche linéaire
-        reinit_linear: Réinitialiser la couche linéaire avant FT
-        (autres args similaires à train_inception_time)
+        model_or_ckpt: Checkpoint path OR pre-trained model
+        X_ft: New data (N, T, F)
+        y_ft: New labels
+        last_k_blocks: Number of blocks to unfreeze (from the end)
+        train_linear: Train the linear layer
+        reinit_linear: Re-initialize the linear layer before FT
+        (other args similar to train_inception_time)
     
     Returns:
         (model, T, history, splits)
     """
     device = torch.device(device)
 
-    # --- CONFIGURATION STRICTE DU DÉTERMINISME PYTORCH ---
+    # --- STRICT PYTORCH DETERMINISM CONFIGURATION ---
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -817,7 +817,7 @@ def fine_tune_inception_time(
     gen = torch.Generator()
     gen.manual_seed(seed)
     
-    # Chargement modèle
+    # Model loading
     if isinstance(model_or_ckpt, str):
         model, init_args, _T, _calibration_bias = load_model_from_checkpoint(model_or_ckpt, device)
         print(f"✓ Modèle chargé depuis {model_or_ckpt}")
@@ -832,9 +832,9 @@ def fine_tune_inception_time(
         F_expected = init_args['in_channels']
         assert F_in == F_expected, f"Mismatch features : modèle attend {F_expected}, X_ft a {F_in}"
     
-    # Réinitialisation optionnelle de la tête
+    # Optional re-initialization of the head
     if reinit_linear:
-        print("Réinitialisation de la couche linéaire...")
+        print("Re-initializing the linear layer...")
         if hasattr(model.linear, 'reset_parameters'):
             model.linear.reset_parameters()
         else:
@@ -873,13 +873,13 @@ def fine_tune_inception_time(
         pin_memory=(device.type == 'cuda')
     )
     
-    # Loss avec class weight
+    # Loss with class weight
     pos_w = compute_pos_weight_from_indices(y_ft, train_idx)
     criterion = nn.BCEWithLogitsLoss(
         pos_weight=pos_w.to(device) if pos_w is not None else None
     )
     
-    # Optimiseur (seulement sur paramètres entraînables)
+    # Optimizer (only on trainable parameters)
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=lr,
@@ -909,7 +909,7 @@ def fine_tune_inception_time(
     
     for epoch in pbar:
         # ========== TRAIN ==========
-        model.train()  # Les blocs gelés restent en eval() grâce aux hooks
+        model.train()  # The frozen blocks stay in eval() thanks to the hooks
         run_loss = 0.0
         n_obs = 0
         
@@ -999,7 +999,7 @@ def fine_tune_inception_time(
                     pbar.set_postfix_str(f"Early stop @ epoch {epoch}")
                 break
     
-    # Rechargement meilleur état
+    # Reload best state
     if best_state is not None:
         model.load_state_dict(best_state)
         print(f"\n✓ Meilleur modèle chargé (epoch {best_epoch}, val_loss={best_val:.6f})")
@@ -1010,7 +1010,7 @@ def fine_tune_inception_time(
     model.temperature_ = T_value
     model.calibration_bias_ = calibration_bias
     if calibrate:
-        print("Calibration température sur validation fine-tuning")
+        print("Temperature calibration on the fine-tuning validation set")
         logits_val = _gather_logits(model, val_loader, device)
         y_val = torch.from_numpy(y_ft.reshape(-1)[val_idx]).to(device)
         
@@ -1032,7 +1032,7 @@ def fine_tune_inception_time(
             ckpt['calibration_bias'] = calibration_bias
             torch.save(ckpt, save_best_path)
     
-    # Libération mémoire
+    # Free memory
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     
@@ -1041,7 +1041,7 @@ def fine_tune_inception_time(
 
 
 # ============================================================================
-# ÉVALUATION ROBUSTE
+# ROBUST EVALUATION
 # ============================================================================
 
 @torch.no_grad()
@@ -1055,41 +1055,41 @@ def predict_proba(
     return_logits: bool = False
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
-    Prédiction de probabilités calibrées.
+    Prediction of calibrated probabilities.
     
     Args:
-        model: Modèle InceptionTime
-        X: Données (N, T, F)
-        T: Température de calibration
-        calibration_bias: Biais additif appris sur la validation
-        device: Device PyTorch
-        batch_size: Taille batch pour inférence
-        return_logits: Retourner aussi les logits bruts
+        model: InceptionTime model
+        X: Data (N, T, F)
+        T: Calibration temperature
+        calibration_bias: Additive bias learned on the validation set
+        device: PyTorch device
+        batch_size: Batch size for inference
+        return_logits: Also return the raw logits
     
     Returns:
-        probas (et optionnellement logits)
+        probas (and optionally logits)
     """
-    # Détection device
+    # Device detection
     if device is None:
         device = next(model.parameters()).device
     else:
         device = torch.device(device)
     
-    # S'assurer que le modèle est sur le bon device
+    # Make sure the model is on the right device
     model = model.to(device)
     model.eval()
     
-    # Validation température
+    # Temperature validation
     if not np.isfinite(T) or T <= 0:
         warnings.warn(f"Température invalide ({T}) → fallback T=1.0")
         T = 1.0
     
-    # Validation données
+    # Data validation
     if X.ndim != 3:
         raise ValueError(f"X doit être (N,T,F), reçu shape {X.shape}")
     
     if not np.isfinite(X).all():
-        raise ValueError("X contient des NaN/Inf")
+        raise ValueError("X contains NaN/Inf")
     
     # Dataset temporaire
     y_dummy = np.zeros(len(X))
@@ -1108,9 +1108,9 @@ def predict_proba(
         xb = xb.to(device, non_blocking=True)
         logits = model(xb).squeeze(-1)
         
-        # Vérification logits
+        # Logits check
         if not torch.isfinite(logits).all():
-            warnings.warn("Logits non finis détectés dans un batch")
+            warnings.warn("Non-finite logits detected in a batch")
         
         calibrated_logits = logits / T + calibration_bias
         probs = torch.sigmoid(calibrated_logits)
@@ -1137,37 +1137,37 @@ def evaluate_on_test(
     return_details: bool = False
 ) -> Union[Tuple[float, float, float], Tuple[float, float, float, dict]]:
     """
-    Évaluation robuste sur test set avec vérifications complètes.
+    Robust evaluation on the test set with full checks.
     
     Args:
-        X_test: Données test (N, T, F)
-        y_test: Labels test
-        checkpoint_path: Chemin du checkpoint
-        device: Device PyTorch (None = auto-détection)
-        batch_size: Taille batch pour inférence
-        return_details: Retourner détails (probas, logits, etc.)
+        X_test: Test data (N, T, F)
+        y_test: Test labels
+        checkpoint_path: Checkpoint path
+        device: PyTorch device (None = auto-detection)
+        batch_size: Batch size for inference
+        return_details: Return details (probas, logits, etc.)
     
     Returns:
-        (auc, brier, T) ou (auc, brier, T, details)
+        (auc, brier, T) or (auc, brier, T, details)
     
     Raises:
-        ValueError: Si incompatibilité dimensions ou labels invalides
-        FileNotFoundError: Si checkpoint introuvable
+        ValueError: If dimension incompatibility or invalid labels
+        FileNotFoundError: If the checkpoint cannot be found
     """
     if not SKLEARN_AVAILABLE:
-        raise ImportError("sklearn requis pour l'évaluation (pip install scikit-learn)")
+        raise ImportError("sklearn is required for evaluation (pip install scikit-learn)")
     
-    # Chargement modèle
+    # Model loading
     model, init_args, T, calibration_bias = load_model_from_checkpoint(checkpoint_path, device)
     
-    # CORRECTION: assurer que device est bien défini
+    # CORRECTION: ensure device is properly defined
     if device is None:
         device = next(model.parameters()).device
     else:
         device = torch.device(device)
         model = model.to(device)
     
-    # Fallback température si absente
+    # Temperature fallback if missing
     if T is None or not np.isfinite(T) or T <= 0:
         warnings.warn(f"Température invalide ou absente ({T}) → T=1.0 (non calibré)")
         T = 1.0
@@ -1199,12 +1199,12 @@ def evaluate_on_test(
         raise ValueError(f"y_test doit être binaire {{0,1}}, reçu valeurs uniques : {uniq}")
     
     if len(uniq) < 2:
-        raise ValueError("y_test ne contient qu'une seule classe → AUC non définie")
+        raise ValueError("y_test contains only a single class -> AUC undefined")
     
     if not (np.isfinite(X_test).all() and np.isfinite(y_flat).all()):
-        raise ValueError("X_test ou y_test contient des NaN/Inf")
+        raise ValueError("X_test or y_test contains NaN/Inf")
     
-    # Prédiction (CORRECTION: passer explicitement device)
+    # Prediction (CORRECTION: pass device explicitly)
     print(f"Prédiction sur {len(X_test)} exemples...")
     try:
         p_test, logits = predict_proba(
@@ -1214,7 +1214,7 @@ def evaluate_on_test(
     except Exception as e:
         raise RuntimeError(f"Erreur lors de la prédiction : {e}") from e
     
-    # Vérification prédictions avant masque
+    # Prediction check before masking
     print(f"  Stats prédictions :")
     print(f"    - min  : {np.min(p_test):.6f}")
     print(f"    - max  : {np.max(p_test):.6f}")
@@ -1224,12 +1224,12 @@ def evaluate_on_test(
     
     if not np.isfinite(p_test).any():
         raise RuntimeError(
-            "TOUTES les prédictions sont NaN/Inf ! "
-            "Vérifiez que le modèle et les données sont sur le même device. "
+            "ALL predictions are NaN/Inf! "
+            "Check that the model and the data are on the same device. "
             f"Device utilisé : {device}"
         )
     
-    # Masque de sécurité
+    # Safety mask
     mask = np.isfinite(p_test) & np.isfinite(y_flat)
     n_invalid = (~mask).sum()
     n_valid = mask.sum()
@@ -1240,9 +1240,9 @@ def evaluate_on_test(
         warnings.warn(f"{n_invalid} exemples avec prédictions non finies (exclus des métriques)")
     
     if n_valid == 0:
-        # Debug détaillé
+        # Detailed debug
         print("\n" + "="*60)
-        print("ERREUR CRITIQUE : Aucune prédiction valide")
+        print("CRITICAL ERROR: No valid prediction")
         print("="*60)
         print(f"Device du modèle    : {device}")
         print(f"Shape X_test        : {X_test.shape}")
@@ -1259,12 +1259,12 @@ def evaluate_on_test(
         print("="*60)
         
         raise ValueError(
-            "Aucun exemple valide après filtrage ! "
-            "Toutes les prédictions sont NaN/Inf. "
-            "Consultez les statistiques ci-dessus pour diagnostiquer."
+            "No valid example after filtering! "
+            "All predictions are NaN/Inf. "
+            "See the statistics above to diagnose."
         )
     
-    # Métriques
+    # Metrics
     auc = roc_auc_score(y_flat[mask], p_test[mask])
     brier = brier_score_loss(y_flat[mask], p_test[mask])
     
@@ -1304,18 +1304,18 @@ def recompute_temperature(
     batch_size: int = 256
 ) -> float:
     """
-    Recalcule la température sur un nouveau jeu de validation.
-    Utile si vous voulez recalibrer sans réentraîner.
+    Recalculates the temperature on a new validation set.
+    Useful to recalibrate without retraining.
     
     Args:
-        model: Modèle InceptionTime
-        X_val: Données validation (N, T, F)
-        y_val: Labels validation
-        device: Device PyTorch
-        batch_size: Taille batch
+        model: InceptionTime model
+        X_val: Validation data (N, T, F)
+        y_val: Validation labels
+        device: PyTorch device
+        batch_size: Batch size
     
     Returns:
-        Température calibrée
+        Calibrated temperature
     """
     if device is None:
         device = next(model.parameters()).device
@@ -1328,7 +1328,7 @@ def recompute_temperature(
     ds = TimeSeriesDataset(X_val, y_val)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     
-    # Récupération logits
+    # Logits retrieval
     logits_val = _gather_logits(model, loader, device)
     y = torch.from_numpy(y_val.reshape(-1)).float().to(device)
     
@@ -1349,7 +1349,7 @@ def recompute_temperature(
 
 
 # ============================================================================
-# API SIMPLIFIÉE
+# SIMPLIFIED API
 # ============================================================================
 
 __all__ = [
@@ -1378,14 +1378,14 @@ __all__ = [
 
 if __name__ == "__main__":
     """
-    Exemple d'utilisation du module.
+    Example usage of the module.
     """
     print("InceptionTime - Module complet")
     print("=" * 60)
     print("\nExemple d'utilisation :\n")
     
     example_code = '''
-# 1. Entraînement from scratch
+# 1. Training from scratch
 from inception_time import train_inception_time
 
 model, T, history, splits = train_inception_time(
@@ -1395,18 +1395,18 @@ model, T, history, splits = train_inception_time(
     save_best_path="models/inception_mimic.pt"
 )
 
-# 2. Fine-tuning sur nouveau dataset
+# 2. Fine-tuning on a new dataset
 from inception_time import fine_tune_inception_time
 
 model_ft, T_ft, hist_ft, splits_ft = fine_tune_inception_time(
     "models/inception_mimic.pt",
     X_ecmo, y_ecmo,
-    last_k_blocks=2,      # Dégèle 2 derniers blocs
+    last_k_blocks=2,      # Unfreezes the last 2 blocks
     epochs=50,
     save_best_path="models/inception_ecmo_ft.pt"
 )
 
-# 3. Évaluation
+# 3. Evaluation
 from inception_time import evaluate_on_test
 
 auc, brier, T = evaluate_on_test(
@@ -1414,7 +1414,7 @@ auc, brier, T = evaluate_on_test(
     "models/inception_ecmo_ft.pt"
 )
 
-# 4. Prédiction simple
+# 4. Simple prediction
 from inception_time import predict_proba, load_model_from_checkpoint
 
 model, _, T = load_model_from_checkpoint("models/inception_ecmo_ft.pt")
@@ -1423,5 +1423,5 @@ probas = predict_proba(model, X_new, T=T)
     
     print(example_code)
     print("\n" + "=" * 60)
-    print("Module prêt à être importé !")
-    print("Sauvegardez ce fichier comme : inception_time.py")
+    print("Module ready to be imported!")
+    print("Save this file as: inception_time.py")

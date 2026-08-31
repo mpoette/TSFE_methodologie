@@ -53,3 +53,6 @@ brouillon*
 *.code-workspace
 *.pt
 .DS_Store
+
+# Exceptions
+!*/models/

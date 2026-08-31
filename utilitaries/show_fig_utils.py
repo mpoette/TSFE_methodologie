@@ -3466,83 +3466,255 @@ def plot_comparative_axes(
             handlelength=2.2,
         )
 
+# def plot_subgroup_comparative_grid(
+#     subgroup_reports,
+#     model_title=None,
+#     model_names_map=None,
+#     save_path=None,
+#     figsize_per_row=(14, 4.5),
+#     dpi=600,
+#     show=True,
+# ):
+#     """
+#     Display subgroup performance as a grid.
+
+#     Rows correspond to subgroup variables.
+#     Columns correspond to ROC, Precision-Recall and Calibration curves.
+#     """
+
+#     if not subgroup_reports:
+#         raise ValueError(
+#             "subgroup_reports cannot be empty."
+#         )
+
+#     subgroup_reports = dict(subgroup_reports)
+
+#     row_names = list(subgroup_reports.keys())
+#     n_rows = len(row_names)
+
+#     fig_width, row_height = figsize_per_row
+
+#     fig, axes = plt.subplots(
+#         nrows=n_rows,
+#         ncols=3,
+#         figsize=(fig_width, n_rows * row_height),
+#         squeeze=False,
+#         layout="constrained",
+#     )
+
+#     panel_letters = iter(
+#         "abcdefghijklmnopqrstuvwxyz"
+#     )
+
+#     column_titles = [
+#         "ROC curves",
+#         "Precision–recall curves",
+#         "Calibration curves",
+#     ]
+
+#     for row_idx, (
+#         subgroup_name,
+#         configurations,
+#     ) in enumerate(subgroup_reports.items()):
+
+#         row_axes = axes[row_idx, :]
+
+#         generate_comparative_report(
+#             configurations=configurations,
+#             evaluation_mode="holdout",
+#             model_names_map=model_names_map,
+
+#             # IMPORTANT :
+#             # pas de titre automatique
+#             title=None,
+
+#             axes=row_axes,
+#             show=False,
+#         )
+
+#         # Supprime explicitement tout titre éventuellement ajouté
+#         # par une fonction appelée plus bas.
+#         for ax in row_axes:
+#             _show_title(
+#                 title=None,
+#                 default_title="",
+#                 ax=ax,
+#             )
+
+#         # Lettres (a), (b), ...
+#         for ax in row_axes:
+#             ax.text(
+#                 0.02,
+#                 0.98,
+#                 f"({next(panel_letters)})",
+#                 transform=ax.transAxes,
+#                 ha="left",
+#                 va="top",
+#                 fontsize=10,
+#                 fontweight="bold",
+#             )
+
+#         # Titre de ligne
+#         row_axes[0].annotate(
+#             subgroup_name,
+#             xy=(-0.28, 0.5),
+#             xycoords="axes fraction",
+#             ha="center",
+#             va="center",
+#             rotation=90,
+#             fontsize=10,
+#             fontweight="bold",
+#         )
+
+#         # Une seule légende :
+#         # uniquement dans la figure ROC
+#         row_axes[0].legend(
+#             loc="lower right",
+#             fontsize=7,
+#             frameon=False,
+#             handlelength=2.2,
+#         )
+
+#         # Suppression explicite des éventuelles légendes PRC / calibration
+#         for ax in row_axes[1:]:
+#             legend = ax.get_legend()
+
+#             if legend is not None:
+#                 legend.remove()
+
+#     # Titres de colonnes seulement sur la première ligne
+#     for col_idx, column_title in enumerate(column_titles):
+#         axes[0, col_idx].set_title(
+#             column_title,
+#             fontsize=12,
+#             fontweight="bold",
+#             pad=10,
+#         )
+
+#     # PAS DE SUPTITLE
+#     # Le titre général sera ajouté dans LaTeX.
+
+#     if save_path is not None:
+#         save_path = Path(save_path)
+
+#         save_path.parent.mkdir(
+#             parents=True,
+#             exist_ok=True,
+#         )
+
+#         fig.savefig(
+#             save_path,
+#             bbox_inches="tight",
+#         )
+
+#         fig.savefig(
+#             save_path.with_suffix(".png"),
+#             dpi=dpi,
+#             bbox_inches="tight",
+#         )
+
+#     if show:
+#         plt.show()
+
+#     return fig
+
 def plot_subgroup_comparative_grid(
     subgroup_reports,
     model_title=None,
     model_names_map=None,
     save_path=None,
-    figsize_per_row=(14, 4.5),
+    figsize_per_row = (14, 4.5),
+    figsize=(16, 10),
     dpi=600,
     show=True,
 ):
-    """
-    Display subgroup performance as a grid.
+    """Display subgroup performance as a transposed grid.
 
-    Rows correspond to subgroup variables.
-    Columns correspond to ROC, Precision-Recall and Calibration curves.
+    - Rows (3): ROC, Precision-Recall, Calibration curves.
+    - Columns (N): Subgroup categories (Âge, Sexe, Admission, Pathologie, etc.).
     """
-
     if not subgroup_reports:
-        raise ValueError(
-            "subgroup_reports cannot be empty."
-        )
+        raise ValueError("subgroup_reports cannot be empty.")
 
     subgroup_reports = dict(subgroup_reports)
-
-    row_names = list(subgroup_reports.keys())
-    n_rows = len(row_names)
-
-    fig_width, row_height = figsize_per_row
+    col_names = list(subgroup_reports.keys())
+    n_cols = len(col_names)
+    n_rows = 3  # ROC, PRC, Calibration
 
     fig, axes = plt.subplots(
         nrows=n_rows,
-        ncols=3,
-        figsize=(fig_width, n_rows * row_height),
+        ncols=n_cols,
+        figsize=figsize,
         squeeze=False,
         layout="constrained",
     )
 
-    panel_letters = iter(
-        "abcdefghijklmnopqrstuvwxyz"
-    )
-
-    column_titles = [
+    row_titles = [
         "ROC curves",
         "Precision–recall curves",
         "Calibration curves",
     ]
 
-    for row_idx, (
-        subgroup_name,
-        configurations,
-    ) in enumerate(subgroup_reports.items()):
+    # panel_letters pour indexer de haut en bas ou de gauche à droite
+    panel_letters = iter("abcdefghijklmnopqrstuvwxyz")
 
-        row_axes = axes[row_idx, :]
+    for col_idx, (subgroup_name, configurations) in enumerate(
+        subgroup_reports.items()
+    ):
+        # Récupère la colonne d'axes pour ce sous-groupe : [ax_roc, ax_prc, ax_cal]
+        col_axes = axes[:, col_idx]
 
         generate_comparative_report(
             configurations=configurations,
             evaluation_mode="holdout",
             model_names_map=model_names_map,
-
-            # IMPORTANT :
-            # pas de titre automatique
             title=None,
-
-            axes=row_axes,
+            axes=col_axes,
             show=False,
         )
 
-        # Supprime explicitement tout titre éventuellement ajouté
-        # par une fonction appelée plus bas.
-        for ax in row_axes:
-            _show_title(
-                title=None,
-                default_title="",
-                ax=ax,
-            )
+        # Nettoyage des titres automatiques
+        for ax in col_axes:
+            _show_title(title=None, default_title="", ax=ax)
 
-        # Lettres (a), (b), ...
-        for ax in row_axes:
+        # Titre du sous-groupe (en haut de chaque colonne)
+        axes[0, col_idx].set_title(
+            subgroup_name,
+            fontsize=11,
+            fontweight="bold",
+            pad=10,
+        )
+
+        # Une seule légende par sous-groupe (sur la courbe ROC du haut)
+        col_axes[0].legend(
+            loc="lower right",
+            fontsize=7,
+            frameon=False,
+            handlelength=2.0,
+        )
+
+        # Suppression des légendes pour PRC et Calibration
+        for ax in col_axes[1:]:
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.remove()
+
+    # Labels de types de courbes sur le côté gauche (lignes)
+    for row_idx, row_title in enumerate(row_titles):
+        axes[row_idx, 0].annotate(
+            row_title,
+            xy=(-0.25, 0.5),
+            xycoords="axes fraction",
+            ha="center",
+            va="center",
+            rotation=90,
+            fontsize=11,
+            fontweight="bold",
+        )
+
+    # Ajout des lettres (a), (b), ... sur l'ensemble de la grille
+    for row in axes:
+        for ax in row:
             ax.text(
                 0.02,
                 0.98,
@@ -3550,74 +3722,20 @@ def plot_subgroup_comparative_grid(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=10,
+                fontsize=9,
                 fontweight="bold",
             )
 
-        # Titre de ligne
-        row_axes[0].annotate(
-            subgroup_name,
-            xy=(-0.28, 0.5),
-            xycoords="axes fraction",
-            ha="center",
-            va="center",
-            rotation=90,
-            fontsize=10,
-            fontweight="bold",
-        )
-
-        # Une seule légende :
-        # uniquement dans la figure ROC
-        row_axes[0].legend(
-            loc="lower right",
-            fontsize=7,
-            frameon=False,
-            handlelength=2.2,
-        )
-
-        # Suppression explicite des éventuelles légendes PRC / calibration
-        for ax in row_axes[1:]:
-            legend = ax.get_legend()
-
-            if legend is not None:
-                legend.remove()
-
-    # Titres de colonnes seulement sur la première ligne
-    for col_idx, column_title in enumerate(column_titles):
-        axes[0, col_idx].set_title(
-            column_title,
-            fontsize=12,
-            fontweight="bold",
-            pad=10,
-        )
-
-    # PAS DE SUPTITLE
-    # Le titre général sera ajouté dans LaTeX.
-
     if save_path is not None:
         save_path = Path(save_path)
-
-        save_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        fig.savefig(
-            save_path,
-            bbox_inches="tight",
-        )
-
-        fig.savefig(
-            save_path.with_suffix(".png"),
-            dpi=dpi,
-            bbox_inches="tight",
-        )
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight")
+        fig.savefig(save_path.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
 
     if show:
         plt.show()
 
     return fig
-
 
 def generate_subgroup_grid_from_configs(
     probas,

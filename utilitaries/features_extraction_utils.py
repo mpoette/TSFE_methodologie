@@ -104,11 +104,12 @@ explainability_scores = {
     "median": 95,
     "peak to peak distance": 90,
     "area under the curve": 85,
-    # ECDF percentiles are empirical quantiles and remain directly
-    # interpretable in the original measurement unit.
-    "ecdf percentile": 85,
 
     # --- TIER 2: Moderately explainable (70 - 85) ---
+        # ECDF percentiles are empirical quantiles and remain directly
+    # interpretable in the original measurement unit.
+    "ecdf": 85,
+    "ecdf percentile": 85,
     "average power": 80,
     "standard deviation": 80,
     "std": 80,
@@ -116,6 +117,9 @@ explainability_scores = {
     "root mean square": 75,
     "absolute energy": 75,
     "slope": 75,
+    # Number of observations below an ECDF percentile threshold. This remains
+    # interpretable, but depends more strongly on the window length.
+    "ecdf percentile count": 75,
     "zero crossing rate": 70,
     "positive turning points": 70,
     "negative turning points": 70,
@@ -128,9 +132,6 @@ explainability_scores = {
     "interquartile range": 70,
     "neighbourhood peaks": 70,
     "sum absolute diff": 70,
-    # Number of observations below an ECDF percentile threshold. This remains
-    # interpretable, but depends more strongly on the window length.
-    "ecdf percentile count": 75,
 
     # --- TIER 3: Poorly explainable (50 - 65) ---
     "distance": 65,
