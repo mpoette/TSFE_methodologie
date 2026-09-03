@@ -1,0 +1,7 @@
+{
+    "SVC TSFEL": {
+        "kernel": "rbf",
+        "C": 0.7586444477343692,
+        "class_weight": "balanced"
+    }
+}

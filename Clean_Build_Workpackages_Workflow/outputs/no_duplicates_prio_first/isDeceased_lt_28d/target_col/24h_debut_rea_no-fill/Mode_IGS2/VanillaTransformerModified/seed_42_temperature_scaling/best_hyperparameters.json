@@ -1,0 +1,14 @@
+{
+    "VanillaTransformerModified": {
+        "num_layers": 2,
+        "nhead": 4,
+        "dropout": 0.1,
+        "lr": 0.0007871240524828969,
+        "weight_decay": 3.632440295973031e-05,
+        "clip_grad": 1.5,
+        "use_scheduler": false,
+        "d_model": 16,
+        "dim_feedforward": 64,
+        "batch_size": 128
+    }
+}

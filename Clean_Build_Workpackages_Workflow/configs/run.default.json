@@ -1,0 +1,99 @@
+{
+  "seed": 42,
+  "modes": ["quick_test"],
+  "run_comparison": false,
+  "run_training": true,
+  "run_lasso": true,
+  "run_interpretability": true,
+  "run_test": true,
+  "figure_output_format": "pdf",
+  "population": "Tout",
+  "save_figure": true,
+  "transparent": false,
+  "dataset_path": "/../../../data2/paquie.d/Datasets/output",
+  "target_columns": {
+    "Survie à 28 jours": "isDeceased_lt_28d",
+    "Survie à 24 heures": "isDeceased_lt_24h",
+    "Survie à 7 jours": "isDeceased_lt_7d",
+    "Survie à 3 mois": "isDeceased_lt_3m"
+  },
+  "keep_duplicates": false,
+  "profiles": {
+    "score": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["IGS2"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "quick_test": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["XGBoost TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [true],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "TSFEL": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["SVC TSFEL", "Logistic Regression Lasso TSFEL", "XGBoost TSFEL", "RandomForest TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false, true],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "wp1": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false, true],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "wp2": {
+      "windowing_mode": "24h fin réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours", "Survie à 24 heures", "Survie à 7 jours", "Survie à 3 mois"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col", "h24-j28"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"]
+    },
+    "wp2_test": {
+      "windowing_mode": "24h fin réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["LstmTimeModified", "XGBoost TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"]
+    },
+    "wp3": {
+      "windowing_mode": "resampling aléatoire 'lomax' prio 24h sans remplissage",
+      "target_labels": ["Survie à 28 jours", "Survie à 24 heures", "Survie à 7 jours", "Survie à 3 mois"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "LstmTimeModified", "XGBoost TSFEL", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col", "h24-j28"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"]
+    },
+    "wp3_test": {
+      "windowing_mode": "resampling aléatoire 'lomax' prio 24h sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["LstmTimeModified", "XGBoost TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"]
+    }
+  }
+}

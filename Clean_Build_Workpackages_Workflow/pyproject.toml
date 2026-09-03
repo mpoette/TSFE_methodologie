@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icu-model-comparison"
+version = "0.1.0"
+description = "Reproducible ICU mortality model training, evaluation, and comparison pipeline"
+readme = "README.md"
+requires-python = "==3.12.13"
+dependencies = [
+  "Boruta>=0.3",
+  "imbalanced-learn>=0.11",
+  "joblib>=1.3",
+  "kneed>=0.8",
+  "marimo>=0.10",
+  "matplotlib>=3.7",
+  "numpy>=1.24",
+  "optuna>=3.5",
+  "pandas>=2.0",
+  "pyarrow>=14",
+  "plotly>=5.18",
+  "polars>=0.20",
+  "PyWavelets>=1.5",
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
+  "seaborn>=0.13",
+  "shap>=0.44",
+  "statsmodels>=0.14",
+  "tableone>=0.9",
+  "tabulate>=0.9",
+  "torch==2.5.1",
+  "tqdm>=4.66",
+  "tsfel>=0.1.6",
+  "xgboost>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "pytest>=8.0",
+  "ruff>=0.6",
+  "twine>=5.0",
+]
+
+[project.scripts]
+icu-model-comparison = "icu_model_comparison.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+py-modules = ["ICU_Models_Comparison"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["icu_model_comparison*", "utilitaries*"]
+exclude = ["utilitaries.tests*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+icu_model_comparison = ["py.typed", "configs/*.json"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "__pycache__/*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+system-certs = true
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true

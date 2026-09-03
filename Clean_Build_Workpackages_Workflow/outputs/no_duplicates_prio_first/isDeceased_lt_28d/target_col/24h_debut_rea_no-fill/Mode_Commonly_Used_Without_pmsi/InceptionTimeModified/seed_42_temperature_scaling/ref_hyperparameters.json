@@ -1,0 +1,13 @@
+{
+    "InceptionTimeModified": {
+        "num_blocks": 3,
+        "kernel_sizes": 11,
+        "lr": 0.0007001957942797386,
+        "weight_decay": 0.0007179847641959829,
+        "clip_grad": 1.5,
+        "use_scheduler": true,
+        "out_channels": 32,
+        "bottleneck_channels": 32,
+        "batch_size": 64
+    }
+}

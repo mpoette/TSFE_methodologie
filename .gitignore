@@ -1,58 +1,93 @@
-# # Fichiers de configuration et environnement
+# Secrets locaux
+.env
+.env.*
 *.env
-*.ini
-*.cfg
-*.toml
-*.yaml
-*.yml
-*.clinerules
 
 # Environnements virtuels
 .venv/
+.venv*/
 venv/
 env/
 ENV/
 env.bak/
 venv.bak/
 
-# Cache Python
+# Cache Python et outils
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+__marimo__/
+.coverage
+htmlcov/
 
-# Dossiers de sortie et modèles
-*/outputs*/**
-*/models*/**
-*/*logs*/**
-!/utilitaries/models/**  # Pour garder les modèles dans utilitaries
+# Fichiers générés par le build
+build/
+dist/
+*.egg-info/
 
-# Dossiers spécifiques à ignorer
-*/.ipynb_checkpoints/
-**/__marimo__/
-Test */
-*/brouillon*
-*/Comparaison*/**
-*/old*/
-maybe\ useful/
-brouillon*
-
-# Fichiers de données
+# Données, figures et modèles entraînés
+*.csv
+*.tsv
 *.parquet
+*.arrow
+*.feather
 *.npy
+*.npz
 *.db
 *.sqlite
+*.sqlite3
 *.db3
 *.pdf
 *.png
 *.jpg
 *.jpeg
-*.ipynb
+*.svg
+*.eps
+*.tif
+*.tiff
+*.webp
+*.gif
 *.xlsx
+*.xls
 *.tex
-# Autres
-*.code-workspace
 *.pt
-.DS_Store
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.onnx
+*.log
 
-# Exceptions
-!*/models/
+# Outputs : ignorer les fichiers, mais traverser les dossiers
+**/outputs*/**
+!**/outputs*/**/
+!**/outputs*/**/*.json
+
+# Modèles sauvegardés : conserver uniquement les JSON
+**/models*/**
+!**/models*/**/
+!**/models*/**/*.json
+
+# Logs : conserver uniquement les JSON
+**/*logs*/**
+!**/*logs*/**/
+!**/*logs*/**/*.json
+
+# Exceptions : ces dossiers contiennent du CODE, pas des poids entraînés
+!/utilitaries/models/
+!/utilitaries/models/**
+!/icu_model_comparison/models/
+!/icu_model_comparison/models/**
+
+# Notebooks et fichiers locaux
+*.ipynb
+*.code-workspace
+.DS_Store
+Thumbs.db

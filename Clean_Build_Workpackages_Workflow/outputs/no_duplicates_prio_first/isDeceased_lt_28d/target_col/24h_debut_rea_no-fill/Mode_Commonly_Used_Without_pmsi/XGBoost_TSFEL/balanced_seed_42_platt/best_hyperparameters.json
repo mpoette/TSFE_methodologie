@@ -1,0 +1,13 @@
+{
+    "XGBoost TSFEL": {
+        "n_estimators": 600,
+        "learning_rate": 0.03803498564801699,
+        "max_depth": 4,
+        "min_child_weight": 50,
+        "gamma": 0.008757023261932066,
+        "subsample": 0.7,
+        "colsample_bytree": 0.7,
+        "reg_alpha": 2.1723993515017237,
+        "reg_lambda": 1.932505546512919
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "LstmTimeModified": {
+        "fc_units": "128",
+        "clip_grad": 1.0,
+        "num_layers": 1,
+        "bidirectional": true,
+        "dropout": 0.09669912627651722,
+        "layernorm": true,
+        "lr": 0.00034277788502256354,
+        "weight_decay": 0.0010717829762242014,
+        "use_scheduler": false,
+        "hidden_size": 128,
+        "batch_size": 32
+    }
+}

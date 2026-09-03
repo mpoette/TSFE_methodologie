@@ -1,0 +1,11 @@
+{
+    "RandomForest TSFEL": {
+        "max_depth": 11,
+        "n_estimators": 900,
+        "min_samples_split": 2,
+        "min_samples_leaf": 18,
+        "max_features": "sqrt",
+        "bootstrap": true,
+        "class_weight": "balanced"
+    }
+}

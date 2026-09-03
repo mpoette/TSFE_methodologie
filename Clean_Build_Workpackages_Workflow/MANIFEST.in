@@ -1,0 +1,6 @@
+include README.md
+include CHANGELOG.md
+include pyproject.toml
+recursive-include icu_model_comparison/configs *.json
+global-exclude *.py[cod]
+global-exclude __pycache__
