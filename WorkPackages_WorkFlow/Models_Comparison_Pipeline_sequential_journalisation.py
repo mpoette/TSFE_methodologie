@@ -186,7 +186,7 @@ for mode_run in mode_names:
         stratify_modes = ["target_col"]
         WINDOWING_MODE = "24h début réanimation sans remplissage"
         optuna_run_options = [True]
-        feature_modes = ["Mode Commonly Used Without pmsi"]
+        feature_modes = ["Mode Commonly Used"]
         balancing_methods = ["Aucune Méthode"]
     elif mode_run == "TSFEL":
         mode_duplicates = "prio_first"

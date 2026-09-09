@@ -70,6 +70,23 @@ ENTRY_MODE_TO_LABEL: dict[str, str] = {
 }
 
 
+# ICU units retained for both the source population and the training cohort comparison.
+ICU_UNITS = [
+    "RANGUEIL DECHO. REA.",
+    "NEURO-CHIR REA",
+    "PURPAN DECHO. REA.",
+    "RANGUEIL REA. POLY.",
+    "PURPAN REA. POLY.",
+]
+
+# Glasgow missingness before the fill_null(15) preprocessing step.
+# Final training cohort value is known from the explicit before/after comparison.
+FINAL_GLASGOW_MISSING_N = 3826
+FINAL_GLASGOW_COHORT_N = 16258
+
+ORIGINAL_GLASGOW_MISSING_N = 6623
+
+
 FR_TO_EN: dict[str, str] = {
     # Gender
     "Féminin": "Female",
@@ -973,6 +990,10 @@ def build_tableone(
     config_mode_name: str,
     output_dir: Path,
     top_n_ghm: int | None = 5,
+    df_dynamic_full_clean: pl.DataFrame | None = None,
+    clean_full_static: pl.DataFrame | None = None,
+    restrict_to_icu_units: bool = True,
+    original_time_col: str = "real_time_hours",
 ) -> TableOne:
     """Build and export a patient-level TableOne baseline summary.
 
@@ -993,6 +1014,13 @@ def build_tableone(
         output_dir: Directory in which TableOne outputs are saved.
         top_n_ghm: Maximum number of GHM categories retained, or ``None`` to
             retain all categories.
+        df_dynamic_full_clean: Optional original cleaned dynamic dataset. When
+            supplied together with ``clean_full_static``, a second TableOne
+            column is built from the source ICU population using only the first
+            24 hours.
+        clean_full_static: Optional original cleaned static dataset.
+        restrict_to_icu_units: Restrict the source population to ``ICU_UNITS``.
+        original_time_col: Hours-from-admission column used for the <=24h filter.
 
     Returns:
         The generated TableOne object.
@@ -1346,11 +1374,375 @@ def build_tableone(
         features_to_sort=_sort_cols,
     )
 
+    # -------------------------------------------------------------------------
+    # Override Glasgow missingness with the PRE-IMPUTATION value.
+    # The modelling table contains Glasgow=15 after imputation, so isna() cannot
+    # recover this information reliably.
+    # -------------------------------------------------------------------------
+    final_glasgow_pct = 100 * FINAL_GLASGOW_MISSING_N / FINAL_GLASGOW_COHORT_N
+    final_idx_level = formatted_table.index.get_level_values(0).astype(str)
+    final_glasgow_mask = final_idx_level.str.startswith("Glasgow Score Missing")
+    if final_glasgow_mask.any():
+        formatted_table.loc[final_glasgow_mask, "Overall"] = (
+            f"{FINAL_GLASGOW_MISSING_N} ({final_glasgow_pct:.2f})"
+        )
+
+    output_table = formatted_table.rename(
+        columns={"Overall": "Final training cohort"}
+    )
+
+    # -------------------------------------------------------------------------
+    # Optional source-population comparison:
+    #   1) keep only selected ICU units,
+    #   2) keep dynamic observations from the first 24 hours,
+    #   3) compute the same patient-level clinical flags,
+    #   4) summarize with the same TableOne variables/categories.
+    # -------------------------------------------------------------------------
+    if df_dynamic_full_clean is not None and clean_full_static is not None:
+        original_dynamic = df_dynamic_full_clean.with_columns(
+            pl.col(patient_col).cast(pl.Int64)
+        )
+        original_static = clean_full_static.with_columns(
+            pl.col(patient_col).cast(pl.Int64)
+        )
+
+        if restrict_to_icu_units:
+            if "adm_unit" not in original_static.columns:
+                raise ValueError(
+                    "clean_full_static must contain 'adm_unit' when "
+                    "restrict_to_icu_units=True."
+                )
+            before_filter = original_static[patient_col].n_unique()
+            original_static = original_static.filter(
+                pl.col("adm_unit").is_in(ICU_UNITS)
+            )
+            after_filter = original_static[patient_col].n_unique()
+            print(
+                "[TABLEONE] ICU unit filter - "
+                f"before: {before_filter}, after: {after_filter}, "
+                f"dropped: {before_filter - after_filter}",
+                flush=True,
+            )
+
+        original_ids = original_static.select(patient_col).unique()
+        original_dynamic = original_dynamic.join(
+            original_ids,
+            on=patient_col,
+            how="semi",
+        )
+
+        # Restrict the ORIGINAL ICU cohort to the first 24 hours: [0, 24).
+        if "delta_hour" not in original_dynamic.columns:
+            raise ValueError(
+                "df_dynamic_full_clean must contain 'delta_hour' "
+                "to restrict the source cohort to the first 24 hours."
+            )
+
+        original_dynamic_24h = original_dynamic.filter(
+            (pl.col("delta_hour") >= 0)
+            & (pl.col("delta_hour") < 24)
+        )
+        
+        # Keep only encounters with at least one dynamic observation in 0-24h.
+        ids_with_24h_data = original_dynamic_24h.select(patient_col).unique()
+        original_static = original_static.join(
+            ids_with_24h_data,
+            on=patient_col,
+            how="semi",
+        )
+        original_dynamic_24h = original_dynamic_24h.join(
+            original_static.select(patient_col).unique(),
+            on=patient_col,
+            how="semi",
+        )
+
+        # Add the same 28-day mortality target definition used by the pipeline,
+        # evaluated at the end of the fixed 24-hour observation window (H24).
+        # Relative definition: death_time <= prediction_time + 28 days.
+        if target_col == "isDeceased_lt_28d":
+            # Recompute the ORIGINAL-cohort target unconditionally.
+            # Do not reuse a pre-existing target column from the source files,
+            # because it may have been computed for another prediction time or
+            # may simply contain nulls. Here the prediction time is fixed at H24.
+            if "deces_datediff_days" in original_static.columns:
+                original_static = original_static.with_columns(
+                    (
+                        pl.col("deces_datediff_days") * 24
+                        <= 24 + (28 * 24)
+                    )
+                    .fill_null(False)
+                    .cast(pl.Float64)
+                    .alias(target_col)
+                )
+            elif "deces_datediff_days" in original_dynamic_24h.columns:
+                original_target = (
+                    original_dynamic_24h
+                    .group_by(patient_col, maintain_order=True)
+                    .agg(
+                        (
+                            pl.col("deces_datediff_days").first() * 24
+                            <= 24 + (28 * 24)
+                        )
+                        .fill_null(False)
+                        .cast(pl.Float64)
+                        .alias(target_col)
+                    )
+                )
+                original_static = (
+                    original_static
+                    .drop(target_col, strict=False)
+                    .join(
+                        original_target,
+                        on=patient_col,
+                        how="left",
+                    )
+                )
+            else:
+                raise ValueError(
+                    "The original cohort must contain 'deces_datediff_days' "
+                    "to build 'isDeceased_lt_28d'."
+                )
+
+        original_n = original_static[patient_col].n_unique()
+        print(
+            f"[TABLEONE] Original ICU cohort with <=24h data: {original_n} encounter(s).",
+            flush=True,
+        )
+
+        original_flags = _build_patient_level_clinical_flags(
+            dataframe=original_dynamic_24h,
+            patient_col=patient_col,
+        )
+
+        # One static row per encounter, then add 24h-derived flags.
+        original_patient = original_static.unique(
+            subset=[patient_col], keep="first"
+        ).to_pandas()
+
+        if not original_flags.is_empty():
+            pd_original_flags = original_flags.to_pandas()
+            for flag_col in pd_original_flags.columns:
+                if flag_col != patient_col and pd.api.types.is_bool_dtype(
+                    pd_original_flags[flag_col]
+                ):
+                    pd_original_flags[flag_col] = pd_original_flags[flag_col].astype(int)
+            original_patient = original_patient.merge(
+                pd_original_flags,
+                on=patient_col,
+                how="left",
+            )
+
+        # Same Sepsis definition as the final cohort.
+        if "icu_DA" in original_static.columns and "icu_DP_code" in original_static.columns:
+            original_sepsis = (
+                original_static.group_by(patient_col).agg(
+                    (
+                        pl.col("icu_DA")
+                        .list.eval(pl.element().is_in(codes_cim))
+                        .list.any()
+                        | pl.col("icu_DP_code").is_in(codes_cim)
+                    )
+                    .any()
+                    .cast(pl.Int8)
+                    .alias("sepsis")
+                )
+            ).to_pandas()
+            original_patient = original_patient.drop(
+                columns=["sepsis"], errors="ignore"
+            ).merge(original_sepsis, on=patient_col, how="left")
+
+        original_patient = _translate_tableone_categories(original_patient)
+
+        # Normalize GHM into the same display labels used by the final cohort.
+        if "icu_ghm" in original_patient.columns:
+            def _source_ghm_label(value: object) -> str:
+                if isinstance(value, (list, tuple, np.ndarray)):
+                    if len(value) == 0:
+                        return "Others"
+                    value = value[0]
+                if pd.isna(value):
+                    return "Others"
+                text = str(value)
+                code = text[:3]
+                return GHM_CODE_TO_LABEL.get(code, text if text in GHM_CODE_TO_LABEL.values() else "Others")
+
+            original_patient["icu_ghm"] = original_patient["icu_ghm"].map(
+                _source_ghm_label
+            )
+
+            # Reuse EXACTLY the GHM labels selected from the final cohort.
+            for ghm_label in top_5_ghm if "top_5_ghm" in locals() else []:
+                original_patient[ghm_label] = (
+                    original_patient["icu_ghm"] == ghm_label
+                ).astype(int)
+
+        # Explicit score missingness columns. Glasgow is overridden below because
+        # clean_full_static contains the already-imputed score.
+        if "sapsii" in original_patient.columns:
+            original_patient["sapsii"] = pd.to_numeric(
+                original_patient["sapsii"], errors="coerce"
+            )
+            original_patient["sapsii_missing"] = (
+                original_patient["sapsii"].isna().astype(int)
+            )
+        if "score_glasgow" in original_patient.columns:
+            original_patient["score_glasgow"] = pd.to_numeric(
+                original_patient["score_glasgow"], errors="coerce"
+            )
+            original_patient["score_glasgow_missing"] = 0
+
+        # If the table contains an observed-duration field, derive it from the
+        # <=24h dynamic window when possible.
+        if original_time_col in original_dynamic_24h.columns:
+            original_time_summary = (
+                original_dynamic_24h.group_by(patient_col)
+                .agg(
+                    pl.col(original_time_col)
+                    .cast(pl.Float64, strict=False)
+                    .max()
+                    .alias(original_time_col)
+                )
+                .to_pandas()
+            )
+            original_patient = original_patient.drop(
+                columns=[original_time_col], errors="ignore"
+            ).merge(original_time_summary, on=patient_col, how="left")
+
+        # Apply the same final display-name mapping.
+        original_patient = original_patient.rename(columns=rename_mask)
+
+        original_describe = [
+            col for col in describe_columns if col in original_patient.columns
+        ]
+        missing_original_features = [
+            col for col in describe_columns if col not in original_patient.columns
+        ]
+        if missing_original_features:
+            print(
+                "[TABLEONE] Source cohort does not contain these final-table "
+                f"features; they are omitted from the source column: {missing_original_features}",
+                flush=True,
+            )
+
+        original_continuous = [
+            col for col in continuous_features if col in original_describe
+        ]
+        original_categorical = [
+            col for col in categorical_features if col in original_describe
+        ]
+
+        # Preserve categorical ordering by source-cohort frequency.
+        for col in ["ICU Entry Mode", "Gender"]:
+            if col in original_patient.columns:
+                freq_order = original_patient[col].value_counts().index.tolist()
+                original_patient[col] = pd.Categorical(
+                    original_patient[col], categories=freq_order, ordered=True
+                )
+
+        original_binary = _find_binary_indicator_features(
+            dataframe=original_patient,
+            categorical_features=original_categorical,
+        )
+
+        original_table = TableOne(
+            data=original_patient,
+            columns=original_describe,
+            categorical=original_categorical,
+            continuous=original_continuous,
+            pval=False,
+            decimals=2,
+            missing=False,
+        )
+        original_positive = _keep_positive_level_for_binary_features(
+            table_dataframe=original_table.tableone,
+            binary_features=original_binary,
+        )
+        original_formatted = add_variable_type_sections(
+            table_dataframe=original_positive,
+            continuous_features=original_continuous,
+            categorical_features=original_categorical,
+        )
+        original_formatted = _sort_categorical_rows_by_frequency(
+            table_dataframe=original_formatted,
+            features_to_sort=_sort_cols,
+        )
+
+        # Pre-imputation Glasgow missingness for the ORIGINAL ICU population.
+        original_idx_level = original_formatted.index.get_level_values(0).astype(str)
+        original_glasgow_mask = original_idx_level.str.startswith(
+            "Glasgow Score Missing"
+        )
+        if original_glasgow_mask.any():
+            if ORIGINAL_GLASGOW_MISSING_N is None:
+                original_formatted.loc[original_glasgow_mask, "Overall"] = "TO FILL"
+                print(
+                    "[TABLEONE] Set ORIGINAL_GLASGOW_MISSING_N at the top of "
+                    "static_features_utils.py to the pre-imputation count for "
+                    "the ICU-filtered source population.",
+                    flush=True,
+                )
+            else:
+                original_glasgow_pct = (
+                    100 * ORIGINAL_GLASGOW_MISSING_N / original_n
+                    if original_n else 0.0
+                )
+                original_formatted.loc[original_glasgow_mask, "Overall"] = (
+                    f"{ORIGINAL_GLASGOW_MISSING_N} ({original_glasgow_pct:.2f})"
+                )
+
+        # Use the final cohort row layout as the reference so both columns show
+        # exactly the same variables in the same order.
+        #
+        # TableOne can encode the same binary level differently depending on
+        # the pandas dtype (e.g. 1 vs 1.0). A raw MultiIndex.reindex() then
+        # treats those rows as different and returns NaN even though the
+        # variable and category are semantically identical. Build the source
+        # lookup on a normalized index instead, while keeping the FINAL table
+        # index/layout unchanged.
+        def _normalize_tableone_level(value: object) -> str:
+            text = str(value).strip()
+            lowered = text.lower()
+            if lowered in {"1", "1.0", "true"}:
+                return "1"
+            if lowered in {"0", "0.0", "false"}:
+                return "0"
+            return text
+
+        original_lookup = {
+            (
+                _normalize_tableone_level(feature),
+                _normalize_tableone_level(level),
+            ): value
+            for (feature, level), value in original_formatted["Overall"].items()
+        }
+
+        original_overall = pd.Series(
+            [
+                original_lookup.get(
+                    (
+                        _normalize_tableone_level(feature),
+                        _normalize_tableone_level(level),
+                    ),
+                    np.nan,
+                )
+                for feature, level in formatted_table.index
+            ],
+            index=formatted_table.index,
+            name="Overall",
+        )
+        output_table = pd.concat(
+            [
+                original_overall.rename("Original ICU cohort (first 24h)"),
+                formatted_table["Overall"].rename("Final training cohort"),
+            ],
+            axis=1,
+        )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    formatted_table.to_html(output_dir / "tableone_static_features.html")
-    formatted_table.to_csv(output_dir / "tableone_static_features.csv")
-    formatted_table.to_latex(output_dir / "tableone_static_features.tex")
+    output_table.to_html(output_dir / "tableone_static_features.html")
+    output_table.to_csv(output_dir / "tableone_static_features.csv")
+    output_table.to_latex(output_dir / "tableone_static_features.tex")
 
     return table

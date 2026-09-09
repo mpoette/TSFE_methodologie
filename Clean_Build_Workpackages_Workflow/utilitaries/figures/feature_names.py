@@ -98,5 +98,5 @@ def short_feature_name(feature_name: object, include_suffix: bool = True) -> str
             return short_name
         suffix = name[len(prefix):]
         readable_suffix = re.sub(r"[_\s]+", " ", suffix).strip()
-        return f"{short_name} — {readable_suffix}" if readable_suffix else short_name
+        return f"{short_name} - {readable_suffix}" if readable_suffix else short_name
     return name

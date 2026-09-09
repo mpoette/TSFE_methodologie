@@ -21,6 +21,8 @@ from sklearn.metrics import brier_score_loss, f1_score, matthews_corrcoef
 import utilitaries.training_utils as utils
 import utilitaries.features_extraction_utils as feat_utils
 
+import scipy.stats as st
+
 def _to_2d_numpy(
     X,
     *,
@@ -783,367 +785,6 @@ def linear_coefficients_holdout_ensemble(
     }
 
 
-import os
-import re
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-
-import os
-import re
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# -----------------------------------------------------------------------------
-# 1. DETAILED ODDS RATIO PLOT
-# -----------------------------------------------------------------------------
-# ============================================================================
-# ODDS-RATIO VISUALIZATION
-# ============================================================================
-
-def plot_odds_ratios_with_others(
-    csv_file: str,
-    save: bool = True,
-    folder: str = "",
-    transparent: bool = False,
-    top_n: int = 20,
-    title: str = "Multivariable Analysis - Odds Ratios",
-    underscore_groups_per_line: int = 3,
-
-    output_format: str = "pdf",
-):
-    """Plot detailed odds ratios and confidence intervals from a CSV file.
-
-    Args:
-        csv_file: Path to the coefficient summary CSV file.
-        save: Whether to save the generated figure.
-        folder: Destination directory for saved figures.
-        transparent: Whether saved figures use a transparent background.
-        top_n: Number of highest-importance features to display.
-        title: Figure title.
-        underscore_groups_per_line: Number of underscore-delimited label
-            groups displayed on each line.
-
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-
-    Returns:
-        A tuple containing the Matplotlib figure and axes.
-    """
-    df = pd.read_csv(csv_file)
-
-    # ------------------------------------------------------------------
-    # Utility function:
-    # split labels every N groups separated by "_"
-    #
-    # Example with n=3:
-    # feature_with_many_different_groups_here
-    # ->
-    # feature_with_many
-    # different_groups_here
-    # ------------------------------------------------------------------
-    def wrap_label_by_underscores(label, n=3):
-        """Wrap an underscore-delimited label after a fixed number of groups.
-
-        Args:
-            label: Label to wrap.
-            n: Maximum number of underscore-delimited groups per line.
-
-        Returns:
-            The wrapped label.
-        """
-        parts = str(label).split("_")
-
-        return "\n".join(
-            "_".join(parts[i:i + n])
-            for i in range(0, len(parts), n)
-        )
-
-    # Select the top N features according to their mean absolute importance
-    df_plot = (
-        df.sort_values(
-            by="mean_abs_coefficient",
-            ascending=False
-        )
-        .head(top_n)
-        .copy()
-    )
-
-    # OR computed from the mean coefficient across the 5 models
-    df_plot["OR"] = np.exp(
-        df_plot["mean_coefficient"]
-    )
-
-    # Descriptive inter-model dispersion:
-    # exp(mean_beta ± 1.96 * SD_beta)
-    #
-    # WARNING:
-    # this is NOT a statistical 95% confidence interval.
-    df_plot["OR_lower"] = np.exp(
-        df_plot["mean_coefficient"]
-        - 1.96 * df_plot["std_coefficient"]
-    )
-
-    df_plot["OR_upper"] = np.exp(
-        df_plot["mean_coefficient"]
-        + 1.96 * df_plot["std_coefficient"]
-    )
-
-    # For the odds-ratio plot, sort by OR:
-    # associations < 1 followed by > 1
-    df_plot = (
-        df_plot.sort_values(
-            by="OR",
-            ascending=True
-        )
-        .reset_index(drop=True)
-    )
-
-    # Slightly wider to give tick labels more room
-    fig_width = max(
-        13,
-        0.7 * len(df_plot)
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(fig_width, 7)
-    )
-
-    yerr_lower = (
-        df_plot["OR"]
-        - df_plot["OR_lower"]
-    ).to_numpy()
-
-    yerr_upper = (
-        df_plot["OR_upper"]
-        - df_plot["OR"]
-    ).to_numpy()
-
-    # Reference value
-    ax.axhline(
-        y=1,
-        color="red",
-        linestyle="--",
-        label="OR = 1"
-    )
-
-    # Points + inter-model dispersion
-    for idx in range(len(df_plot)):
-        ax.errorbar(
-            x=idx,
-            y=df_plot.iloc[idx]["OR"],
-            yerr=[
-                [yerr_lower[idx]],
-                [yerr_upper[idx]]
-            ],
-            fmt="o",
-            color="black",
-            ecolor="gray",
-            capsize=3
-        )
-
-    # Descriptive legend entry
-    ax.plot(
-        [],
-        [],
-        "o",
-        color="black",
-        label=r"OR (inter-model variability: $\pm 1.96\,SD$)"
-    )
-
-    # ------------------------------------------------------------------
-    # X-axis labels
-    # ------------------------------------------------------------------
-    ax.set_xticks(
-        range(len(df_plot))
-    )
-
-    wrapped_labels = [
-        wrap_label_by_underscores(
-            short_feature_name(label),
-            n=underscore_groups_per_line
-        )
-        for label in df_plot["feature"]
-    ]
-
-    ax.set_xticklabels(
-        wrapped_labels,
-        rotation=45,
-        ha="right",
-        rotation_mode="anchor"
-    )
-
-    # Add a little extra space between ticks and labels
-    ax.tick_params(
-        axis="x",
-        pad=4
-    )
-
-    ax.set_ylabel(
-        "Odds Ratio"
-    )
-
-    if title is not None:
-        ax.set_title(title)
-
-    ax.legend(
-        loc="upper left"
-    )
-
-    plt.tight_layout()
-
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
-    if save:
-        filename = "odds_ratio_plot_with_others.png"
-
-        save_path = (
-            os.path.join(folder, filename)
-            if folder
-            else filename
-        )
-
-        if folder:
-            os.makedirs(
-                folder,
-                exist_ok=True
-            )
-
-        save_path = save_figure_file(plt, save_path, output_format, transparent=transparent, bbox_inches="tight")
-
-        print(
-            f"[plot_odds_ratios_with_others] "
-            f"Figure saved to: {save_path}",
-            flush=True
-        )
-
-    plt.close()
-
-    return fig, ax
-
-
-# -----------------------------------------------------------------------------
-# 2. AGGREGATED IMPORTANCE BY CLINICAL VARIABLE
-#
-# Importance of a root variable =
-#     sum of mean_abs_coefficient
-#
-# We deliberately do not compute:
-#   - an aggregated OR,
-#   - a pseudo-interval,
-#   - an uncertainty bar.
-# --------------------------------------------------------------------------------
-def plot_aggregated_odds_ratios(
-    csv_file: str,
-    save: bool = True,
-    folder: str = "",
-    transparent: bool = False,
-    top_n: int = 15,
-    title: str = "Cumulative Importance by Clinical Variable"
-,
-    output_format: str = "pdf",
-):
-    """Plot cumulative coefficient importance by source clinical variable.
-
-    Args:
-        csv_file: Path to the aggregated coefficient summary CSV file.
-        save: Whether to save the generated figure.
-        folder: Destination directory for saved figures.
-        transparent: Whether saved figures use a transparent background.
-        top_n: Number of highest-importance variables to display.
-        title: Figure title.
-
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-
-    Returns:
-        A tuple containing the Matplotlib figure and axes.
-    """
-    df = pd.read_csv(csv_file)
-
-    # Top N by mean cumulative importance
-    df_plot = (
-        df.sort_values(
-            "mean_cumulative_importance",
-            ascending=False,
-        )
-        .head(top_n)
-        .copy()
-        .reset_index(drop=True)
-    )
-
-    x = np.arange(len(df_plot))
-
-    y = df_plot[
-        "mean_cumulative_importance"
-    ].to_numpy()
-
-    yerr = df_plot[
-        "std_cumulative_importance"
-    ].to_numpy()
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    ax.errorbar(
-        x,
-        y,
-        yerr=yerr,
-        fmt="o",
-        color="black",
-        ecolor="gray",
-        capsize=3,
-        linestyle="none",
-        label=r"Mean cumulative importance $\pm$ inter-model SD",
-    )
-
-    ax.set_xticks(x)
-
-    ax.set_xticklabels(
-        [short_feature_name(name) for name in df_plot["root_feature"]],
-        rotation=45,
-        ha="right",
-    )
-
-    ax.set_ylabel(
-        r"Cumulative importance ($\sum |\beta|$)"
-    )
-
-    if title is not None:
-        ax.set_title(title)
-
-    ax.legend(loc="upper right")
-
-    plt.tight_layout()
-
-    if save:
-        filename = "odds_ratio_plot_aggregated.png"
-
-        save_path = (
-            os.path.join(folder, filename)
-            if folder
-            else filename
-        )
-
-        if folder:
-            os.makedirs(folder, exist_ok=True)
-
-        save_path = save_figure_file(plt, save_path, output_format, transparent=transparent, bbox_inches="tight")
-
-        print(
-            f"[plot_aggregated_odds_ratios] "
-            f"Figure saved to: {save_path}",
-            flush=True,
-        )
-
-    plt.close()
-
-    return fig, ax
-
-
-
-
-
 # ============================================================================
 # TSFEL INTERPRETABILITY
 # ============================================================================
@@ -1429,7 +1070,7 @@ def _get_tsfel_display_group(descriptor: str) -> Optional[str]:
         "area under the curve",
         "autocorrelation",
         "centroid",
-        "lempel-ziv complexity",
+        # "lempel-ziv complexity",
         "mean absolute diff",
         "mean diff",
         "median absolute diff",
@@ -1510,6 +1151,16 @@ def _get_tsfel_display_group(descriptor: str) -> Optional[str]:
     return None
 
 
+import os
+import re
+from pathlib import Path
+from collections.abc import Mapping
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
+
 def shap_tsfel_importance_matrix(
     shap_results,
     *,
@@ -1523,114 +1174,60 @@ def shap_tsfel_importance_matrix(
     min_importance=0.0,
     normalize=False,
     all_descriptors=False,
+    single_gray_removed=False,
     transpose=False,
     figsize=None,
     cmap="Reds",
     show=True,
     feature_trace=None,
-
     output_format: str = "pdf",
 ):
     """Plot a TSFEL SHAP importance heatmap.
     
-    The matrix relates raw variables to TSFEL descriptors. Raw variables are
-    ordered by cumulative SHAP importance, while descriptors are grouped by their
-    display family and ranked according to explainability and SHAP importance.
-    
     Args:
-        shap_results:
-            SHAP results dictionary containing detailed feature-level values.
-        savefig:
-            Whether to save the generated figure.
-        folder:
-            Output directory.
-        transparent:
-            Whether saved figures should use a transparent background.
-        filename:
-            Base filename used when saving the figure.
-        title:
-            Optional figure title.
-        top_raw_variables:
-            Optional maximum number of raw variables to display.
-        top_descriptors:
-            Optional maximum number of TSFEL descriptors to display.
-        min_importance:
-            Minimum SHAP importance required for inclusion.
-        normalize:
-            Whether to normalize the displayed importance matrix.
-        all_descriptors:
-            Whether to include all active standard TSFEL descriptors, including
-            descriptors absent after preprocessing.
-        transpose:
-            Whether to transpose the matrix.
-        figsize:
-            Optional Matplotlib figure size.
-        cmap:
-            Matplotlib colormap used for the heatmap.
-        show:
-            Whether to display the figure.
-        feature_trace:
-            Optional feature-removal mapping or JSON trace path. Removed TSFEL
-            combinations receive stage-specific gray shades for zero variance,
-            correlation, and Boruta filtering.
-    
+        shap_results: SHAP results dictionary containing detailed feature values.
+        savefig: Whether to save the generated figure.
+        folder: Output directory.
+        transparent: Whether saved figures should use a transparent background.
+        filename: Base filename used when saving the figure.
+        title: Optional figure title.
+        top_raw_variables: Optional maximum number of raw variables to display.
+        top_descriptors: Optional maximum number of TSFEL descriptors to display.
+        min_importance: Minimum SHAP importance required for inclusion.
+        normalize: Whether to normalize the displayed importance matrix.
+        all_descriptors: Whether to include all active standard TSFEL descriptors.
+        single_gray_removed: If True, uses a single gray shade for all removed
+            features instead of stage-specific shades.
+        transpose: Whether to transpose the matrix.
+        figsize: Optional Matplotlib figure size.
+        cmap: Matplotlib colormap used for the heatmap.
+        show: Whether to display the figure.
+        feature_trace: Optional feature-removal mapping or JSON trace path.
         output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-
-    Returns:
-        dict:
-            Displayed importance matrix, names, ordering information, and related
-            metadata.
-    
-    Raises:
-        ValueError:
-            If the SHAP matrix is invalid, no compatible TSFEL feature is found,
-            or display limits are invalid.
     """
 
     # ==================================================================
     # 1. DETAILED SHAP
     # ==================================================================
-
     if "detailed" not in shap_results:
-        raise KeyError(
-            "shap_results must contain the 'detailed' key."
-        )
+        raise KeyError("shap_results must contain the 'detailed' key.")
 
     detailed = shap_results["detailed"]
-
-    mean_shap_values = np.asarray(
-        detailed["mean_shap_values"],
-        dtype=float,
-    )
-
-    feature_names = list(
-        detailed["feature_names"]
-    )
+    mean_shap_values = np.asarray(detailed["mean_shap_values"], dtype=float)
+    feature_names = list(detailed["feature_names"])
 
     if mean_shap_values.ndim != 2:
-        raise ValueError(
-            "detailed['mean_shap_values'] must be a 2D matrix."
-        )
-
+        raise ValueError("detailed['mean_shap_values'] must be a 2D matrix.")
     if mean_shap_values.shape[1] != len(feature_names):
-        raise ValueError(
-            "The number of SHAP columns does not match "
-            "the number of feature_names."
-        )
+        raise ValueError("The number of SHAP columns does not match feature_names.")
 
     # ==================================================================
     # 2. STANDARD TSFEL REFERENCE
     # ==================================================================
-
-    standard_tsfel_descriptors = (
-        _get_active_standard_tsfel_descriptors()
-    )
+    standard_tsfel_descriptors = _get_active_standard_tsfel_descriptors()
 
     if isinstance(feature_trace, Mapping):
-        feature_removal_trace = {
-            str(name): str(stage)
-            for name, stage in feature_trace.items()
-        }
+        feature_removal_trace = {str(name): str(stage) for name, stage in feature_trace.items()}
     else:
         feature_removal_trace = load_feature_trace(feature_trace)
 
@@ -1649,13 +1246,13 @@ def shap_tsfel_importance_matrix(
         )
         if descriptor is None:
             continue
-        normalized_descriptor = re.sub(
-            r"[_\s]+", " ", str(descriptor).lower()
-        ).strip()
+
+        normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
         if normalized_descriptor not in standard_tsfel_descriptors:
             continue
         if _get_tsfel_display_group(descriptor) is None:
             continue
+
         pair = (descriptor, root_name)
         previous_stage = pair_removal_stages.get(pair)
         if previous_stage is None or (
@@ -1666,36 +1263,12 @@ def shap_tsfel_importance_matrix(
 
     # ==================================================================
     # 3. DETAILED IMPORTANCE
-    #
-    # Each individual feature:
-    #
-    #     mean(|SHAP|)
     # ==================================================================
-
-    mean_abs_shap = np.mean(
-        np.abs(mean_shap_values),
-        axis=0,
-    )
-
+    mean_abs_shap = np.mean(np.abs(mean_shap_values), axis=0)
     rows = []
 
-    for feature_name, importance in zip(
-        feature_names,
-        mean_abs_shap,
-    ):
-
-        # --------------------------------------------------------------
-        # Raw variable
-        # --------------------------------------------------------------
-
-        root_name = _clean_feature_name(
-            feature_name
-        )
-
-        # --------------------------------------------------------------
-        # TSFEL descriptor
-        # --------------------------------------------------------------
-
+    for feature_name, importance in zip(feature_names, mean_abs_shap):
+        root_name = _clean_feature_name(feature_name)
         descriptor = _extract_tsfel_descriptor(
             feature_name,
             root_name,
@@ -1705,52 +1278,19 @@ def shap_tsfel_importance_matrix(
         if descriptor is None:
             continue
 
-        # --------------------------------------------------------------
-        # Keep only genuine standard TSFEL descriptors.
-        #
-        # Avoid internal aliases such as:
-        #   std
-        #   fft mean coeff
-        #   spectrogram mean coeff
-        # --------------------------------------------------------------
-
-        normalized_descriptor = re.sub(
-            r"[_\s]+",
-            " ",
-            str(descriptor).lower(),
-        ).strip()
-
-        if (
-            normalized_descriptor
-            not in standard_tsfel_descriptors
-        ):
+        normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
+        if normalized_descriptor not in standard_tsfel_descriptors:
             continue
 
-        # --------------------------------------------------------------
-        # Display group
-        # --------------------------------------------------------------
-
-        group = _get_tsfel_display_group(
-            descriptor
-        )
-
-        # Fractal / unknown
+        group = _get_tsfel_display_group(descriptor)
         if group is None:
             continue
 
-        importance = float(
-            importance
-        )
-
+        importance = float(importance)
         if not np.isfinite(importance):
             continue
 
-        explainability_score = float(
-            feat_utils.explainability_scores.get(
-                descriptor,
-                0,
-            )
-        )
+        explainability_score = float(feat_utils.explainability_scores.get(descriptor, 0))
 
         rows.append({
             "feature": feature_name,
@@ -1762,44 +1302,18 @@ def shap_tsfel_importance_matrix(
         })
 
     if not rows:
-        raise ValueError(
-            "No compatible TSFEL feature was identified."
-        )
+        raise ValueError("No compatible TSFEL feature was identified.")
 
-    long_table = pd.DataFrame(
-        rows
-    )
+    long_table = pd.DataFrame(rows)
 
     # ==================================================================
-    # 4. COMBINATIONS ACTUALLY PRESENT AFTER PREPROCESSING
-    #
-    # Distinguishes between:
-    #
-    #   absent combination              -> gray
-    #   present combination + SHAP == 0 -> white
+    # 4. SELECTED COMBINATIONS
     # ==================================================================
-
-    selected_pairs = set(
-        zip(
-            long_table["descriptor"],
-            long_table["raw_variable"],
-        )
-    )
+    selected_pairs = set(zip(long_table["descriptor"], long_table["raw_variable"]))
 
     # ==================================================================
-    # 5. MATRIX
-    #
-    # Multiple sub-features from the same pair are summed:
-    #
-    #     sum(mean(|SHAP|))
-    #
-    # Example:
-    #
-    # Wavelet variance scale 1 \
-    # Wavelet variance scale 2  -> same cell
-    # Wavelet variance scale 3 /
+    # 5. MATRIX PIVOT
     # ==================================================================
-
     matrix = long_table.pivot_table(
         index="descriptor",
         columns="raw_variable",
@@ -1808,12 +1322,8 @@ def shap_tsfel_importance_matrix(
         fill_value=0.0,
     )
 
-    traced_descriptors = list(
-        dict.fromkeys(pair[0] for pair in pair_removal_stages)
-    )
-    traced_variables = list(
-        dict.fromkeys(pair[1] for pair in pair_removal_stages)
-    )
+    traced_descriptors = list(dict.fromkeys(pair[0] for pair in pair_removal_stages))
+    traced_variables = list(dict.fromkeys(pair[1] for pair in pair_removal_stages))
     matrix = matrix.reindex(
         index=[*matrix.index, *[name for name in traced_descriptors if name not in matrix.index]],
         columns=[*matrix.columns, *[name for name in traced_variables if name not in matrix.columns]],
@@ -1821,371 +1331,117 @@ def shap_tsfel_importance_matrix(
     )
 
     # ==================================================================
-    # 6. ADD ALL OPTIONAL DESCRIPTORS
+    # 6. ALL DESCRIPTORS OPTION
     # ==================================================================
-
     if all_descriptors:
-
         all_tsfel_descriptors = []
-
-        for descriptor in (
-            feat_utils.explainability_scores.keys()
-        ):
-
-            normalized_descriptor = re.sub(
-                r"[_\s]+",
-                " ",
-                str(descriptor).lower(),
-            ).strip()
-
-            # Internal alias -> ignored
-            if (
-                normalized_descriptor
-                not in standard_tsfel_descriptors
-            ):
+        for descriptor in feat_utils.explainability_scores.keys():
+            normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
+            if normalized_descriptor not in standard_tsfel_descriptors:
                 continue
-
-            group = _get_tsfel_display_group(
-                descriptor
-            )
-
-            if group is None:
+            if _get_tsfel_display_group(descriptor) is None:
                 continue
+            all_tsfel_descriptors.append(descriptor)
 
-            all_tsfel_descriptors.append(
-                descriptor
-            )
-
-        missing_descriptors = [
-            descriptor
-            for descriptor in all_tsfel_descriptors
-            if descriptor not in matrix.index
-        ]
-
+        missing_descriptors = [d for d in all_tsfel_descriptors if d not in matrix.index]
         if missing_descriptors:
-
-            missing_matrix = pd.DataFrame(
-                0.0,
-                index=missing_descriptors,
-                columns=matrix.columns,
-            )
-
-            matrix = pd.concat(
-                [
-                    matrix,
-                    missing_matrix,
-                ],
-                axis=0,
-            )
+            missing_matrix = pd.DataFrame(0.0, index=missing_descriptors, columns=matrix.columns)
+            matrix = pd.concat([matrix, missing_matrix], axis=0)
 
     # ==================================================================
-    # 7. OPTIONAL THRESHOLD
+    # 7. MIN IMPORTANCE THRESHOLD
     # ==================================================================
-
     if min_importance > 0:
-
-        matrix = matrix.mask(
-            matrix < min_importance,
-            0.0,
-        )
+        matrix = matrix.mask(matrix < min_importance, 0.0)
 
     # ==================================================================
-    # 8. RAW VARIABLE ORDER
-    #
-    # Importance:
-    #
-    #     sum_descripteurs mean(|SHAP|)
-    #
-    # No positive / negative cancellation.
+    # 8. ORDERING VARIABLES
     # ==================================================================
-
-    variable_importance = (
-        matrix
-        .sum(axis=0)
-        .sort_values(
-            ascending=False
-        )
-    )
-
-    ordered_columns = (
-        variable_importance
-        .index
-        .tolist()
-    )
-
-    # ==================================================================
-    # 9. TOP VARIABLES
-    # ==================================================================
+    variable_importance = matrix.sum(axis=0).sort_values(ascending=False)
+    ordered_columns = variable_importance.index.tolist()
 
     if top_raw_variables is not None:
-
         if top_raw_variables <= 0:
-            raise ValueError(
-                "top_raw_variables must be greater than 0 or None."
-            )
+            raise ValueError("top_raw_variables must be greater than 0 or None.")
+        ordered_columns = ordered_columns[:top_raw_variables]
 
-        ordered_columns = ordered_columns[
-            :top_raw_variables
-        ]
-
-    matrix = matrix.loc[
-        :,
-        ordered_columns,
-    ]
+    matrix = matrix.loc[:, ordered_columns]
 
     # ==================================================================
-    # 10. DESCRIPTOR IMPORTANCE
+    # 9. ORDERING DESCRIPTORS
     # ==================================================================
-
-    descriptor_importance = matrix.sum(
-        axis=1
-    )
-
+    descriptor_importance = matrix.sum(axis=1)
     descriptor_infos = []
 
     for descriptor in matrix.index:
-
-        group = _get_tsfel_display_group(
-            descriptor
-        )
-
+        group = _get_tsfel_display_group(descriptor)
         if group is None:
             continue
-
-        score = float(
-            feat_utils.explainability_scores.get(
-                descriptor,
-                0,
-            )
-        )
-
+        score = float(feat_utils.explainability_scores.get(descriptor, 0))
         descriptor_infos.append({
             "descriptor": descriptor,
             "group": group,
             "explainability_score": score,
-            "importance": float(
-                descriptor_importance.loc[
-                    descriptor
-                ]
-            ),
+            "importance": float(descriptor_importance.loc[descriptor]),
         })
 
-    descriptor_info_df = pd.DataFrame(
-        descriptor_infos
-    )
-
-    # ==================================================================
-    # 11. GROUP ORDER
-    # ==================================================================
-
-    group_order = [
-        "Statistical",
-        "Temporal",
-        "Spectral",
-        "Wavelet",
-    ]
-
+    descriptor_info_df = pd.DataFrame(descriptor_infos)
+    group_order = ["Statistical", "Temporal", "Spectral", "Wavelet"]
     ordered_descriptors = []
 
     for group in group_order:
-
-        group_df = descriptor_info_df[
-            descriptor_info_df["group"] == group
-        ].copy()
-
+        group_df = descriptor_info_df[descriptor_info_df["group"] == group].copy()
         if group_df.empty:
             continue
-
-        # --------------------------------------------------------------
-        # Within each family:
-        #
-        # 1. decreasing explainability
-        # 2. decreasing SHAP importance
-        # 3. alphabetical name
-        # --------------------------------------------------------------
-
         group_df = group_df.sort_values(
-            by=[
-                "explainability_score",
-                "importance",
-                "descriptor",
-            ],
-            ascending=[
-                False,
-                False,
-                True,
-            ],
+            by=["explainability_score", "importance", "descriptor"],
+            ascending=[False, False, True],
         )
-
-        ordered_descriptors.extend(
-            group_df[
-                "descriptor"
-            ].tolist()
-        )
-
-    # ==================================================================
-    # 12. TOP DESCRIPTORS
-    # ==================================================================
+        ordered_descriptors.extend(group_df["descriptor"].tolist())
 
     if top_descriptors is not None:
-
         if top_descriptors <= 0:
-            raise ValueError(
-                "top_descriptors must be greater than 0 or None."
-            )
+            raise ValueError("top_descriptors must be greater than 0 or None.")
+        ordered_descriptors = ordered_descriptors[:top_descriptors]
 
-        ordered_descriptors = ordered_descriptors[
-            :top_descriptors
-        ]
+    matrix = matrix.loc[ordered_descriptors]
 
-    matrix = matrix.loc[
-        ordered_descriptors
-    ]
-
-    # ==================================================================
-    # 13. GROUP POSITIONS
-    #
-    # These positions correspond to the descriptors.
-    #
-    # Normal:
-    #     positions on Y
-    #
-    # Transposed:
-    #     same positions on X
-    # ==================================================================
-
+    # Display positions
     displayed_groups = {}
+    for descriptor_idx, descriptor in enumerate(matrix.index):
+        group = _get_tsfel_display_group(descriptor)
+        if group is not None:
+            displayed_groups.setdefault(group, []).append(descriptor_idx)
 
-    for descriptor_idx, descriptor in enumerate(
-        matrix.index
-    ):
-
-        group = _get_tsfel_display_group(
-            descriptor
-        )
-
-        if group is None:
-            continue
-
-        displayed_groups.setdefault(
-            group,
-            [],
-        ).append(
-            descriptor_idx
-        )
-
-    # ==================================================================
-    # 14. NORMALIZATION
-    # ==================================================================
-
+    # Normalization
     if normalize:
-
-        total = float(
-            matrix.to_numpy().sum()
-        )
-
+        total = float(matrix.to_numpy().sum())
         if total > 0:
+            matrix = matrix / total
 
-            matrix = (
-                matrix / total
-            )
-
-    # ==================================================================
-    # 15. OPTIONAL TRANSPOSITION
-    #
-    # Transpose AFTER establishing:
-    #
-    #   - variable order
-    #   - descriptor order
-    #   - family positions
-    #
-    # so that all logic remains identical.
-    # ==================================================================
-
+    # Transposition
     if transpose:
-
         matrix = matrix.T
-
-        effective_filename = (
-            f"{filename}_transpose"
-        )
-
+        effective_filename = f"{filename}_transpose"
     else:
-
         effective_filename = filename
 
     # ==================================================================
-    # 16. DIMENSIONS
+    # 10. FIGURE DIMENSIONS & PLOT
     # ==================================================================
-
     n_rows, n_cols = matrix.shape
 
     if figsize is None:
-
         if not transpose:
-
-            fig_width = max(
-                10.0,
-                min(
-                    24.0,
-                    0.48 * n_cols + 5.0,
-                ),
-            )
-
-            fig_height = max(
-                7.0,
-                min(
-                    30.0,
-                    0.38 * n_rows + 3.5,
-                ),
-            )
-
+            fig_width = max(11.0, min(26.0, 0.48 * n_cols + 6.5))
+            fig_height = max(7.0, min(30.0, 0.38 * n_rows + 3.5))
         else:
+            fig_width = max(13.0, min(32.0, 0.42 * n_cols + 6.5))
+            fig_height = max(7.0, min(24.0, 0.45 * n_rows + 4.0))
+        figsize = (fig_width, fig_height)
 
-            # In transposed mode:
-            #
-            # more width because the descriptors
-            # TSFEL are now on X.
-
-            fig_width = max(
-                12.0,
-                min(
-                    30.0,
-                    0.42 * n_cols + 5.0,
-                ),
-            )
-
-            fig_height = max(
-                7.0,
-                min(
-                    24.0,
-                    0.45 * n_rows + 4.0,
-                ),
-            )
-
-        figsize = (
-            fig_width,
-            fig_height,
-        )
-
-    # ==================================================================
-    # 17. FIGURE
-    # ==================================================================
-
-    fig, ax = plt.subplots(
-        figsize=figsize
-    )
-
-    values = matrix.to_numpy(
-        dtype=float
-    )
-
-    # --------------------------------------------------------------
-    # Normal heatmap:
-    #
-    # SHAP = 0 -> white
-    # SHAP > 0 -> red
-    # --------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=figsize)
+    values = matrix.to_numpy(dtype=float)
 
     image = ax.imshow(
         values,
@@ -2196,130 +1452,64 @@ def shap_tsfel_importance_matrix(
     )
 
     # ==================================================================
-    # 18. MASK OF UNSELECTED COMBINATIONS
-    #
-    # IMPORTANT :
-    #
-    # Mask only a combination absent from preprocessing.
-    #
-    # A present combination with SHAP == 0 remains white.
+    # 11. REMOVAL OVERLAY
     # ==================================================================
-
     if not transpose:
+        selected_mask = np.array([
+            [(d, v) in selected_pairs for v in matrix.columns]
+            for d in matrix.index
+        ], dtype=bool)
 
-        # --------------------------------------------------------------
-        # Normal:
-        #
-        # rows    = descriptors
-        # columns = variables
-        # --------------------------------------------------------------
-
-        selected_mask = np.array(
+        removal_stage_matrix = np.array([
             [
-                [
-                    (
-                        descriptor,
-                        raw_variable,
-                    )
-                    in selected_pairs
-
-                    for raw_variable
-                    in matrix.columns
-                ]
-
-                for descriptor
-                in matrix.index
-            ],
-            dtype=bool,
-        )
-
+                "selected" if selected_mask[r, c]
+                else pair_removal_stages.get((d, v), "absent")
+                for c, v in enumerate(matrix.columns)
+            ]
+            for r, d in enumerate(matrix.index)
+        ], dtype=object)
     else:
+        selected_mask = np.array([
+            [(d, v) in selected_pairs for d in matrix.columns]
+            for v in matrix.index
+        ], dtype=bool)
 
-        # --------------------------------------------------------------
-        # Transposed:
-        #
-        # rows    = variables
-        # columns = descriptors
-        # --------------------------------------------------------------
-
-        selected_mask = np.array(
+        removal_stage_matrix = np.array([
             [
-                [
-                    (
-                        descriptor,
-                        raw_variable,
-                    )
-                    in selected_pairs
+                "selected" if selected_mask[r, c]
+                else pair_removal_stages.get((d, v), "absent")
+                for c, d in enumerate(matrix.columns)
+            ]
+            for r, v in enumerate(matrix.index)
+        ], dtype=object)
 
-                    for descriptor
-                    in matrix.columns
-                ]
-
-                for raw_variable
-                in matrix.index
-            ],
-            dtype=bool,
-        )
-
-    # --------------------------------------------------------------
-    # Stage-specific gray overlay on cells without a selected feature.
-    # --------------------------------------------------------------
-
-    from matplotlib.colors import ListedColormap
-
-    stage_codes = {
-        "zero_variance": 1,
-        "correlation": 2,
-        "boruta": 3,
-        "absent": 4,
-    }
-
-    if not transpose:
-        removal_stage_matrix = np.array(
-            [
-                [
-                    "selected" if selected_mask[row_index, column_index]
-                    else pair_removal_stages.get(
-                        (descriptor, raw_variable), "absent"
-                    )
-                    for column_index, raw_variable in enumerate(matrix.columns)
-                ]
-                for row_index, descriptor in enumerate(matrix.index)
-            ],
-            dtype=object,
-        )
+    if single_gray_removed:
+        # 1: Removed (unique shade), 2: Unavailable/Absent
+        stage_codes = {
+            "zero_variance": 1,
+            "correlation": 1,
+            "boruta": 1,
+            "absent": 2,
+        }
+        gray_cmap = ListedColormap(["#a0a0a0", "#000000"])
+        vmax_gray = 2.5
     else:
-        removal_stage_matrix = np.array(
-            [
-                [
-                    "selected" if selected_mask[row_index, column_index]
-                    else pair_removal_stages.get(
-                        (descriptor, raw_variable), "absent"
-                    )
-                    for column_index, descriptor in enumerate(matrix.columns)
-                ]
-                for row_index, raw_variable in enumerate(matrix.index)
-            ],
-            dtype=object,
-        )
+        # Nuances de gris par étape
+        stage_codes = {
+            "zero_variance": 1,
+            "correlation": 2,
+            "boruta": 3,
+            "absent": 4,
+        }
+        gray_cmap = ListedColormap(["#d3d3d3", "#858585", "#535353", "#000000"])
+        vmax_gray = 4.5
 
-    gray_values = np.array(
-        [
-            [stage_codes.get(stage, 4) for stage in row]
-            for row in removal_stage_matrix
-        ],
-        dtype=float,
-    )
+    gray_values = np.array([
+        [stage_codes.get(stage, stage_codes["absent"]) for stage in row]
+        for row in removal_stage_matrix
+    ], dtype=float)
+
     gray_overlay = np.ma.masked_where(selected_mask, gray_values)
-
-    gray_cmap = ListedColormap(
-        [
-            "#4d4d4d",
-            "#858585",
-            "#bdbdbd",
-            "#e3e3e3",
-        ]
-    )
 
     ax.imshow(
         gray_overlay,
@@ -2327,367 +1517,100 @@ def shap_tsfel_importance_matrix(
         interpolation="nearest",
         cmap=gray_cmap,
         vmin=0.5,
-        vmax=4.5,
+        vmax=vmax_gray,
     )
 
-    # ==================================================================
-    # 19. AXES
-    # ==================================================================
-
-    ax.set_xticks(
-        np.arange(
-            n_cols
-        )
-    )
-
-    ax.set_yticks(
-        np.arange(
-            n_rows
-        )
-    )
+    # Ticks and Labels
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_yticks(np.arange(n_rows))
 
     if not transpose:
-
-        # --------------------------------------------------------------
-        # NORMAL
-        #
-        # X = variables
-        # Y = descriptors
-        # --------------------------------------------------------------
-
-        ax.set_xticklabels(
-            [
-                _wrap_feature_name(
-                    str(name),
-                    width=18,
-                )
-                for name in matrix.columns
-            ],
-            rotation=45,
-            ha="right",
-            rotation_mode="anchor",
-            fontsize=9,
-        )
-
-        ax.set_yticklabels(
-            [
-                _wrap_feature_name(
-                    str(name),
-                    width=28,
-                )
-                for name in matrix.index
-            ],
-            fontsize=9,
-        )
-
-        ax.set_xlabel(
-            "Raw variables"
-        )
-
-        ax.set_ylabel(
-            "Extracted TSFEL features"
-        )
-
+        ax.set_xticklabels([_wrap_feature_name(str(name), width=18) for name in matrix.columns],
+                           rotation=45, ha="right", rotation_mode="anchor", fontsize=9)
+        ax.set_yticklabels([_wrap_feature_name(str(name), width=28) for name in matrix.index],
+                           fontsize=9)
+        ax.set_xlabel("Raw variables")
+        ax.set_ylabel("Extracted TSFEL features")
     else:
+        ax.set_xticklabels([_wrap_feature_name(str(name), width=22) for name in matrix.columns],
+                           rotation=45, ha="right", rotation_mode="anchor", fontsize=9)
+        ax.set_yticklabels([_wrap_feature_name(str(name), width=24) for name in matrix.index],
+                           fontsize=9)
+        ax.set_xlabel("Extracted TSFEL features")
+        ax.set_ylabel("Raw variables")
 
-        # --------------------------------------------------------------
-        # TRANSPOSE
-        #
-        # X = descriptors
-        # Y = variables
-        # --------------------------------------------------------------
+    ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_rows, 1), minor=True)
+    ax.grid(which="minor", linewidth=0.25, alpha=0.25)
+    ax.tick_params(which="minor", bottom=False, left=False)
 
-        ax.set_xticklabels(
-            [
-                _wrap_feature_name(
-                    str(name),
-                    width=22,
-                )
-                for name in matrix.columns
-            ],
-            rotation=45,
-            ha="right",
-            rotation_mode="anchor",
-            fontsize=9,
-        )
-
-        ax.set_yticklabels(
-            [
-                _wrap_feature_name(
-                    str(name),
-                    width=24,
-                )
-                for name in matrix.index
-            ],
-            fontsize=9,
-        )
-
-        ax.set_xlabel(
-            "Extracted TSFEL features"
-        )
-
-        ax.set_ylabel(
-            "Raw variables"
-        )
-
-    # ==================================================================
-    # 20. GRID BETWEEN CELLS
-    # ==================================================================
-
-    ax.set_xticks(
-        np.arange(
-            -0.5,
-            n_cols,
-            1,
-        ),
-        minor=True,
-    )
-
-    ax.set_yticks(
-        np.arange(
-            -0.5,
-            n_rows,
-            1,
-        ),
-        minor=True,
-    )
-
-    ax.grid(
-        which="minor",
-        linewidth=0.25,
-        alpha=0.25,
-    )
-
-    ax.tick_params(
-        which="minor",
-        bottom=False,
-        left=False,
-    )
-
-    # ==================================================================
-    # 21. TSFEL GROUPS
-    # ==================================================================
-
+    # Group separators & text
     if not transpose:
-
-        # --------------------------------------------------------------
-        # NORMAL
-        #
-        # Descriptors on Y:
-        #   - horizontal separators
-        #   - vertical family names in the figure
-        # --------------------------------------------------------------
-
         for group in group_order:
-
             if group not in displayed_groups:
                 continue
-
-            positions = displayed_groups[
-                group
-            ]
-
-            first_position = min(
-                positions
-            )
-
-            last_position = max(
-                positions
-            )
-
-            # ----------------------------------------------------------
-            # Horizontal separation
-            # ----------------------------------------------------------
-
-            if first_position > 0:
-
-                ax.axhline(
-                    y=first_position - 0.5,
-                    linewidth=1.5,
-                    color="black",
-                    alpha=0.75,
-                )
-
-            middle_position = (
-                first_position
-                + last_position
-            ) / 2.0
-
-            # ----------------------------------------------------------
-            # Family name
-            # ----------------------------------------------------------
-
-            ax.text(
-                0.01,
-                middle_position,
-                group,
-                transform=ax.get_yaxis_transform(),
-                ha="left",
-                va="center",
-                fontsize=10,
-                fontweight="bold",
-                rotation=90,
-                clip_on=False,
-            )
-
+            pos = displayed_groups[group]
+            f_pos, l_pos = min(pos), max(pos)
+            if f_pos > 0:
+                ax.axhline(y=f_pos - 0.5, linewidth=1.5, color="black", alpha=0.75)
+            ax.text(0.01, (f_pos + l_pos) / 2.0, group, transform=ax.get_yaxis_transform(),
+                    ha="left", va="center", fontsize=10, fontweight="bold", rotation=90, clip_on=False)
     else:
-
-        # --------------------------------------------------------------
-        # TRANSPOSE
-        #
-        # Descriptors on X:
-        #   - vertical separators
-        #   - horizontal family names
-        # --------------------------------------------------------------
-
         for group in group_order:
-
             if group not in displayed_groups:
                 continue
-
-            positions = displayed_groups[
-                group
-            ]
-
-            first_position = min(
-                positions
-            )
-
-            last_position = max(
-                positions
-            )
-
-            # ----------------------------------------------------------
-            # Vertical separation
-            # ----------------------------------------------------------
-
-            if first_position > 0:
-
-                ax.axvline(
-                    x=first_position - 0.5,
-                    linewidth=1.5,
-                    color="black",
-                    alpha=0.75,
-                )
-
-            middle_position = (
-                first_position
-                + last_position
-            ) / 2.0
-
-            # ----------------------------------------------------------
-            # Transposed family name
-            #
-            # The text is now horizontal and placed at the top
-            # of the corresponding area.
-            # ----------------------------------------------------------
-
-            ax.text(
-                middle_position,
-                0.01,
-                group,
-                transform=ax.get_xaxis_transform(),
-                ha="center",
-                va="bottom",
-                fontsize=10,
-                fontweight="bold",
-                rotation=0,
-                clip_on=False,
-            )
+            pos = displayed_groups[group]
+            f_pos, l_pos = min(pos), max(pos)
+            if f_pos > 0:
+                ax.axvline(x=f_pos - 0.5, linewidth=1.5, color="black", alpha=0.75)
+            ax.text((f_pos + l_pos) / 2.0, 0.01, group, transform=ax.get_xaxis_transform(),
+                    ha="center", va="bottom", fontsize=10, fontweight="bold", rotation=0, clip_on=False)
 
     # ==================================================================
-    # 22. COLORBAR
+    # 12. COLORBAR & REMOVAL LEGEND (RIGHT-HAND SIDE)
     # ==================================================================
-
-    cbar = fig.colorbar(
-        image,
-        ax=ax,
-        fraction=0.025,
-        pad=0.02,
-    )
-
+    cbar = fig.colorbar(image, ax=ax, fraction=0.03, pad=0.03)
     if normalize:
-
-        cbar.set_label(
-            "Relative cumulative SHAP importance"
-        )
-
+        cbar.set_label("Relative cumulative SHAP importance")
     else:
+        cbar.set_label(r"Cumulative SHAP importance ($\sum \mathrm{mean}(|SHAP|)$)")
 
-        cbar.set_label(
-            r"Cumulative SHAP importance "
-            r"($\sum \mathrm{mean}(|SHAP|)$)"
-        )
+    if single_gray_removed:
+        removal_legend = [
+            Patch(facecolor="#a0a0a0", label="Removed during selection"),
+            # Patch(facecolor="#000000", label="Unavailable combination"),
+        ]
+    else:
+        removal_legend = [
+            Patch(facecolor="#d3d3d3", label="Removed: zero variance"),
+            Patch(facecolor="#858585", label="Removed: correlation"),
+            Patch(facecolor="#535353", label="Removed: Boruta"),
+            # Patch(facecolor="#000000", label="Unavailable combination"),
+        ]
 
-    from matplotlib.patches import Patch
-
-    removal_legend = [
-        Patch(facecolor="#4d4d4d", label="Removed: zero variance"),
-        Patch(facecolor="#858585", label="Removed: correlation"),
-        Patch(facecolor="#bdbdbd", label="Removed: Boruta"),
-        Patch(facecolor="#e3e3e3", label="Unavailable combination"),
-    ]
     cbar.ax.legend(
         handles=removal_legend,
         title="Feature status",
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.10),
+        bbox_to_anchor=(2.0, -0.05),
         frameon=False,
         fontsize=8,
         title_fontsize=8,
+        alignment="left",   
     )
-
-    # ==================================================================
-    # 23. TITLE
-    # ==================================================================
-
     if title is not None:
+        ax.set_title(title, pad=15)
 
-        ax.set_title(
-            title,
-            pad=15,
-        )
-
-    # ==================================================================
-    # 24. MARGINS
-    # ==================================================================
-
+    # Subplots adjust with extended right margin
     if not transpose:
-
-        fig.subplots_adjust(
-            left=0.27,
-            bottom=0.20,
-            right=0.92,
-            top=0.94,
-        )
-
+        fig.subplots_adjust(left=0.25, bottom=0.20, right=0.80, top=0.94)
     else:
+        fig.subplots_adjust(left=0.18, bottom=0.26, right=0.80, top=0.94)
 
-        # More space at the bottom for descriptor names.
-        # The top is also given slightly more space for families.
-
-        fig.subplots_adjust(
-            left=0.18,
-            bottom=0.28,
-            right=0.92,
-            top=0.94,
-        )
-
-    # ==================================================================
-    # 25. SAVE
-    # ==================================================================
-
-    output_directory = Path(
-        folder
-    )
-
+    # Save & Export
+    output_directory = Path(folder)
     if savefig:
-
-        output_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
+        output_directory.mkdir(parents=True, exist_ok=True)
         save_figure_file(
             fig,
             output_directory / effective_filename,
@@ -2695,55 +1618,23 @@ def shap_tsfel_importance_matrix(
             bbox_inches="tight",
             transparent=transparent,
         )
-
-        matrix.to_csv(
-            output_directory
-            / f"{effective_filename}.csv"
+        matrix.to_csv(output_directory / f"{effective_filename}.csv")
+        long_table.to_csv(output_directory / f"{effective_filename}_details.csv", index=False)
+        pd.DataFrame(removal_stage_matrix, index=matrix.index, columns=matrix.columns).to_csv(
+            output_directory / f"{effective_filename}_removal_stages.csv"
         )
-
-        long_table.to_csv(
-            output_directory
-            / f"{effective_filename}_details.csv",
-            index=False,
-        )
-
-        pd.DataFrame(
-            removal_stage_matrix,
-            index=matrix.index,
-            columns=matrix.columns,
-        ).to_csv(
-            output_directory
-            / f"{effective_filename}_removal_stages.csv"
-        )
-
-    # ==================================================================
-    # 26. DISPLAY
-    # ==================================================================
 
     if show:
-
         plt.show()
-
     else:
-
-        plt.close(
-            fig
-        )
-
-    # ==================================================================
-    # 27. RETURN
-    # ==================================================================
+        plt.close(fig)
 
     return {
         "matrix": matrix,
         "long_table": long_table,
         "variable_importance": variable_importance,
         "descriptor_info": descriptor_info_df,
-        "removal_stage_matrix": pd.DataFrame(
-            removal_stage_matrix,
-            index=matrix.index,
-            columns=matrix.columns,
-        ),
+        "removal_stage_matrix": pd.DataFrame(removal_stage_matrix, index=matrix.index, columns=matrix.columns),
         "transposed": transpose,
         "fig": fig,
         "ax": ax,

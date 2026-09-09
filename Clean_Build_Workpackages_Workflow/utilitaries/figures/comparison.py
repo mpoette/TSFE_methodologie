@@ -253,7 +253,7 @@ def compute_subgroup_holdout_metrics(
     if subgroup_names is None:
         subgroup_names = {}
 
-    unique_labels = np.unique(subgroup_labels)
+    unique_labels = [lbl for lbl in np.unique(subgroup_labels) if lbl not in ("IGNORE", "None", "nan")]
     results = []
 
     for label in unique_labels:
@@ -324,40 +324,6 @@ def compute_subgroup_holdout_metrics(
     # Sort alphabetically for deterministic output
     results.sort(key=lambda item: item[0])
     return results
-
-
-def generate_subgroup_comparative_report(
-    probas,
-    y_true,
-    subgroup_labels,
-    subgroup_names=None,
-    n_bootstrap=2000,
-    confidence_level=0.95,
-    seed=42,
-    save_dir=None,
-    table_format="fancy_grid",
-    model_names_map=None,
-    title = ...
-):
-    """Generate a comparative holdout report across patient subgroups."""
-    subgroup_results = compute_subgroup_holdout_metrics(
-        probas=probas,
-        y_true=y_true,
-        subgroup_labels=subgroup_labels,
-        subgroup_names=subgroup_names,
-        n_bootstrap=n_bootstrap,
-        confidence_level=confidence_level,
-        seed=seed,
-    )
-
-    return generate_comparative_report(
-        configurations=subgroup_results,
-        save_dir=save_dir,
-        table_format=table_format,
-        evaluation_mode="holdout",
-        model_names_map=model_names_map,
-        title = title,
-    )
 
 
 # ============================================================================
@@ -456,9 +422,9 @@ def plot_holdout_metrics_barplot(
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
         "XGBoost_TSFEL": "XGBoost",
-        "InceptionTimeModified": "Inception Time",
+        "InceptionTimeModified": "ResNet-1D",
         "LstmTimeModified": "LSTM",
-        "Transformer Encoder": "Vanilla Transformer",
+        "Transformer Encoder": "Transformer encoder",
     }
     names_map = default_names_map.copy()
     if model_names_map is not None:
@@ -571,459 +537,6 @@ def plot_holdout_metrics_barplot(
         save_figure_file(fig, output_path / "holdout_metrics_barplot.png", output_format, bbox_inches="tight")
 
     return fig
-
-def plot_dataset_comparison_barplot(
-    model_name,
-    dataset_configurations,
-    save_dir=None,
-    title=...,
-
-    output_format: str = "pdf",
-):
-    """For a single model, plot grouped bar charts with 95% CI error bars split
-    into discrimination and calibration metrics, comparing datasets.
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-    """
-    dataset_configurations = list(dataset_configurations)
-
-    if not dataset_configurations:
-        return
-
-    display_model_name = model_name
-
-    discrimination_metrics = ["auc", "auprc", "f1", "mcc"]
-    calibration_metrics = [
-        "brier",
-        "calibration_intercept",
-        "calibration_slope",
-        "ici",
-        "e90",
-    ]
-
-    metric_display_names = {
-        "auc": "AUROC",
-        "auprc": "AUPRC",
-        "f1": "F1-Score",
-        "mcc": "MCC",
-        "brier": "Brier",
-        "calibration_intercept": "|Intercept|",
-        "calibration_slope": "|Slope - 1|",
-        "ici": "ICI",
-        "e90": "E90",
-    }
-
-    all_metrics = discrimination_metrics + calibration_metrics
-
-    dataset_data = []
-
-    for ds_name, config in dataset_configurations:
-        bootstrap = config.get("bootstrap_holdout")
-        if bootstrap is None:
-            continue
-
-        summary = bootstrap.get("summary", {})
-        data = {
-            "name": ds_name,
-            "estimates": {},
-            "ci_lower": {},
-            "ci_upper": {},
-        }
-
-        for metric in all_metrics:
-            entry = summary.get(metric, {})
-            est = float(entry.get("estimate", 0.0))
-            low = float(entry.get("ci_lower", 0.0))
-            upp = float(entry.get("ci_upper", 0.0))
-
-            if metric == "calibration_intercept":
-                est = abs(est)
-                low, upp = min(abs(low), abs(upp)), max(abs(low), abs(upp))
-            elif metric == "calibration_slope":
-                est = abs(est - 1.0)
-                d1, d2 = abs(low - 1.0), abs(upp - 1.0)
-                low, upp = min(d1, d2), max(d1, d2)
-
-            data["estimates"][metric] = est
-            data["ci_lower"][metric] = low
-            data["ci_upper"][metric] = upp
-
-        dataset_data.append(data)
-
-    if not dataset_data:
-        return
-
-    n_datasets = len(dataset_data)
-    default_colors = sns.color_palette("tab10", max(n_datasets, 10))
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), layout="constrained")
-
-    width = 0.8 / max(n_datasets, 1)
-
-    _plot_metrics_bar_group(
-        ax=ax1,
-        metrics=discrimination_metrics,
-        data_list=dataset_data,
-        metric_display_names=metric_display_names,
-        width=width,
-        default_colors=default_colors,
-    )
-    _plot_metrics_bar_group(
-        ax=ax2,
-        metrics=calibration_metrics,
-        data_list=dataset_data,
-        metric_display_names=metric_display_names,
-        width=width,
-        default_colors=default_colors,
-    )
-
-    ax1.set_ylabel("Score (Higher is better)")
-    ax2.set_ylabel("Distance / Error (Lower is better)")
-
-    _show_title(title, f"Dataset Comparison - {display_model_name}", ax1)
-
-    handles, labels = ax1.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.02),
-        ncol=min(n_datasets, 5),
-        fontsize=10,
-    )
-
-    if save_dir is not None:
-        output_path = Path(save_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        safe_name = "".join(
-            c if c.isalnum() or c in ("_", "-", " ") else "_"
-            for c in display_model_name
-        )
-        save_figure_file(fig, output_path / f"{safe_name}_dataset_comparison.png", output_format, bbox_inches="tight")
-
-    return fig
-
-def old_generate_comparative_report(
-    configurations,
-    y_true_base=None,
-    save_dir=None,
-    table_format="fancy_grid",
-    evaluation_mode="oof",
-    model_names_map=None,
-    title=...,
-    color_offset = 0,
-
-    output_format: str = "pdf",
-):
-    """Generate comparison tables and collective OOF or Holdout figures.
-
-    The summary table contains fold-level ``mean ± std`` values for OOF mode,
-    or bootstrap ``estimate [CI95%]`` values for holdout mode.
-    ROC, precision-recall, and calibration figures use pooled predictions
-    and the corresponding stored metrics.
-
-    Args:
-        configurations:
-            Iterable of ``(model_name, all_results)`` pairs.
-        y_true_base:
-            Optional common labels. When omitted, labels are read from each
-            configuration (``y_true_oof`` or ``y_true_holdout``).
-        save_dir:
-            Optional output directory.
-        table_format:
-            Console format passed to :func:`tabulate`.
-        evaluation_mode:
-            Either ``"oof"`` to use out-of-fold results (default) or
-            ``"holdout"`` to use independent holdout results.
-        model_names_map:
-            Optional dictionary mapping technical model names to formatted
-            display names (e.g. {"Logistic_Regression_Lasso_TSFEL": "L1-LR"}).
-        title:
-            Optional figure title prefix. Omit (default ``...``) to keep the
-            automatic titles, pass ``None`` to remove them, or provide a custom
-            string prepended to each subtitle.
-
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-
-    Returns:
-        A pandas DataFrame containing formatted metric values.
-    """
-    if evaluation_mode not in ("oof", "holdout"):
-        raise ValueError(
-            f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
-        )
-
-    configurations = list(configurations)
-
-    # ---- Display Names Mapping ----
-    # Default mapping when no explicit dictionary is provided
-    default_names_map = {
-        "IGS2": "IGS2",
-        "Logistic_Regression_Lasso_TSFEL": "L1-LR",  # or "Logistic Regression"
-        "SVC_TSFEL": "SVC",
-        "RandomForest_TSFEL": "Random Forest",
-        "XGBoost_TSFEL": "XGBoost",
-        "InceptionTimeModified": "Inception Time",
-        "LstmTimeModified": "LSTM",
-        "Transformer Encoder": "Vanilla Transformer",
-    }
-    
-    # Merge any user-provided overrides
-    names_map = default_names_map.copy()
-    if model_names_map is not None:
-        names_map.update(model_names_map)
-
-    predefined_order = [
-        "IGS2",
-        "Logistic_Regression_Lasso_TSFEL",
-        "SVC_TSFEL",
-        "RandomForest_TSFEL",
-        "XGBoost_TSFEL",
-        "InceptionTimeModified",
-        "LstmTimeModified",
-    ]
-
-    def get_sort_key(item):
-        """Build a stable model-ordering key.
-
-        Args:
-            item: A ``(model_name, configuration)`` pair.
-
-        Returns:
-            A tuple that places predefined models first and sorts all others
-            alphabetically.
-        """
-        model_name = item[0]
-        if model_name in predefined_order:
-            return 0, predefined_order.index(model_name)
-        return 1, model_name
-
-    def require_key(config, key, model_name):
-        """Retrieve a required result value with model-specific diagnostics.
-
-        Args:
-            config: Model result mapping.
-            key: Required mapping key.
-            model_name: Model name included in error messages.
-
-        Returns:
-            The value stored under ``key``.
-
-        Raises:
-            KeyError: If ``key`` is absent from ``config``.
-        """
-        if key not in config:
-            raise KeyError(
-                f"{model_name}: required result key '{key}' is missing."
-            )
-        return config[key]
-
-    # ---- Key mapping depending on mode ----
-    if evaluation_mode == "oof":
-        y_true_key = "y_true_oof"
-        probas_key = "probas_oof"
-        metric_suffix = ""  # e.g. "auc_oof", "auc_mean"
-    else:
-        y_true_key = "y_true_holdout"
-        probas_key = "probas_holdout"
-        metric_suffix = "_holdout"  # not used for bootstrap, see below
-
-    def format_metric(config, metric_name, model_name):
-        """Format metric value: mean±std for OOF, estimate[CI] for holdout."""
-        if evaluation_mode == "oof":
-            mean_value = float(
-                require_key(config, f"{metric_name}_mean", model_name)
-            )
-            std_value = float(
-                require_key(config, f"{metric_name}_std", model_name)
-            )
-            return f"{mean_value:.3f} ± {std_value:.3f}"
-        else:
-            bootstrap = require_key(config, "bootstrap_holdout", model_name)
-            summary = bootstrap["summary"]
-            entry = summary[metric_name]
-            estimate = float(entry["estimate"])
-            ci_lower = float(entry["ci_lower"])
-            ci_upper = float(entry["ci_upper"])
-            return f"{estimate:.3f} [{ci_lower:.3f}, {ci_upper:.3f}]"
-
-    configurations = sorted(configurations, key=get_sort_key)
-    default_colors = sns.color_palette(
-        "tab10",
-        n_colors=max(len(configurations), 10),
-    )
-
-    results = {}
-    plot_data_list = []
-    for idx, (name, config) in enumerate(configurations):
-        # Retrieve the normalized display name
-        display_name = names_map.get(name, name)
-
-        probas = np.asarray(
-            require_key(config, probas_key, name),
-            dtype=float,
-        ).ravel()
-
-        current_y = (
-            y_true_base
-            if y_true_base is not None
-            else require_key(config, y_true_key, name)
-        )
-
-        y_true = np.asarray(current_y, dtype=int).ravel()
-
-        if probas.shape[0] != y_true.shape[0]:
-            raise ValueError(
-                f"{name}: probas and y_true have different "
-                f"lengths: {len(probas)} != {len(y_true)}."
-            )
-
-        color = config.get(
-            "color",
-            default_colors[idx % len(default_colors)],
-        )
-
-        constant_predictions = np.all(probas == probas[0])
-
-        if constant_predictions:
-            prevalence = float(np.mean(y_true))
-            fpr = np.array([0.0, 1.0])
-            tpr = np.array([0.0, 1.0])
-            precision = np.array([1.0, prevalence, prevalence])
-            recall = np.array([0.0, 0.0, 1.0])
-            fop = np.array([prevalence])
-            mpv = np.array([float(probas[0])])
-        else:
-            fpr, tpr, _ = roc_curve(y_true, probas)
-            precision, recall, _ = precision_recall_curve(y_true, probas)
-            fop, mpv = calibration_curve(
-                y_true, probas, n_bins=10, strategy="uniform"
-            )
-
-        # ---- Get AUC/AUPRC for labels ----
-        if evaluation_mode == "oof":
-            auc_val = float(require_key(config, "auc_oof", name))
-            auprc_val = float(require_key(config, "auprc_oof", name))
-            intercept_val = float(require_key(config, "calibration_intercept_oof", name))
-            slope_val = float(require_key(config, "calibration_slope_oof", name))
-            ici_val = float(require_key(config, "ici_oof", name))
-        else:
-            bootstrap = require_key(config, "bootstrap_holdout", name)
-            summary = bootstrap["summary"]
-            auc_val = float(summary["auc"]["estimate"])
-            auprc_val = float(summary["auprc"]["estimate"])
-            cal_stats = get_calibration_stats(probas, y_true)
-            intercept_val = cal_stats["intercept"]
-            slope_val = cal_stats["slope"]
-            ici_val = cal_stats["ici"]
-
-        # ---- Results table ----
-        metrics_dict = {
-            "AUROC": format_metric(config, "auc", name),
-            "AUPRC": format_metric(config, "auprc", name),
-            "F1-Score": format_metric(config, "f1_score" if evaluation_mode == "oof" else "f1", name),
-            "MCC": format_metric(config, "mcc", name),
-            "Brier": format_metric(config, "brier", name),
-            "Intercept": format_metric(config, "calibration_intercept", name),
-            "Slope": format_metric(config, "calibration_slope", name),
-            "ICI": format_metric(config, "ici", name),
-            "E90": format_metric(config, "e90", name),
-        }
-
-        # Use display_name as the key in the final table
-        results[display_name] = metrics_dict
-
-        label_prefix = "OOF" if evaluation_mode == "oof" else "Holdout"
-        prevalence = float(np.mean(y_true))
-        plot_data_list.append({
-            "name": display_name,  # Use the display name in plot legends
-            "color": color,
-            "fpr": fpr,
-            "tpr": tpr,
-            "auc_val": auc_val,
-            "recall": recall,
-            "precision": precision,
-            "auprc_val": auprc_val,
-            "fop": fop,
-            "mpv": mpv,
-            "prevalence" : prevalence,
-            "intercept_val": intercept_val,
-            "slope_val": slope_val,
-            "ici_val": ici_val,
-            "label_prefix": label_prefix,
-        })
-
-    # ---- Mode label (used for titles) ----
-    mode_label = "OOF" if evaluation_mode == "oof" else "Holdout"
-
-    # ---- Figures ----
-    fig, axes = plt.subplots(
-        1,
-        3,
-        figsize=(15, 5),
-        layout="constrained",
-    )
-
-    plot_comparative_axes(
-        plot_data_list=plot_data_list,
-        axes=axes,
-        show_legend=True,
-    )
-
-    if title is not None:
-        fig.suptitle(
-            f"{title} — {mode_label} comparison",
-            fontsize=14,
-            fontweight="bold",
-        )
-
-    # ---- Table ----
-    results_df = pd.DataFrame(results).T
-    print(f"\n=== {mode_label} PERFORMANCE COMPARISON TABLE ===")
-    print(tabulate(results_df, headers="keys", tablefmt=table_format, showindex=True))
-
-    if save_dir is not None:
-        output_path = Path(save_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        save_figure_file(
-            fig,
-            output_path / f"collective_performance_{mode_label.lower()}",
-            output_format,
-            bbox_inches="tight",
-        )
-
-        with open(
-            output_path / f"results_table_{mode_label.lower()}.tex",
-            "w",
-            encoding="utf-8",
-        ) as output_file:
-            output_file.write(
-                tabulate(
-                    results_df,
-                    headers="keys",
-                    tablefmt="latex_booktabs",
-                    showindex=True,
-                )
-            )
-
-    # ---- Holdout barplot with CI ----
-    fig_bar = None
-    if evaluation_mode == "holdout":
-        fig_bar = plot_holdout_metrics_barplot(
-            configurations=configurations,
-            save_dir=save_dir,
-            model_names_map = model_names_map,
-            color_offset = color_offset
-        , output_format=output_format)
-
-    plt.show()
-    plt.close(fig)
-
-    if fig_bar is not None:
-        plt.close(fig_bar)
-    
-    return results_df
-
 
 # ============================================================================
 # CURRENT COMPARATIVE REPORTING
@@ -1143,6 +656,193 @@ def plot_comparative_axes(
             frameon=False,
             handlelength=2.2,
         )
+    
+def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) -> str:
+    """Generates publication-ready LaTeX tables for OOF or Holdout evaluations.
+
+    Formats metric tables with hierarchical multi-column headers (Discrimination,
+    Overall, Calibration) using the tabularx environment. Dynamically identifies
+    all top-performing models per column (handling ties based on displayed precision)
+    and applies appropriate LaTeX macros (\\ci / \\bestci for holdout, \\meansd /
+    \\bestmsd for out-of-fold).
+
+    Args:
+        results_df: DataFrame where rows correspond to model names and columns
+            correspond to evaluated metrics. String values must follow either
+            the 'mean ± std' format (OOF) or the 'estimate [ci_l, ci_u]' format (Holdout).
+        evaluation_mode: Evaluation scheme, either 'oof' or 'holdout'. Controls
+            table dimensions, spacing, macros, captions, and labels.
+
+    Returns:
+        A string containing the complete LaTeX code ready to be written to disk.
+
+    Raises:
+        ValueError: If evaluation_mode is not 'oof' or 'holdout'.
+    """
+    if evaluation_mode not in ("oof", "holdout"):
+        raise ValueError(
+            f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
+        )
+
+    # Optimization target mapping per metric
+    # True: higher is better; False: lower is better; 'zero': target 0.0; 'one': target 1.0
+    higher_is_better = {
+        "AUROC": True,
+        "AUPRC": True,
+        "F1-Score": True,
+        "MCC": True,
+        "Brier": False,
+        "Intercept": "zero",
+        "Slope": "one",
+        "ICI": False,
+        "E90": False,
+    }
+
+    decimals = 3 if evaluation_mode == "oof" else 2
+
+    def parse_displayed_estimate(val_str: str) -> float:
+        """Parses and rounds the central estimate strictly matching the displayed precision."""
+        if "±" in val_str:
+            num = float(val_str.split("±")[0].strip())
+        elif "[" in val_str:
+            num = float(val_str.split("[")[0].strip())
+        else:
+            num = float(val_str)
+        # Format then float to avoid floating point precision artifacts on ties
+        return float(f"{num:.{decimals}f}")
+
+    # Parse central estimates exactly as they will be displayed
+    parsed_estimates = {}
+    for col in results_df.columns:
+        parsed_estimates[col] = {
+            idx: parse_displayed_estimate(str(results_df.loc[idx, col]))
+            for idx in results_df.index
+        }
+
+    # Identify all winning models per column (handles display-level ties)
+    best_models = {}
+    for col, target in higher_is_better.items():
+        if col not in parsed_estimates:
+            continue
+        vals = parsed_estimates[col]
+
+        if target is True:
+            best_val = max(vals.values())
+            best_models[col] = {m for m, v in vals.items() if v == best_val}
+        elif target is False:
+            best_val = min(vals.values())
+            best_models[col] = {m for m, v in vals.items() if v == best_val}
+        elif target == "zero":
+            min_dist = min(abs(v) for v in vals.values())
+            min_dist_rounded = float(f"{min_dist:.{decimals}f}")
+            best_models[col] = {
+                m
+                for m, v in vals.items()
+                if float(f"{abs(v):.{decimals}f}") == min_dist_rounded
+            }
+        elif target == "one":
+            min_dist = min(abs(v - 1.0) for v in vals.values())
+            min_dist_rounded = float(f"{min_dist:.{decimals}f}")
+            best_models[col] = {
+                m
+                for m, v in vals.items()
+                if float(f"{abs(v - 1.0):.{decimals}f}") == min_dist_rounded
+            }
+
+    # Build table rows
+    rows_tex = []
+    for model_name in results_df.index:
+        row_cells = [f"\\textbf{{{model_name}}}"]
+        for col in results_df.columns:
+            raw_val = str(results_df.loc[model_name, col])
+            is_best = model_name in best_models.get(col, set())
+
+            if evaluation_mode == "oof":
+                if "±" in raw_val:
+                    mean_val, std_val = [x.strip() for x in raw_val.split("±")]
+                    macro = "\\bestmsd" if is_best else "\\meansd"
+                    row_cells.append(f"{macro}{{{mean_val}}}{{{std_val}}}")
+                else:
+                    row_cells.append(raw_val)
+            else:
+                if "[" in raw_val:
+                    est_str, ci_str = raw_val.split("[")
+                    ci_l, ci_u = ci_str.replace("]", "").split(",")
+                    est_fmt = f"{float(est_str.strip()):.{decimals}f}"
+                    ci_fmt = f"{float(ci_l.strip()):.{decimals}f}, {float(ci_u.strip()):.{decimals}f}"
+                    macro = "\\bestci" if is_best else "\\ci"
+                    row_cells.append(f"{macro}{{{est_fmt}}}{{{ci_fmt}}}")
+                else:
+                    row_cells.append(raw_val)
+
+        rows_tex.append(" & ".join(row_cells) + " \\\\")
+
+    joined_rows = "\n\\cmidrule(lr){1-10}\n".join(rows_tex)
+
+    if evaluation_mode == "oof":
+        margin = "-1cm"
+        tabcolsep = "3pt"
+        arraystretch = "1.05"
+        caption_text = (
+            "Out-of-fold performance metrics (mean $\\pm$ SD) across cross-validation "
+            "folds. Bold values indicate best performance per column."
+        )
+        label_tag = "tab:model_performance_oof"
+    else:
+        margin = "-1.25cm"
+        tabcolsep = "4pt"
+        arraystretch = "1.1"
+        caption_text = (
+            "Performance metrics with 95\\% confidence intervals [95\\% CI] for the "
+            "evaluated models. Bold values indicate best performance per column."
+        )
+        label_tag = "tab:model_performance"
+
+    # Raw string starts at column 0 to prevent indentation issues in output file
+    template = r"""\FloatBarrier
+\begin{table}[p]
+\begin{adjustwidth}{__MARGIN__}{__MARGIN__}
+\centering
+\setlength{\tabcolsep}{__TABCOLSEP__}
+\renewcommand{\arraystretch}{__ARRAYSTRETCH__}
+\captionsetup{justification=centering}
+
+\small
+\begin{tabularx}{\linewidth}{@{}l*{9}{Y}@{}}
+\toprule
+& \multicolumn{4}{c}{\textbf{Discrimination}}
+& \multicolumn{1}{c}{\textbf{Overall}}
+& \multicolumn{4}{c}{\textbf{Calibration}}\\
+\cmidrule(lr){2-5}\cmidrule(lr){6-6}\cmidrule(lr){7-10}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{AUROC}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{AUPRC}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{F1-Score}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{MCC}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{Brier}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{Intercept}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{Slope}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{ICI}}}
+& \multicolumn{1}{c}{\makecell[c]{\textbf{E90}}}\\
+\midrule
+__JOINED_ROWS__
+\bottomrule
+\end{tabularx}
+
+\caption{__CAPTION__}
+\label{__LABEL__}
+\end{adjustwidth}
+\end{table}
+\FloatBarrier
+"""
+
+    return (
+        template.replace("__MARGIN__", margin)
+        .replace("__TABCOLSEP__", tabcolsep)
+        .replace("__ARRAYSTRETCH__", arraystretch)
+        .replace("__JOINED_ROWS__", joined_rows)
+        .replace("__CAPTION__", caption_text)
+        .replace("__LABEL__", label_tag)
+    )
 
 def generate_comparative_report(
     configurations,
@@ -1151,63 +851,42 @@ def generate_comparative_report(
     table_format="fancy_grid",
     evaluation_mode="oof",
     model_names_map=None,
-    title=...,
+    title=None,  # Disabled by default
     color_offset=0,
     axes=None,
     show=True,
-
     output_format: str = "pdf",
+    save_individual_plots: bool = True,
 ):
-    """Generate comparative metrics, tables, and curves for several models.
+    """Generates comparative performance metrics, tables, and curves for models.
 
-    The function supports pooled out-of-fold results and independent holdout
-    results. It can create its own figure or render into three caller-provided
-    axes, which is used by subgroup comparison grids.
-
-    Args:
-        configurations: Iterable of ``(model_name, results)`` pairs.
-        y_true_base: Optional target array shared by all configurations.
-        save_dir: Optional destination directory for tables and figures.
-        table_format: Tabulate output format used for console tables.
-        evaluation_mode: Evaluation source, either ``"oof"`` or ``"holdout"``.
-        model_names_map: Optional mapping from internal model names to display
-            names.
-        title: Optional overall figure title. An ellipsis requests the default
-            title and ``None`` disables it.
-        color_offset: Offset applied to the default color palette.
-        axes: Optional existing ROC, precision-recall, and calibration axes.
-        show: Whether to display a figure created by this function.
-
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-
-    Returns:
-        A DataFrame containing the formatted comparative metrics.
-
-    Raises:
-        ValueError: If the evaluation mode or supplied arrays are invalid.
-        KeyError: If a required result field is missing.
+    Supports pooled out-of-fold (OOF) predictions and independent holdout sets.
+    Renders ROC, Precision-Recall, and calibration curves either into caller-provided
+    axes (e.g., subgroup grids) or into dedicated stand-alone figures. When saving,
+    it can export both a combined 1x3 overview figure and separate single-plot files.
     """
     if evaluation_mode not in ("oof", "holdout"):
         raise ValueError(
-            f"evaluation_mode must be 'oof' or 'holdout', "
-            f"got {evaluation_mode!r}."
+            f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
         )
 
     configurations = list(configurations)
 
+    # Predefined model labels fallback mapping (covers all transformer aliases)
     default_names_map = {
         "IGS2": "IGS2",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
         "XGBoost_TSFEL": "XGBoost",
-        "InceptionTimeModified": "Inception Time",
+        "InceptionTimeModified": "ResNet-1D",
         "LstmTimeModified": "LSTM",
-        "Transformer Encoder": "Vanilla Transformer",
+        "VanillaTransformerModified": "Transformer Encoder",
+        "Transformer Encoder": "Transformer Encoder",
+        "Transformer_Encoder": "Transformer Encoder",
     }
 
     names_map = default_names_map.copy()
-
     if model_names_map is not None:
         names_map.update(model_names_map)
 
@@ -1219,44 +898,23 @@ def generate_comparative_report(
         "XGBoost_TSFEL",
         "InceptionTimeModified",
         "LstmTimeModified",
+        "VanillaTransformerModified",
+        "Transformer Encoder",
     ]
 
     def get_sort_key(item):
-        """Build a stable model-ordering key.
-
-        Args:
-            item: A ``(model_name, configuration)`` pair.
-
-        Returns:
-            A tuple that places predefined models first and sorts all others
-            alphabetically.
-        """
+        """Generates a sorting key to preserve standard benchmark sequence."""
         model_name = item[0]
-
         if model_name in predefined_order:
             return 0, predefined_order.index(model_name)
-
         return 1, model_name
 
     def require_key(config, key, model_name):
-        """Retrieve a required model result.
-
-        Args:
-            config: Model result mapping.
-            key: Required mapping key.
-            model_name: Model name included in error messages.
-
-        Returns:
-            The value stored under ``key``.
-
-        Raises:
-            KeyError: If ``key`` is absent from ``config``.
-        """
+        """Safely fetches a required dictionary key with error tracking."""
         if key not in config:
             raise KeyError(
                 f"{model_name}: required result key '{key}' is missing."
             )
-
         return config[key]
 
     if evaluation_mode == "oof":
@@ -1267,60 +925,21 @@ def generate_comparative_report(
         probas_key = "probas_holdout"
 
     def format_metric(config, metric_name, model_name):
-        """Format one metric for the selected evaluation mode.
-
-        Args:
-            config: Model result mapping.
-            metric_name: Base metric name.
-            model_name: Model name included in missing-key diagnostics.
-
-        Returns:
-            A mean-and-standard-deviation string for OOF evaluation or an
-            estimate-and-confidence-interval string for holdout evaluation.
-        """
+        """Formats mean/std or bootstrap CI into export-ready strings."""
         if evaluation_mode == "oof":
-            mean_value = float(
-                require_key(
-                    config,
-                    f"{metric_name}_mean",
-                    model_name,
-                )
-            )
+            mean_val = float(require_key(config, f"{metric_name}_mean", model_name))
+            std_val = float(require_key(config, f"{metric_name}_std", model_name))
+            return f"{mean_val:.3f} ± {std_val:.3f}"
 
-            std_value = float(
-                require_key(
-                    config,
-                    f"{metric_name}_std",
-                    model_name,
-                )
-            )
-
-            return f"{mean_value:.3f} ± {std_value:.3f}"
-
-        bootstrap = require_key(
-            config,
-            "bootstrap_holdout",
-            model_name,
-        )
-
-        summary = bootstrap["summary"]
-        entry = summary[metric_name]
-
+        bootstrap = require_key(config, "bootstrap_holdout", model_name)
+        entry = bootstrap["summary"][metric_name]
         estimate = float(entry["estimate"])
         ci_lower = float(entry["ci_lower"])
         ci_upper = float(entry["ci_upper"])
-
         return f"{estimate:.3f} [{ci_lower:.3f}, {ci_upper:.3f}]"
 
-    configurations = sorted(
-        configurations,
-        key=get_sort_key,
-    )
-
-    default_colors = sns.color_palette(
-        "tab10",
-        n_colors=max(len(configurations), 10),
-    )
+    configurations = sorted(configurations, key=get_sort_key)
+    default_colors = sns.color_palette("tab10", n_colors=max(len(configurations), 10))
 
     results = {}
     plot_data_list = []
@@ -1328,18 +947,10 @@ def generate_comparative_report(
 
     for idx, (name, config) in enumerate(configurations):
         display_name = names_map.get(name, name)
-
-        probas = np.asarray(
-            require_key(config, probas_key, name),
-            dtype=float,
-        ).ravel()
-
+        probas = np.asarray(require_key(config, probas_key, name), dtype=float).ravel()
         current_y = (
-            y_true_base
-            if y_true_base is not None
-            else require_key(config, y_true_key, name)
+            y_true_base if y_true_base is not None else require_key(config, y_true_key, name)
         )
-
         y_true = np.asarray(current_y, dtype=int).ravel()
 
         if probas.shape[0] != y_true.shape[0]:
@@ -1349,166 +960,52 @@ def generate_comparative_report(
             )
 
         prevalence = float(np.mean(y_true))
-
         constant_predictions = np.all(probas == probas[0])
 
         if constant_predictions:
             fpr = np.array([0.0, 1.0])
             tpr = np.array([0.0, 1.0])
-
-            precision = np.array([
-                1.0,
-                prevalence,
-                prevalence,
-            ])
-
-            recall = np.array([
-                0.0,
-                0.0,
-                1.0,
-            ])
-
+            precision = np.array([1.0, prevalence, prevalence])
+            recall = np.array([0.0, 0.0, 1.0])
             fop = np.array([prevalence])
             mpv = np.array([float(probas[0])])
-
         else:
-            fpr, tpr, _ = roc_curve(
-                y_true,
-                probas,
-            )
-
-            precision, recall, _ = precision_recall_curve(
-                y_true,
-                probas,
-            )
-
-            fop, mpv = calibration_curve(
-                y_true,
-                probas,
-                n_bins=10,
-                strategy="uniform",
-            )
+            fpr, tpr, _ = roc_curve(y_true, probas)
+            precision, recall, _ = precision_recall_curve(y_true, probas)
+            fop, mpv = calibration_curve(y_true, probas, n_bins=10, strategy="uniform")
 
         if evaluation_mode == "oof":
-            auc_val = float(
-                require_key(config, "auc_oof", name)
-            )
-
-            auprc_val = float(
-                require_key(config, "auprc_oof", name)
-            )
-
-            intercept_val = float(
-                require_key(
-                    config,
-                    "calibration_intercept_oof",
-                    name,
-                )
-            )
-
-            slope_val = float(
-                require_key(
-                    config,
-                    "calibration_slope_oof",
-                    name,
-                )
-            )
-
-            ici_val = float(
-                require_key(config, "ici_oof", name)
-            )
-
+            auc_val = float(require_key(config, "auc_oof", name))
+            auprc_val = float(require_key(config, "auprc_oof", name))
+            intercept_val = float(require_key(config, "calibration_intercept_oof", name))
+            slope_val = float(require_key(config, "calibration_slope_oof", name))
+            ici_val = float(require_key(config, "ici_oof", name))
         else:
-            bootstrap = require_key(
-                config,
-                "bootstrap_holdout",
-                name,
-            )
-
+            bootstrap = require_key(config, "bootstrap_holdout", name)
             summary = bootstrap["summary"]
-
-            auc_val = float(
-                summary["auc"]["estimate"]
-            )
-
-            auprc_val = float(
-                summary["auprc"]["estimate"]
-            )
-
-            cal_stats = get_calibration_stats(
-                probas,
-                y_true,
-            )
-
-            intercept_val = float(
-                cal_stats["intercept"]
-            )
-
-            slope_val = float(
-                cal_stats["slope"]
-            )
-
-            ici_val = float(
-                cal_stats["ici"]
-            )
+            auc_val = float(summary["auc"]["estimate"])
+            auprc_val = float(summary["auprc"]["estimate"])
+            cal_stats = get_calibration_stats(probas, y_true)
+            intercept_val = float(cal_stats["intercept"])
+            slope_val = float(cal_stats["slope"])
+            ici_val = float(cal_stats["ici"])
 
         metrics_dict = {
-            "AUROC": format_metric(
-                config,
-                "auc",
-                name,
-            ),
-            "AUPRC": format_metric(
-                config,
-                "auprc",
-                name,
-            ),
-            "F1-Score": format_metric(
-                config,
-                "f1_score"
-                if evaluation_mode == "oof"
-                else "f1",
-                name,
-            ),
-            "MCC": format_metric(
-                config,
-                "mcc",
-                name,
-            ),
-            "Brier": format_metric(
-                config,
-                "brier",
-                name,
-            ),
-            "Intercept": format_metric(
-                config,
-                "calibration_intercept",
-                name,
-            ),
-            "Slope": format_metric(
-                config,
-                "calibration_slope",
-                name,
-            ),
-            "ICI": format_metric(
-                config,
-                "ici",
-                name,
-            ),
-            "E90": format_metric(
-                config,
-                "e90",
-                name,
-            ),
+            "AUROC": format_metric(config, "auc", name),
+            "AUPRC": format_metric(config, "auprc", name),
+            "F1-Score": format_metric(config, "f1_score" if evaluation_mode == "oof" else "f1", name),
+            "MCC": format_metric(config, "mcc", name),
+            "Brier": format_metric(config, "brier", name),
+            "Intercept": format_metric(config, "calibration_intercept", name),
+            "Slope": format_metric(config, "calibration_slope", name),
+            "ICI": format_metric(config, "ici", name),
+            "E90": format_metric(config, "e90", name),
         }
-
         results[display_name] = metrics_dict
 
         color = config.get(
             "color",
-            default_colors[
-                (idx + color_offset) % len(default_colors)
-            ],
+            default_colors[(idx + color_offset) % len(default_colors)],
         )
 
         plot_data_list.append({
@@ -1531,29 +1028,14 @@ def generate_comparative_report(
 
     results_df = pd.DataFrame(results).T
 
-    print(
-        f"\n=== {label_prefix} PERFORMANCE "
-        "COMPARISON TABLE ==="
-    )
-
-    print(
-        tabulate(
-            results_df,
-            headers="keys",
-            tablefmt=table_format,
-            showindex=True,
-        )
-    )
+    print(f"\n=== {label_prefix} PERFORMANCE COMPARISON TABLE ===")
+    print(tabulate(results_df, headers="keys", tablefmt=table_format, showindex=True))
 
     owns_figure = axes is None
 
+    # Step 1: Combined overview figure (ROC, PRC, Calibration)
     if owns_figure:
-        fig, axes = plt.subplots(
-            1,
-            3,
-            figsize=(15, 5),
-            layout="constrained",
-        )
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5), layout="constrained")
     else:
         fig = axes[0].figure
 
@@ -1563,28 +1045,14 @@ def generate_comparative_report(
         show_legend=owns_figure,
     )
 
-    if owns_figure:
-        if title is ...:
-            fig.suptitle(
-                f"{label_prefix} Performance Comparison",
-                fontsize=14,
-                fontweight="bold",
-            )
-        elif title is not None:
-            fig.suptitle(
-                f"{title} — {label_prefix}",
-                fontsize=14,
-                fontweight="bold",
-            )
+    # Figure-level supertitles removed
 
     fig_bar = None
 
+    # Step 2: File persistence and exports
     if save_dir is not None and owns_figure:
         output_path = Path(save_dir)
-        output_path.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        output_path.mkdir(parents=True, exist_ok=True)
 
         save_figure_file(
             fig,
@@ -1593,31 +1061,78 @@ def generate_comparative_report(
             bbox_inches="tight",
         )
 
+        # Export individual stand-alone curve files with guaranteed legends
+        if save_individual_plots:
+            # Récupération des handles et labels existants depuis le premier graphique (ROC)
+            handles, labels = axes[0].get_legend_handles_labels()
+
+            # Tuple : (nom_fichier_sans_extension, index_dans_axes)
+            single_plots = [
+                (f"roc_{label_prefix.lower()}", 0),
+                (f"prc_{label_prefix.lower()}", 1),
+                (f"calibration_{label_prefix.lower()}", 2),
+            ]
+
+            for file_tag, target_idx in single_plots:
+                # Création d'une figure dédiée 1x1
+                fig_single, ax_single = plt.subplots(
+                    figsize=(6, 5), layout="constrained"
+                )
+
+                # Liste de 3 axes pour plot_comparative_axes : seul l'axe ciblé reçoit le tracé
+                # Les deux autres sont des axes factices créés en mémoire et jetés après
+                fig_dummy, dummy_axes = plt.subplots(1, 2)
+                trio_axes = [dummy_axes[0], dummy_axes[1]]
+                trio_axes.insert(target_idx, ax_single)
+
+                # Tracé sans légende automatique
+                plot_comparative_axes(
+                    plot_data_list=plot_data_list,
+                    axes=trio_axes,
+                    show_legend=False,
+                )
+                plt.close(fig_dummy)
+
+                # Ajout explicite de la légende avec les labels récupérés
+                if handles and labels:
+                    ax_single.legend(
+                        handles,
+                        labels,
+                        fontsize=7,
+                        loc="best",
+                        frameon=True,
+                    )
+
+                # Sauvegarde directe de la figure dédiée
+                save_figure_file(
+                    fig_single,
+                    output_path / file_tag,
+                    output_format,
+                    bbox_inches="tight",
+                )
+                plt.close(fig_single)
+
+        latex_table_code = export_custom_latex_table(
+            results_df=results_df,
+            evaluation_mode=evaluation_mode,
+        )
+
         with open(
-            output_path
-            / f"results_table_{label_prefix.lower()}.tex",
+            output_path / f"results_table_{label_prefix.lower()}.tex",
             "w",
             encoding="utf-8",
         ) as output_file:
-            output_file.write(
-                tabulate(
-                    results_df,
-                    headers="keys",
-                    tablefmt="latex_booktabs",
-                    showindex=True,
-                )
-            )
+            output_file.write(latex_table_code)
 
-    if (
-        evaluation_mode == "holdout"
-        and owns_figure
-    ):
+    # Step 3: Holdout bootstrap barplot (propagates names_map)
+    if evaluation_mode == "holdout" and owns_figure:
         fig_bar = plot_holdout_metrics_barplot(
             configurations=configurations,
             save_dir=save_dir,
-            model_names_map=model_names_map,
+            model_names_map=names_map,  # Pass the complete dictionary
             color_offset=color_offset,
-        output_format=output_format)
+            output_format=output_format,
+        )
 
     if owns_figure and show:
         plt.show()

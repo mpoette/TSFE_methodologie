@@ -31,6 +31,7 @@ import utilitaries.features_extraction_utils as extract_feat
 def scaling(
     df_train: pl.DataFrame,
     *dfs_to_transform: pl.DataFrame,
+    return_metadata: bool = False,
 ):
     """Scale continuous numerical features using a StandardScaler.
 
@@ -82,7 +83,10 @@ def scaling(
 
     # Return the original DataFrames when no continuous column is available.
     if not num_cols_to_scale:
-        return (df_train, *dfs_to_transform)
+        result = (df_train, *dfs_to_transform)
+        metadata = {"feature_names": np.asarray(df_train.columns, dtype=str),
+                    "scale": np.ones(df_train.width)}
+        return (*result, metadata) if return_metadata else result
 
     # Ensure every dataset can be transformed with the training feature set.
     for dataframe_index, dataframe in enumerate(dfs_to_transform):
@@ -138,7 +142,11 @@ def scaling(
 
         scaled_others.append(scaled_dataframe)
 
-    return (scaled_train, *scaled_others)
+    result = (scaled_train, *scaled_others)
+    scale_map = dict(zip(num_cols_to_scale, scaler.scale_))
+    metadata = {"feature_names": np.asarray(df_train.columns, dtype=str),
+                "scale": np.asarray([scale_map.get(c, 1.) for c in df_train.columns])}
+    return (*result, metadata) if return_metadata else result
 
 
 # ============================================================================
@@ -936,10 +944,17 @@ def process_tsfel_fold(
         X_train_fold,
         X_test_fold,
         X_holdout_fold,
+        stability_scaling,
     ) = scaling(
         train_features,
         test_features,
         holdout_features,
+        return_metadata=True,
+    )
+    # Metadata only: no change to the fitted scaler or model inputs.
+    np.savez_compressed(
+        exp.get_lasso_path("stability_scaling", fold_idx, "npz"),
+        **stability_scaling,
     )
 
     return (

@@ -169,6 +169,15 @@ import utilitaries.figures.comparison as comparison_figures
 import utilitaries.figures.explainability as explainability_figures
 import utilitaries.figures.feature_analysis as feature_analysis_figures
 import utilitaries.training_utils as training
+from utilitaries.figures.icu_stability import run_icu_stability
+
+# Coefficient fits: 400 per fold = 2,000 total, cached for subsequent runs.
+# Set to 0 for fixed-model caterpillars + cached-prediction performance only.
+# STABILITY_BOOTSTRAPS_PER_FOLD = 400
+STABILITY_BOOTSTRAPS_PER_FOLD = 0
+STABILITY_TOP_N = 20
+STABILITY_INCLUDE_OUTLIERS_IN_TOP = False
+
 import utilitaries.evaluate_utils as evaluate
 from utilitaries.figures.output import (
     resolve_figure_path,
@@ -589,7 +598,36 @@ for mode_run in mode_names:
                                         categorical_source_columns=tableone_categorical_columns,
                                         config_mode_name=config_mode.name,
                                         output_dir=tableone_output_dir,
-                                        df_static_source = pl.read_parquet(os.path.join(DATASET_PATH, "df_static_full_clean.parquet"))
+
+                                        # Static source used for the final training cohort.
+                                        df_static_source=pl.read_parquet(
+                                            os.path.join(
+                                                DATASET_PATH,
+                                                "df_static_full_clean.parquet",
+                                            )
+                                        ),
+
+                                        # Original dynamic population used to compute the first-24h clinical flags.
+                                        df_dynamic_full_clean=pl.read_parquet(
+                                            os.path.join(
+                                                DATASET_PATH,
+                                                "df_dynamic_full_clean.parquet",
+                                            )
+                                        ),
+
+                                        # Original static population used to build the source ICU cohort.
+                                        clean_full_static=pl.read_parquet(
+                                            os.path.join(
+                                                DATASET_PATH,
+                                                "df_static_full_clean.parquet",
+                                            )
+                                        ),
+
+                                        # Keep only the five ICU units for the original cohort.
+                                        restrict_to_icu_units=True,
+
+                                        # Time variable used to restrict dynamic data to the first 24 hours.
+                                        original_time_col="real_time_hours",
                                     )
 
                                 X_init = df_clean_3.select(final_features).to_numpy()
@@ -1216,7 +1254,7 @@ for mode_run in mode_names:
 
                                 saved_configs = {}
 
-                                if REFERENCE_MODE:
+                                if REFERENCE_MODE and mode_run != "score":
                                     if not HYPERPARAMS_FILE.is_file():
                                         raise FileNotFoundError(
                                             f"[REFERENCE] Missing hyperparameter file: {HYPERPARAMS_FILE}"
@@ -1333,9 +1371,11 @@ for mode_run in mode_names:
                                 parameters = {}
                                 uses_optuna_config = False
 
-                                if REFERENCE_MODE:
+                                if REFERENCE_MODE and mode_run != "score":
                                     parameters = saved_configs[model_name].copy()
                                     uses_optuna_config = True
+                                    if model_name == "Logistic Regression Lasso TSFEL":
+                                        uses_optuna_config = False
 
                                     print(
                                         f"[REFERENCE] Applying reference parameters for {model_name}."
@@ -1409,6 +1449,7 @@ for mode_run in mode_names:
                                             "The processed fold does not contain valid patient identifiers. "
                                             f"Only {np.unique(training_groups_fold).size} unique group(s) found."
                                         )
+                                        
                                         model_path_fold = exp.get_model_path(config_models.models_name, training_fold_index, extension, uses_optuna_config=uses_optuna_config)
                                         exact_x_path = exp.get_lasso_path('X', training_fold_index, 'parquet')
                                         exact_y_path = exp.get_lasso_path('y', training_fold_index, 'npy')
@@ -2740,10 +2781,8 @@ for mode_run in mode_names:
                                             model_name
                                             == "Logistic Regression Lasso TSFEL"
                                         ):
-                                            interpretability_cached = (
-                                                holdout_output_dir
-                                                / "holdout_ensemble_linear_coefficients.csv"
-                                            ).exists()
+                                            # The new adapter has its own input-aware bootstrap cache.
+                                            interpretability_cached = False
 
                                         if interpretability_cached:
                                             update_progress(
@@ -2828,6 +2867,7 @@ for mode_run in mode_names:
                                                     top_raw_variables=None,
                                                     top_descriptors=None,
                                                     feature_trace=feature_trace_path,
+                                                    single_gray_removed=True
                                                 )
 
                                                 explainability_figures.shap_tsfel_importance_matrix(
@@ -2860,39 +2900,26 @@ for mode_run in mode_names:
                                                 model_name
                                                 == "Logistic Regression Lasso TSFEL"
                                             ):
-                                                update_progress(
-                                                    "Computing fold-aggregated "
-                                                    "linear coefficients"
+                                                interpretability_holdout_results = run_icu_stability(
+                                                    exp=exp,
+                                                    models=fold_models_for_interpretability,
+                                                    feature_names_per_model=folds_feature_names,
+                                                    X_train_per_model=folds_X_train,
+                                                    y_train_per_model=folds_y_train,
+                                                    groups_per_model=folds_groups,
+                                                    calibration_enabled=calibration.value,
+                                                    balance_method=config_balance.balance_method,
+                                                    seed=seed,
+                                                    folder=holdout_output_dir / "stability_v2",
+                                                    y_holdout=y_test_holdout,
+                                                    holdout_ids=holdout_patient_ids,
+                                                    probabilities=(holdout_probas_calib_per_model
+                                                        if calibration.value else holdout_probas_uncalib_per_model),
+                                                    n_bootstrap=STABILITY_BOOTSTRAPS_PER_FOLD,
+                                                    top_n=STABILITY_TOP_N,
+                                                    include_outliers_in_top=STABILITY_INCLUDE_OUTLIERS_IN_TOP,
+                                                    save_figures=save_figure.value,
                                                 )
-
-                                                interpretability_holdout_results = (
-                                                    explainability_figures.linear_coefficients_holdout_ensemble(
-                                                        models=(
-                                                            fold_models_for_interpretability
-                                                        ),
-                                                        feature_names_per_model=(
-                                                            folds_feature_names
-                                                        ),
-                                                        savefig=(
-                                                            save_figure.value
-                                                        ),
-                                                        folder=(
-                                                            holdout_output_dir
-                                                        ),
-                                                    )
-                                                )
-                                                csv_filepath = holdout_output_dir / "holdout_ensemble_linear_coefficients.csv"
-                                                csv_filepath2 = holdout_output_dir / "holdout_ensemble_linear_cumulative_importance.csv"
-                                                explainability_figures.plot_odds_ratios_with_others(csv_file  = csv_filepath,
-                                                                    save = True,
-                                                                    folder = holdout_output_dir,
-                                                                    title = None
-                                                                    )
-                                                explainability_figures.plot_aggregated_odds_ratios(csv_file  = csv_filepath2,
-                                                                    save = True,
-                                                                    folder = holdout_output_dir,
-                                                                    title = None
-                                                                    )
 
                                             # --------------------------------------------------------
                                             # SVC -> no interpretability analysis

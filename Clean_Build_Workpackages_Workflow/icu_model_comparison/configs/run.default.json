@@ -32,7 +32,7 @@
     "quick_test": {
       "windowing_mode": "24h début réanimation sans remplissage",
       "target_labels": ["Survie à 28 jours"],
-      "model_names": ["XGBoost TSFEL"],
+      "model_names": ["Logistic Regression Lasso TSFEL"],
       "stratify_modes": ["target_col"],
       "optuna_run_options": [true],
       "feature_modes": ["Mode Commonly Used Without pmsi"],

@@ -16,5 +16,5 @@ def test_default_configuration_is_packaged_and_valid() -> None:
 def test_short_feature_names_preserve_internal_suffix_meaning() -> None:
     """Map exact and TSFEL-derived names to publication labels."""
     assert short_feature_name("heart_rate") == "HR"
-    assert short_feature_name("heart_rate_Mean") == "HR — Mean"
+    assert short_feature_name("heart_rate_Mean") == "HR - Mean"
     assert short_feature_name("unknown_feature") == "unknown_feature"

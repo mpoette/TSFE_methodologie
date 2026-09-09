@@ -32,12 +32,22 @@
     "quick_test": {
       "windowing_mode": "24h début réanimation sans remplissage",
       "target_labels": ["Survie à 28 jours"],
-      "model_names": ["XGBoost TSFEL"],
+      "model_names": ["Logistic Regression Lasso TSFEL"],
       "stratify_modes": ["target_col"],
       "optuna_run_options": [true],
-      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "feature_modes": ["Mode IGS2"],
       "balancing_methods": ["Aucune Méthode"],
       "mode_duplicates": "prio_first"
+    },
+    "quick_TSFEL": {
+    "windowing_mode": "24h début réanimation sans remplissage",
+    "target_labels": ["Survie à 28 jours"],
+    "model_names": ["Logistic Regression Lasso TSFEL", "XGBoost TSFEL"],
+    "stratify_modes": ["target_col"],
+    "optuna_run_options": [true],
+    "feature_modes": ["Mode Commonly Used Without pmsi"],
+    "balancing_methods": ["Aucune Méthode"],
+    "mode_duplicates": "prio_first"
     },
     "TSFEL": {
       "windowing_mode": "24h début réanimation sans remplissage",
@@ -53,6 +63,16 @@
       "windowing_mode": "24h début réanimation sans remplissage",
       "target_labels": ["Survie à 28 jours"],
       "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false, true],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "wp1_light": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL"],
       "stratify_modes": ["target_col"],
       "optuna_run_options": [false, true],
       "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
