@@ -27,6 +27,9 @@ from sklearn.metrics import (
     )
 from pathlib import Path
 
+import itertools
+from typing import Dict, List, Optional, Tuple, Union
+
 from sklearn.linear_model import LogisticRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
@@ -40,6 +43,17 @@ from utilitaries.postprocessing_utils import (
     mcc_at_fixed_threshold,
 )
 
+
+DEFAULT_NAMES_MAP = {
+    "IGS2": "IGS2",
+    "Logistic_Regression_Lasso_TSFEL": "L1-LR",
+    "SVC_TSFEL": "SVC",
+    "RandomForest_TSFEL": "Random Forest",
+    "XGBoost_TSFEL": "XGBoost",
+    "InceptionTimeModified": "ResNet-1D",
+    "LstmTimeModified": "LSTM",
+    "Transformer Encoder": "Transformer encoder",
+}
 
 # ============================================================================
 # SHARED PLOTTING HELPERS
@@ -684,8 +698,6 @@ def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) ->
             f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
         )
 
-    # Optimization target mapping per metric
-    # True: higher is better; False: lower is better; 'zero': target 0.0; 'one': target 1.0
     higher_is_better = {
         "AUROC": True,
         "AUPRC": True,
@@ -698,28 +710,37 @@ def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) ->
         "E90": False,
     }
 
+    metric_cols = [
+        "AUROC",
+        "AUPRC",
+        "F1-Score",
+        "MCC",
+        "Brier",
+        "Intercept",
+        "Slope",
+        "ICI",
+        "E90",
+    ]
     decimals = 3 if evaluation_mode == "oof" else 2
 
     def parse_displayed_estimate(val_str: str) -> float:
-        """Parses and rounds the central estimate strictly matching the displayed precision."""
+        val_str = str(val_str).strip()
         if "±" in val_str:
             num = float(val_str.split("±")[0].strip())
         elif "[" in val_str:
             num = float(val_str.split("[")[0].strip())
         else:
             num = float(val_str)
-        # Format then float to avoid floating point precision artifacts on ties
         return float(f"{num:.{decimals}f}")
 
-    # Parse central estimates exactly as they will be displayed
     parsed_estimates = {}
-    for col in results_df.columns:
-        parsed_estimates[col] = {
-            idx: parse_displayed_estimate(str(results_df.loc[idx, col]))
-            for idx in results_df.index
-        }
+    for col in metric_cols:
+        if col in results_df.columns:
+            parsed_estimates[col] = {
+                idx: parse_displayed_estimate(str(results_df.loc[idx, col]))
+                for idx in results_df.index
+            }
 
-    # Identify all winning models per column (handles display-level ties)
     best_models = {}
     for col, target in higher_is_better.items():
         if col not in parsed_estimates:
@@ -749,12 +770,45 @@ def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) ->
                 if float(f"{abs(v - 1.0):.{decimals}f}") == min_dist_rounded
             }
 
-    # Build table rows
-    rows_tex = []
+    def get_model_category(name: str) -> str:
+        clean = name.strip().lower()
+        if "igs2" in clean or "saps" in clean:
+            return "baseline"
+        if any(
+            dl in clean
+            for dl in ["resnet", "cnn", "lstm", "transformer", "inception"]
+        ):
+            return "deep_learning"
+        return "machine_learning"
+
+    groups = {
+        "baseline": ("Clinical Baseline", []),
+        "machine_learning": ("Machine Learning (TSFEL features)", []),
+        "deep_learning": ("Deep Learning (raw time series)", []),
+    }
+
     for model_name in results_df.index:
-        row_cells = [f"\\textbf{{{model_name}}}"]
-        for col in results_df.columns:
-            raw_val = str(results_df.loc[model_name, col])
+        clean_model_name = str(model_name).strip()
+        if clean_model_name == "Transformer Encoder":
+            model_cell = r"\makecell[{{l}}]{\textbf{Transformer}\\\textbf{Encoder}}"
+        elif clean_model_name == "Random Forest":
+            model_cell = r"\makecell[{{l}}]{\textbf{Random}\\\textbf{Forest}}"
+        else:
+            model_cell = f"\\makecell[{{{{l}}}}]{{\\textbf{{{clean_model_name}}}}}"
+
+        row_cells = [model_cell]
+
+        for col in metric_cols:
+            if col not in results_df.columns:
+                row_cells.append("-")
+                continue
+
+            raw_val = (
+                str(results_df.loc[model_name, col])
+                .strip()
+                .replace("\n", "")
+                .replace("\r", "")
+            )
             is_best = model_name in best_models.get(col, set())
 
             if evaluation_mode == "oof":
@@ -769,36 +823,46 @@ def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) ->
                     est_str, ci_str = raw_val.split("[")
                     ci_l, ci_u = ci_str.replace("]", "").split(",")
                     est_fmt = f"{float(est_str.strip()):.{decimals}f}"
-                    ci_fmt = f"{float(ci_l.strip()):.{decimals}f}, {float(ci_u.strip()):.{decimals}f}"
+                    ci_fmt = f"{float(ci_l.strip()):.{decimals}f},\\,{float(ci_u.strip()):.{decimals}f}"
                     macro = "\\bestci" if is_best else "\\ci"
                     row_cells.append(f"{macro}{{{est_fmt}}}{{{ci_fmt}}}")
                 else:
                     row_cells.append(raw_val)
 
-        rows_tex.append(" & ".join(row_cells) + " \\\\")
+        cat = get_model_category(clean_model_name)
+        groups[cat][1].append(" & ".join(row_cells) + " \\\\")
 
-    joined_rows = "\n\\cmidrule(lr){1-10}\n".join(rows_tex)
+    section_blocks = []
+    for cat_key, (cat_title, rows) in groups.items():
+        if not rows:
+            continue
+        header = f"\\multicolumn{{10}}{{@{{}}l}}{{\\textit{{{cat_title}}}}} \\\\\n\\midrule"
+        body = "\n".join(rows)
+        section_blocks.append(f"{header}\n{body}")
+
+    joined_rows = "\n\\midrule\n".join(section_blocks)
 
     if evaluation_mode == "oof":
-        margin = "-1cm"
-        tabcolsep = "3pt"
-        arraystretch = "1.05"
+        margin = "-1.8cm"
+        tabcolsep = "2.5pt"
+        arraystretch = "1.3"
         caption_text = (
-            "Out-of-fold performance metrics (mean $\\pm$ SD) across cross-validation "
-            "folds. Bold values indicate best performance per column."
+            "Out-of-fold performance metrics (mean $\\pm$ SD) across"
+            " cross-validation folds. Bold values indicate best performance"
+            " per column."
         )
         label_tag = "tab:model_performance_oof"
     else:
-        margin = "-1.25cm"
-        tabcolsep = "4pt"
-        arraystretch = "1.1"
+        margin = "-1.8cm"
+        tabcolsep = "2.5pt"
+        arraystretch = "1.3"
         caption_text = (
-            "Performance metrics with 95\\% confidence intervals [95\\% CI] for the "
-            "evaluated models. Bold values indicate best performance per column."
+            "Performance metrics with 95\\% confidence intervals [95\\% CI] for"
+            " the evaluated models. Bold values indicate best performance per"
+            " column."
         )
         label_tag = "tab:model_performance"
 
-    # Raw string starts at column 0 to prevent indentation issues in output file
     template = r"""\FloatBarrier
 \begin{table}[p]
 \begin{adjustwidth}{__MARGIN__}{__MARGIN__}
@@ -807,22 +871,23 @@ def export_custom_latex_table(results_df: pd.DataFrame, evaluation_mode: str) ->
 \renewcommand{\arraystretch}{__ARRAYSTRETCH__}
 \captionsetup{justification=centering}
 
-\small
-\begin{tabularx}{\linewidth}{@{}l*{9}{Y}@{}}
+\scriptsize
+\begin{tabularx}{\linewidth}{@{} l *{9}{Y} @{}}
 \toprule
 & \multicolumn{4}{c}{\textbf{Discrimination}}
 & \multicolumn{1}{c}{\textbf{Overall}}
 & \multicolumn{4}{c}{\textbf{Calibration}}\\
 \cmidrule(lr){2-5}\cmidrule(lr){6-6}\cmidrule(lr){7-10}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{AUROC}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{AUPRC}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{F1-Score}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{MCC}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{Brier}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{Intercept}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{Slope}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{ICI}}}
-& \multicolumn{1}{c}{\makecell[c]{\textbf{E90}}}\\
+\textbf{Model}
+& \textbf{AUROC}
+& \textbf{AUPRC}
+& \textbf{F1-Score}
+& \textbf{MCC}
+& \textbf{Brier}
+& \textbf{Intercept}
+& \textbf{Slope}
+& \textbf{ICI}
+& \textbf{E90}\\
 \midrule
 __JOINED_ROWS__
 \bottomrule
@@ -857,6 +922,7 @@ def generate_comparative_report(
     show=True,
     output_format: str = "pdf",
     save_individual_plots: bool = True,
+    order: list = None,
 ):
     """Generates comparative performance metrics, tables, and curves for models.
 
@@ -890,7 +956,7 @@ def generate_comparative_report(
     if model_names_map is not None:
         names_map.update(model_names_map)
 
-    predefined_order = [
+    predefined_order = order if order is not None else [
         "IGS2",
         "Logistic_Regression_Lasso_TSFEL",
         "SVC_TSFEL",
@@ -1335,3 +1401,241 @@ def generate_subgroup_grid_from_configs(
         dpi=dpi,
         show=show,
     output_format=output_format)
+
+
+def plot_paired_bootstrap_forest(
+    models_dict: Dict[str, Dict[str, np.ndarray]],
+    output_dir: Union[str, Path],
+    selected_models: Optional[List[str]] = None,
+    custom_pairs: Optional[List[Tuple[str, str]]] = None,
+    names_map: Optional[Dict[str, str]] = None,
+    save_filename: str = "paired_bootstrap_forest_auc_auprc_brier.pdf",
+    metrics: Optional[List[Dict[str, str]]] = None,
+    show_plot: bool = True,
+) -> Optional[pd.DataFrame]:
+    """Generates and exports a publication-ready forest plot comparing paired bootstrap distributions.
+
+    Computes paired deltas across bootstrap resamples for discrimination
+    (AUROC, AUPRC) and probabilistic error (Brier score). Delta directions are
+    harmonized such that positive values consistently favor the second model (Model B).
+    Applies display mapping to model identifiers for publication styling.
+
+    Args:
+        models_dict: Nested dictionary mapping model identifiers to their
+            bootstrap distributions (e.g., {"auc": np.ndarray, "auprc": np.ndarray,
+            "brier": np.ndarray}).
+        output_dir: Target directory path where figures and summaries are saved.
+        selected_models: List of model substrings, raw keys, or mapped names to compare.
+            All pairwise combinations (n choose 2) will be generated. Ignored if
+            `custom_pairs` is provided. If both are None, all models present in
+            `models_dict` (excluding 'igs2') are evaluated.
+        custom_pairs: Explicit list of model identifier tuples `(model_a, model_b)`.
+            Accepts raw keys, substrings, or mapped names. Takes precedence over `selected_models`.
+        names_map: Dictionary mapping raw model keys to clean publication names.
+            Defaults to DEFAULT_NAMES_MAP if None.
+        save_filename: Output PDF filename. Defaults to
+            "paired_bootstrap_forest_auc_auprc_brier.pdf".
+        metrics: Custom configuration list for metrics to evaluate. Each dict must
+            contain 'key', 'title', and 'direction' ('b_minus_a' or 'a_minus_b').
+            Defaults to AUROC, AUPRC, and Brier score.
+        show_plot: Whether to call `plt.show()` during notebook execution.
+            Defaults to True.
+
+    Returns:
+        pd.DataFrame containing paired delta statistics (mean, 95% CI bounds,
+        p-values) across evaluated comparisons, or None if no valid pairs were found.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if names_map is None:
+        names_map = DEFAULT_NAMES_MAP
+
+    available_keys = list(models_dict.keys())
+
+    def _get_display_name(raw_key: str) -> str:
+        if raw_key in names_map:
+            return names_map[raw_key]
+        for k, v in names_map.items():
+            if k.lower() in raw_key.lower():
+                return v
+        return raw_key
+
+    def _match_key(query: str) -> Optional[str]:
+        # 1. Exact match in raw keys
+        if query in available_keys:
+            return query
+        # 2. Match via reverse lookup from display name
+        for raw_k, disp_k in names_map.items():
+            if query.lower() == disp_k.lower():
+                for real_k in available_keys:
+                    if raw_k.lower() in real_k.lower():
+                        return real_k
+        # 3. Substring match on raw keys
+        return next((k for k in available_keys if query.lower() in k.lower()), None)
+
+    # 1. Resolve target pairs
+    resolved_pairs: List[Tuple[str, str, str]] = []
+
+    if custom_pairs is not None:
+        for a_query, b_query in custom_pairs:
+            matched_a = _match_key(a_query)
+            matched_b = _match_key(b_query)
+            if matched_a and matched_b:
+                label_a = _get_display_name(matched_a)
+                label_b = _get_display_name(matched_b)
+                resolved_pairs.append((matched_a, matched_b, f"{label_a} vs {label_b}"))
+            else:
+                missing = [q for q, m in [(a_query, matched_a), (b_query, matched_b)] if m is None]
+                print(f"[Warning] Could not resolve pair: missing {missing}")
+    else:
+        if selected_models is not None:
+            resolved_keys = []
+            for query in selected_models:
+                matched = _match_key(query)
+                if matched:
+                    if matched not in resolved_keys:
+                        resolved_keys.append(matched)
+                else:
+                    print(f"[Warning] Model identifier matching '{query}' not found.")
+        else:
+            resolved_keys = [k for k in available_keys if "igs2" not in k.lower()]
+
+        for mod_a, mod_b in itertools.combinations(resolved_keys, 2):
+            label_a = _get_display_name(mod_a)
+            label_b = _get_display_name(mod_b)
+            resolved_pairs.append((mod_a, mod_b, f"{label_a} vs {label_b}"))
+
+    if not resolved_pairs:
+        print("[Error] No valid model pairs to compare.")
+        return None
+
+    # 2. Metric setup
+    if metrics is None:
+        metrics = [
+            {"key": "auc", "title": r"$\Delta$ AUROC $(B - A)$", "direction": "b_minus_a"},
+            {"key": "auprc", "title": r"$\Delta$ AUPRC $(B - A)$", "direction": "b_minus_a"},
+            {"key": "brier", "title": r"$\Delta$ Brier $(A - B)$", "direction": "a_minus_b"},
+        ]
+
+    # 3. Compute paired differences across bootstrap distributions
+    records = []
+    for mod_a, mod_b, label in resolved_pairs:
+        dist_a = models_dict[mod_a]
+        dist_b = models_dict[mod_b]
+        row = {
+            "pair": label,
+            "model_A": _get_display_name(mod_a),
+            "model_B": _get_display_name(mod_b),
+            "raw_model_A": mod_a,
+            "raw_model_B": mod_b,
+        }
+
+        for m in metrics:
+            k = m["key"]
+            if k not in dist_a or k not in dist_b:
+                continue
+
+            vals_a = np.asarray(dist_a[k], dtype=np.float64)
+            vals_b = np.asarray(dist_b[k], dtype=np.float64)
+
+            delta = (vals_b - vals_a) if m["direction"] == "b_minus_a" else (vals_a - vals_b)
+            mean_val = float(np.mean(delta))
+            ci = np.percentile(delta, [2.5, 97.5])
+            pval = float(min(1.0, 2.0 * min(np.mean(delta <= 0), np.mean(delta >= 0))))
+
+            row[f"{k}_mean"] = mean_val
+            row[f"{k}_ci_low"] = ci[0]
+            row[f"{k}_ci_high"] = ci[1]
+            row[f"{k}_pval"] = pval
+
+        records.append(row)
+
+    df_results = pd.DataFrame(records)
+    csv_path = output_dir / f"{Path(save_filename).stem}_data.csv"
+    df_results.to_csv(csv_path, index=False)
+
+    # 4. Multi-panel Forest Plot
+    n_pairs = len(df_results)
+    n_metrics = len(metrics)
+    fig_height = max(4.5, n_pairs * 0.45 + 1.5)
+
+    fig, axes = plt.subplots(
+        1, n_metrics, figsize=(6.0 * n_metrics, fig_height), dpi=300, constrained_layout=True
+    )
+    if n_metrics == 1:
+        axes = [axes]
+
+    y_pos = np.arange(n_pairs)
+
+    for ax, m in zip(axes, metrics):
+        k = m["key"]
+        means = df_results[f"{k}_mean"].to_numpy()
+        ci_lows = df_results[f"{k}_ci_low"].to_numpy()
+        ci_highs = df_results[f"{k}_ci_high"].to_numpy()
+        pvals = df_results[f"{k}_pval"].to_numpy()
+
+        xerr = np.vstack([means - ci_lows, ci_highs - means])
+        colors = ["#1f77b4" if p < 0.05 else "#7f7f7f" for p in pvals]
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
+
+        for i in range(n_pairs):
+            ax.errorbar(
+                means[i],
+                y_pos[i],
+                xerr=[[xerr[0, i]], [xerr[1, i]]],
+                fmt="o",
+                color=colors[i],
+                ecolor=colors[i],
+                elinewidth=2.0,
+                capsize=4,
+                capthick=1.4,
+                markersize=6.5,
+            )
+
+            p_str = (
+                f"$p={pvals[i]:.1e}$"
+                if pvals[i] < 0.001
+                else (f"$p={pvals[i]:.3f}$" if pvals[i] < 0.05 else "NS")
+            )
+            annot = f"{means[i]:+.3f} [{ci_lows[i]:+.3f}, {ci_highs[i]:+.3f}] | {p_str}"
+
+            ax.text(
+                means[i],
+                y_pos[i] - 0.22,
+                annot,
+                ha="center",
+                va="bottom",
+                fontsize=8.0,
+                fontweight="bold",
+                color=colors[i],
+            )
+
+        ax.set_yticks(y_pos)
+        if ax == axes[0]:
+            ax.set_yticklabels(df_results["pair"], fontsize=9.0, fontweight="bold")
+        else:
+            ax.set_yticklabels([])
+
+        ax.invert_yaxis()
+        ax.set_ylim(n_pairs - 0.5, -0.6)
+        ax.set_xlabel(m["title"], fontsize=9.5)
+        ax.set_title(
+            f"{k.upper()} Difference\n(Positive favors Model B)",
+            fontsize=10.5,
+            fontweight="bold",
+            pad=10,
+        )
+        ax.grid(axis="x", linestyle=":", alpha=0.6)
+
+    fig_path = output_dir / save_filename
+    plt.savefig(fig_path, bbox_inches="tight")
+    if show_plot:
+        plt.show()
+    plt.close(fig)
+
+    print(f"[Done] Processed {n_pairs} model comparison pairs.")
+    print(f"[Saved] Figure: {fig_path.name} | Data: {csv_path.name}")
+
+    return df_results

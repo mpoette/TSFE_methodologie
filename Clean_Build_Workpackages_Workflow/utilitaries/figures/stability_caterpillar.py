@@ -21,7 +21,6 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-
 def aligned_betas(
     betas: pd.Series,
     feature_names: Sequence[str]
@@ -477,13 +476,27 @@ def caterpillar_pair(
 
     if d.empty or top_n < 1:
         raise ValueError("Empty summary or invalid top_n parameter.")
+    # Ensure intervals and estimates are finite and structurally consistent
     finite = np.isfinite(d[["beta", "beta_lower", "beta_upper", "importance"]]).all().all()
     if not finite or (d.beta_lower > d.beta_upper).any():
         raise ValueError("Invalid lower and upper interval bounds.")
 
-    nonout = d.loc[~d.is_outlier].nlargest(top_n, "importance")
-    detail = pd.concat([nonout, d.loc[d.is_outlier]]) if include_outliers_in_top else nonout
-    views = {"all": d, "top": detail}
+    # A feature is statistically separated from OR=1 if its interval does not cross zero (log-scale)
+    is_significant = (d.beta_lower > 0.0) | (d.beta_upper < 0.0)
+
+    # Significant non-outlier features
+    significant_nonout = d.loc[~d.is_outlier & is_significant]
+    nonout = significant_nonout.nlargest(min(top_n, len(significant_nonout)), "importance")
+
+    # Significant extreme outliers
+    significant_outliers = d.loc[d.is_outlier & is_significant]
+
+    # Generate all three perspectives automatically
+    views = {
+        "all": d,
+        "top_no_outliers": nonout,
+        "top_with_outliers": pd.concat([nonout, significant_outliers]) if not significant_outliers.empty else nonout,
+    }
     figures = {}
 
     for view, rows in views.items():
@@ -532,15 +545,20 @@ def caterpillar_pair(
             ax.set_yticks([])
             ax.set_ylabel(f"{n} features sorted by median OR")
             subtitle = f"All features · {n} variables"
-        else:
+        elif view == "top_no_outliers":
             labels = [
                 label_transform(x) if label_transform else str(x)
                 for x in rows.feature
             ]
             ax.set_yticks(y, ["\n".join(textwrap.wrap(x, 44)) for x in labels], fontsize=9)
-            subtitle = f"Top {len(nonout)} features (excluding outliers)"
-            if include_outliers_in_top:
-                subtitle += f" + {int(d.is_outlier.sum())} extreme outliers"
+            subtitle = f"Top {len(rows)} significant features (excluding outliers)"
+        else:  # top_with_outliers
+            labels = [
+                label_transform(x) if label_transform else str(x)
+                for x in rows.feature
+            ]
+            ax.set_yticks(y, ["\n".join(textwrap.wrap(x, 44)) for x in labels], fontsize=9)
+            subtitle = f"Top {len(nonout)} significant features + {len(significant_outliers)} extreme outliers"
 
         lo = min(float(rows.beta_lower.min()), float(rows.beta.min()), 0.0)
         hi = max(float(rows.beta_upper.max()), float(rows.beta.max()), 0.0)

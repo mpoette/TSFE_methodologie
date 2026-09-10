@@ -17,7 +17,7 @@ import sklearn
 from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedGroupKFold
-
+from utilitaries.figures.feature_names import short_feature_name
 from .stability_caterpillar import (
     bootstrap_coefficients,
     bootstrap_predictions,
@@ -266,11 +266,13 @@ def run_icu_stability(
             top_n=top_n,
             include_outliers_in_top=include_outliers_in_top,
             title="Five Fixed LR Models · OR Dispersion Prior to Calibration",
+            label_transform = short_feature_name
         )
         for fig in figs.values():
             plt.close(fig)
 
     summaries = []
+    all_draws = []
     for i, (model, Xfit, yfit, ids, scale) in enumerate(prepared):
         if not n_bootstrap:
             break
@@ -308,6 +310,7 @@ def run_icu_stability(
             log.to_csv(log_path, index=False)
             np.savez_compressed(cache, betas=draws, feature_names=np.asarray(universe, dtype=str))
 
+        all_draws.append(draws)
         summary = coefficient_summary(draws, universe, effect_units=reference)
         summary.to_csv(fold_folder / "summary.csv", index=False)
         summary["fold"] = i + 1
@@ -321,9 +324,46 @@ def run_icu_stability(
                 top_n=top_n,
                 include_outliers_in_top=include_outliers_in_top,
                 title=f"LR Fold {i+1} · Conditional Bootstrap · C={model.C:.3g}",
+                label_transform = short_feature_name
             )
             for fig in figs.values():
                 plt.close(fig)
+
+    # -------------------------------------------------------------------------
+    # Pooled Cross-Fold Mega-Bootstrap (5 folds x N draws = 2000 draws)
+    # -------------------------------------------------------------------------
+    pooled_summary = None
+    if n_bootstrap and len(all_draws) == len(prepared):
+        pooled_draws = np.vstack(all_draws)
+        pooled_folder = folder / "bootstrap_pooled_all_folds"
+        pooled_folder.mkdir(parents=True, exist_ok=True)
+
+        pooled_summary = coefficient_summary(
+            pooled_draws,
+            universe,
+            effect_units=reference,
+            outlier_k=3.0,
+        )
+        pooled_summary.to_csv(pooled_folder / "summary.csv", index=False)
+        np.savez_compressed(
+            pooled_folder / "pooled_draws.npz",
+            betas=pooled_draws,
+            feature_names=np.asarray(universe, dtype=str),
+        )
+
+        if save_figures:
+            figs = caterpillar_pair(
+                pooled_summary,
+                pooled_folder,
+                prefix="mega_bootstrap",
+                top_n=top_n,
+                include_outliers_in_top=include_outliers_in_top,
+                title=f"L1-LR Pooled Multi-Fold Bootstrap ({len(pooled_draws)} Draws) · OR Stability",
+                label_transform = short_feature_name
+            )
+            for fig in figs.values():
+                plt.close(fig)
+            print(f"[STABILITY] Mega-bootstrap caterpillar ({len(pooled_draws)} draws) saved to {pooled_folder}.", flush=True)
 
     p = np.asarray(probabilities, dtype=float)
     y_holdout = np.asarray(y_holdout).reshape(-1)
@@ -359,6 +399,7 @@ def run_icu_stability(
         "analysis": "conditional_stability_v2",
         "fixed_coefficients": fixed,
         "bootstrap_coefficients": summaries,
+        "pooled_bootstrap_coefficients": pooled_summary,
         "fixed_performance": perf,
         "reference_increments": reference,
         "folder": str(folder),

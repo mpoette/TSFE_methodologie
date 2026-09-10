@@ -223,39 +223,48 @@ def shap_tree_holdout_ensemble(
     models,
     X_test_per_model,
     feature_names_per_model,
-    model_name,
-    max_display=20,
-    savefig=True,
-    folder="",
-    transparent=False,
-
+    model_name: str,
+    max_display: int = 20,
+    savefig: bool = True,
+    folder: str = "",
+    transparent: bool = False,
     output_format: str = "pdf",
-):
+    aggregation_mode: str = "sum",
+    precomputed_shap: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Aggregate and visualize SHAP values from fold-specific tree models.
 
-    Each model may use a different feature subset. The function aligns SHAP
-    values on the union of feature names, averages them across fold models,
-    and produces detailed and source-variable-level importance artifacts.
+    Aligns SHAP explanations across multiple models on the union of features,
+    averages them, and renders both detailed and source-variable-level beeswarm
+    plots. An optional caching mechanism avoids recomputing TreeExplainer
+    instances across multiple aggregation modes.
 
     Args:
         models: Fitted tree estimators, one per fold.
         X_test_per_model: Holdout feature matrices aligned with ``models``.
         feature_names_per_model: Feature names for each holdout matrix.
-        model_name: Name used in plot titles and output artifacts.
-        max_display: Maximum number of features displayed in each plot.
-        savefig: Whether to save figures and CSV summaries.
-        folder: Directory in which generated artifacts are stored.
+        model_name: Model identifier used for display and filenames.
+        max_display: Maximum number of features displayed in beeswarm plots.
+        savefig: Whether to save generated figures and CSV summaries.
+        folder: Output directory path where artifacts will be saved.
         transparent: Whether saved figures use a transparent background.
-
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
+        output_format: Figure output format (e.g., ``"pdf"`` or ``"png"``).
+        aggregation_mode: Metric for aggregating sub-features into root variables.
+            Supported modes: ``"sum"``, ``"signed_l2"``, ``"signed_max"``,
+            ``"mean"``.
+        precomputed_shap: Optional dictionary containing precomputed SHAP arrays
+            to bypass recalculation.
 
     Returns:
-        A dictionary containing detailed and source-aggregated SHAP matrices,
-        feature names, and importance tables.
+        A dictionary containing:
+            - ``"raw_fold_data"``: Unaggregated aligned SHAP arrays for caching.
+            - ``"detailed"``: Detailed feature-level values and importance table.
+            - ``"aggregated"``: Root-variable-level aggregated SHAP values and
+              importance table.
 
     Raises:
-        ValueError: If no models are supplied, collection lengths differ, or
-            holdout matrices contain inconsistent patient counts.
+        ValueError: If ``models`` is empty, inputs have mismatched lengths, or
+            patient counts are inconsistent across folds.
     """
     models = list(models)
     X_test_per_model = list(X_test_per_model)
@@ -266,105 +275,143 @@ def shap_tree_holdout_ensemble(
         raise ValueError("models must contain at least one fitted model.")
 
     if not (n_models == len(X_test_per_model) == len(feature_names_per_model)):
-        raise ValueError("models, X_test_per_model, and feature_names_per_model must have the same length.")
+        raise ValueError(
+            "models, X_test_per_model, and feature_names_per_model must have the same length."
+        )
 
-    X_arrays = [_to_2d_numpy(X_fold, allow_nan=True) for X_fold in X_test_per_model]
-    n_patients = X_arrays[0].shape[0]
+    # -------------------------------------------------------------------------
+    # 1. COMPUTE OR RETRIEVE PRECOMPUTED SHAP VALUES
+    # -------------------------------------------------------------------------
+    if precomputed_shap is not None:
+        mean_shap_values = precomputed_shap["mean_shap_values"]
+        mean_feature_values = precomputed_shap["mean_feature_values"]
+        mean_base_values = precomputed_shap["mean_base_values"]
+        global_feature_names = precomputed_shap["global_feature_names"]
+        n_patients = precomputed_shap["n_patients"]
+    else:
+        X_arrays = [_to_2d_numpy(X_fold, allow_nan=True) for X_fold in X_test_per_model]
+        n_patients = X_arrays[0].shape[0]
 
-    global_feature_names = sorted(
-        set().union(*[set(names) for names in feature_names_per_model])
-    )
-    global_feature_to_index = {name: idx for idx, name in enumerate(global_feature_names)}
+        global_feature_names = sorted(
+            set().union(*[set(names) for names in feature_names_per_model])
+        )
+        global_feature_to_index = {
+            name: idx for idx, name in enumerate(global_feature_names)
+        }
 
-    aligned_shap_per_model = []
-    aligned_values_per_model = []
-    base_values_per_model = []
+        aligned_shap_per_model = []
+        aligned_values_per_model = []
+        base_values_per_model = []
 
-    for fold_index, (model, X_fold, fold_feature_names) in enumerate(
-        zip(models, X_arrays, feature_names_per_model)
-    ):
-        tree_model = utils.get_root_estimator(model)
-        explainer = shap.TreeExplainer(tree_model)
-        explanation = explainer(X_fold)
+        for fold_index, (model, X_fold, fold_feature_names) in enumerate(
+            zip(models, X_arrays, feature_names_per_model)
+        ):
+            tree_model = utils.get_root_estimator(model)
+            explainer = shap.TreeExplainer(tree_model)
+            explanation = explainer(X_fold)
 
-        fold_shap = np.asarray(explanation.values, dtype=float)
-        if fold_shap.ndim == 3:
-            fold_shap = fold_shap[..., 1]
+            fold_shap = np.asarray(explanation.values, dtype=float)
+            if fold_shap.ndim == 3:
+                fold_shap = fold_shap[..., 1]
 
-        aligned_shap = np.zeros((n_patients, len(global_feature_names)), dtype=float)
-        aligned_values = np.full((n_patients, len(global_feature_names)), np.nan, dtype=float)
+            aligned_shap = np.zeros(
+                (n_patients, len(global_feature_names)), dtype=float
+            )
+            aligned_values = np.full(
+                (n_patients, len(global_feature_names)), np.nan, dtype=float
+            )
 
-        for local_idx, name in enumerate(fold_feature_names):
-            global_idx = global_feature_to_index[name]
-            aligned_shap[:, global_idx] = fold_shap[:, local_idx]
-            aligned_values[:, global_idx] = X_fold[:, local_idx]
+            for local_idx, name in enumerate(fold_feature_names):
+                global_idx = global_feature_to_index[name]
+                aligned_shap[:, global_idx] = fold_shap[:, local_idx]
+                aligned_values[:, global_idx] = X_fold[:, local_idx]
 
-        fold_base_values = np.asarray(explanation.base_values, dtype=float)
-        if fold_base_values.ndim == 2:
-            fold_base_values = fold_base_values[:, 1]
-        fold_base_values = fold_base_values.reshape(-1)
-        if fold_base_values.size == 1:
-            fold_base_values = np.repeat(fold_base_values, n_patients)
+            fold_base_values = np.asarray(explanation.base_values, dtype=float)
+            if fold_base_values.ndim == 2:
+                fold_base_values = fold_base_values[:, 1]
+            fold_base_values = fold_base_values.reshape(-1)
+            if fold_base_values.size == 1:
+                fold_base_values = np.repeat(fold_base_values, n_patients)
 
-        aligned_shap_per_model.append(aligned_shap)
-        aligned_values_per_model.append(aligned_values)
-        base_values_per_model.append(fold_base_values)
+            aligned_shap_per_model.append(aligned_shap)
+            aligned_values_per_model.append(aligned_values)
+            base_values_per_model.append(fold_base_values)
 
-    mean_shap_values = np.mean(np.stack(aligned_shap_per_model, axis=0), axis=0)
-    with np.errstate(invalid="ignore"):
-        mean_feature_values = np.nanmean(np.stack(aligned_values_per_model, axis=0), axis=0)
-    mean_feature_values = np.nan_to_num(mean_feature_values, nan=0.0)
-    mean_base_values = np.mean(np.stack(base_values_per_model, axis=0), axis=0)
+        mean_shap_values = np.mean(np.stack(aligned_shap_per_model, axis=0), axis=0)
+        with np.errstate(invalid="ignore"):
+            mean_feature_values = np.nanmean(
+                np.stack(aligned_values_per_model, axis=0), axis=0
+            )
+        mean_feature_values = np.nan_to_num(mean_feature_values, nan=0.0)
+        mean_base_values = np.mean(np.stack(base_values_per_model, axis=0), axis=0)
 
     output_directory = Path(folder)
     if savefig:
         output_directory.mkdir(parents=True, exist_ok=True)
 
     # =========================================================================
-    # VERSION 1: DETAILED
+    # 2. VERSION 1: DETAILED FEATURE-LEVEL BEESWARM
     # =========================================================================
-    wrapped_detailed_names = [_wrap_feature_name(name, width=32) for name in global_feature_names]
-
     mean_abs_shap_detailed = np.mean(np.abs(mean_shap_values), axis=0)
     importance_detailed = (
-        pd.DataFrame({"feature": global_feature_names, "mean_abs_shap": mean_abs_shap_detailed})
+        pd.DataFrame(
+            {
+                "feature": global_feature_names,
+                "mean_abs_shap": mean_abs_shap_detailed,
+            }
+        )
         .sort_values("mean_abs_shap", ascending=False)
         .reset_index(drop=True)
     )
 
-    exp_detailed = shap.Explanation(
-        values=mean_shap_values,
-        base_values=mean_base_values,
-        data=mean_feature_values,
-        feature_names=wrapped_detailed_names,
-    )
+    # Render detailed beeswarm only on the initial run
+    if precomputed_shap is None:
+        wrapped_detailed_names = [
+            _wrap_feature_name(name, width=32) for name in global_feature_names
+        ]
+        exp_detailed = shap.Explanation(
+            values=mean_shap_values,
+            base_values=mean_base_values,
+            data=mean_feature_values,
+            feature_names=wrapped_detailed_names,
+        )
 
-    # plot_size increases the physical vertical height to space out Y labels
-    plt.figure()
-    shap.plots.beeswarm(
-        exp_detailed, 
-        max_display=min(max_display, len(wrapped_detailed_names)), 
-        plot_size=(10, 13),  # <-- Increased height (13 instead of the default 8/10)
-        show=False
-    )
-    plt.yticks(fontsize= 12)  # Slightly smaller font to avoid overlap
-    # plt.title(f"TreeSHAP Detailed - {model_name}", fontsize=12, pad=15)
-    plt.tight_layout()
+        plt.figure()
+        shap.plots.beeswarm(
+            exp_detailed,
+            max_display=min(max_display, len(wrapped_detailed_names)),
+            plot_size=(10, 13),
+            show=False,
+        )
+        plt.yticks(fontsize=12)
+        plt.tight_layout()
 
-    if savefig:
-        save_figure_file(plt, output_directory / "holdout_ensemble_treeshap_beeswarm_detailed", output_format, bbox_inches="tight", transparent=transparent)
-        importance_detailed.to_csv(output_directory / "holdout_ensemble_treeshap_importance_detailed.csv", index=False)
-    
-    plt.show()
-    plt.close()
+        if savefig:
+            save_figure_file(
+                plt,
+                output_directory / "holdout_ensemble_treeshap_beeswarm_detailed",
+                output_format,
+                bbox_inches="tight",
+                transparent=transparent,
+            )
+            importance_detailed.to_csv(
+                output_directory
+                / "holdout_ensemble_treeshap_importance_detailed.csv",
+                index=False,
+            )
+
+        plt.show()
+        plt.close()
 
     # =========================================================================
-    # VERSION 2: AGGREGATED BY ROOT FEATURE (Includes TSFEL + One-Hot Encoded)
+    # 3. VERSION 2: AGGREGATED BY ROOT CLINICAL VARIABLE
     # =========================================================================
-    KNOWN_CATEGORICALS = ['admission_type', 'icu_ghm', 'icu_mode_entree', 'hx']
+    known_categoricals = ["admission_type", "icu_ghm", "icu_mode_entree", "hx"]
     root_mapping = {}
     for idx, name in enumerate(global_feature_names):
-        root = clean_feature_aggregated(name, known_categorical_features=KNOWN_CATEGORICALS)
+        root = clean_feature_aggregated(
+            name, known_categorical_features=known_categoricals
+        )
         root_mapping.setdefault(root, []).append(idx)
 
     unique_roots = list(root_mapping.keys())
@@ -372,16 +419,33 @@ def shap_tree_holdout_ensemble(
     agg_feature_values = np.zeros((n_patients, len(unique_roots)), dtype=float)
 
     for r_idx, (root, col_indices) in enumerate(root_mapping.items()):
-        # Sum SHAP values across all OHE / TSFEL sub-features
-        agg_shap_values[:, r_idx] = np.sum(mean_shap_values[:, col_indices], axis=1)
-        # Mean actual feature values for SHAP color display
-        agg_feature_values[:, r_idx] = np.mean(mean_feature_values[:, col_indices], axis=1)
+        sub_shap = mean_shap_values[:, col_indices]
 
-    wrapped_aggregated_names = [_wrap_feature_name(name, width=32) for name in unique_roots]
+        if aggregation_mode == "signed_l2":
+            net_sign = np.sign(np.sum(sub_shap, axis=1))
+            agg_shap_values[:, r_idx] = net_sign * np.sqrt(
+                np.sum(sub_shap**2, axis=1)
+            )
+        elif aggregation_mode == "signed_max":
+            max_idx = np.argmax(np.abs(sub_shap), axis=1)
+            agg_shap_values[:, r_idx] = sub_shap[np.arange(n_patients), max_idx]
+        elif aggregation_mode == "mean":
+            agg_shap_values[:, r_idx] = np.mean(sub_shap, axis=1)
+        else:  # "sum"
+            agg_shap_values[:, r_idx] = np.sum(sub_shap, axis=1)
 
+        agg_feature_values[:, r_idx] = np.mean(
+            mean_feature_values[:, col_indices], axis=1
+        )
+
+    wrapped_aggregated_names = [
+        _wrap_feature_name(name, width=32) for name in unique_roots
+    ]
     mean_abs_shap_agg = np.mean(np.abs(agg_shap_values), axis=0)
     importance_aggregated = (
-        pd.DataFrame({"feature": unique_roots, "mean_abs_shap": mean_abs_shap_agg})
+        pd.DataFrame(
+            {"feature": unique_roots, "mean_abs_shap": mean_abs_shap_agg}
+        )
         .sort_values("mean_abs_shap", ascending=False)
         .reset_index(drop=True)
     )
@@ -395,13 +459,13 @@ def shap_tree_holdout_ensemble(
 
     plt.figure()
     shap.plots.beeswarm(
-        exp_aggregated, 
-        max_display=min(max_display, len(wrapped_aggregated_names)), 
+        exp_aggregated,
+        max_display=min(max_display, len(wrapped_aggregated_names)),
         plot_size=(10, 13),
-        show=False
+        show=False,
     )
 
-    # Rename the bottom bar if necessary
+    # Adjust truncated feature summary label
     ax = plt.gca()
     labels = [label.get_text() for label in ax.get_yticklabels()]
     n_total_agg = len(wrapped_aggregated_names)
@@ -413,14 +477,34 @@ def shap_tree_holdout_ensemble(
     plt.yticks(fontsize=12)
     plt.tight_layout()
 
+    # Mode-specific filename export
+    agg_suffix = f"_{aggregation_mode}"
     if savefig:
-        save_figure_file(plt, output_directory / "holdout_ensemble_treeshap_beeswarm_aggregated", output_format, bbox_inches="tight", transparent=transparent)
-        importance_aggregated.to_csv(output_directory / "holdout_ensemble_treeshap_importance_aggregated.csv", index=False)
+        save_figure_file(
+            plt,
+            output_directory
+            / f"holdout_ensemble_treeshap_beeswarm_aggregated{agg_suffix}",
+            output_format,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
+        importance_aggregated.to_csv(
+            output_directory
+            / f"holdout_ensemble_treeshap_importance_aggregated{agg_suffix}.csv",
+            index=False,
+        )
 
     plt.show()
     plt.close()
 
     return {
+        "raw_fold_data": {
+            "mean_shap_values": mean_shap_values,
+            "mean_feature_values": mean_feature_values,
+            "mean_base_values": mean_base_values,
+            "global_feature_names": global_feature_names,
+            "n_patients": n_patients,
+        },
         "detailed": {
             "mean_shap_values": mean_shap_values,
             "feature_names": global_feature_names,
@@ -432,359 +516,6 @@ def shap_tree_holdout_ensemble(
             "feature_importance": importance_aggregated,
         },
     }
-
-# ============================================================================
-# LINEAR-MODEL INTERPRETABILITY
-# ============================================================================
-
-def linear_coefficients_holdout_ensemble(
-    models,
-    feature_names_per_model,
-    savefig=True,
-    folder="",
-):
-    """Aggregate coefficients from fold-specific linear models.
-    
-    The function produces two aggregation levels. At the individual-feature
-    level, coefficients are aligned across models and summarized by their mean,
-    mean absolute value, and standard deviation. At the clinical-variable level,
-    TSFEL and One-Hot Encoded features are grouped by their root variable and
-    their cumulative absolute coefficient importance is summarized across models.
-    
-    Args:
-        models:
-            Iterable of fitted linear models exposing a ``coef_`` attribute.
-        feature_names_per_model:
-            Feature names corresponding to each fitted model.
-        savefig:
-            Whether to save the generated CSV tables.
-        folder:
-            Output directory.
-    
-    Returns:
-        dict:
-            Aligned coefficients, feature-level summaries, root-feature names,
-            cumulative importances, and aggregated importance tables.
-    
-    Raises:
-        ValueError:
-            If model and feature-name counts are inconsistent or no model is
-            provided.
-        TypeError:
-            If a model does not expose a ``coef_`` attribute.
-    """
-
-    # -------------------------------------------------------------------------
-    # Preparation
-    # -------------------------------------------------------------------------
-
-    models = list(models)
-
-    feature_names_per_model = [
-        list(names)
-        for names in feature_names_per_model
-    ]
-
-    if len(models) != len(feature_names_per_model):
-        raise ValueError(
-            "models and feature_names_per_model must have the same length."
-        )
-
-    if len(models) == 0:
-        raise ValueError(
-            "models must contain at least one fitted model."
-        )
-
-    # -------------------------------------------------------------------------
-    # Global set of features present in at least one model
-    # -------------------------------------------------------------------------
-
-    global_feature_names = sorted(
-        set().union(
-            *[
-                set(names)
-                for names in feature_names_per_model
-            ]
-        )
-    )
-
-    feature_to_index = {
-        name: index
-        for index, name in enumerate(global_feature_names)
-    }
-
-    # -------------------------------------------------------------------------
-    # Coefficient matrix:
-    #
-    # rows    = models
-    # columns = global features
-    #
-    # A feature absent from a model receives a zero coefficient.
-    # -------------------------------------------------------------------------
-
-    aligned_coefficients = np.zeros(
-        (
-            len(models),
-            len(global_feature_names),
-        ),
-        dtype=float,
-    )
-
-    for fold_index, (model, feature_names) in enumerate(
-        zip(models, feature_names_per_model)
-    ):
-
-        if not hasattr(model, "coef_"):
-            raise TypeError(
-                f"Fold model {fold_index + 1} does not expose coef_."
-            )
-
-        coefficients = np.asarray(
-            model.coef_,
-            dtype=float,
-        ).reshape(-1)
-
-        if len(coefficients) != len(feature_names):
-            raise ValueError(
-                f"Fold {fold_index + 1}: "
-                f"{len(coefficients)} coefficients for "
-                f"{len(feature_names)} features."
-            )
-
-        for coefficient, feature_name in zip(
-            coefficients,
-            feature_names,
-        ):
-            aligned_coefficients[
-                fold_index,
-                feature_to_index[feature_name],
-            ] = coefficient
-
-    # =========================================================================
-    # 1. FEATURE LEVEL
-    # =========================================================================
-
-    mean_coefficients = np.mean(
-        aligned_coefficients,
-        axis=0,
-    )
-
-    mean_absolute_coefficients = np.mean(
-        np.abs(aligned_coefficients),
-        axis=0,
-    )
-
-    coefficient_std = np.std(
-        aligned_coefficients,
-        axis=0,
-        ddof=1,
-    )
-
-    coefficient_table = pd.DataFrame({
-        "feature": global_feature_names,
-        "mean_coefficient": mean_coefficients,
-        "mean_abs_coefficient": mean_absolute_coefficients,
-        "std_coefficient": coefficient_std,
-    })
-
-    # Add the individual coefficients from each model
-    # to preserve full traceability.
-    for model_idx in range(len(models)):
-        coefficient_table[
-            f"model_{model_idx + 1}_coefficient"
-        ] = aligned_coefficients[model_idx]
-
-    coefficient_table = (
-        coefficient_table
-        .sort_values(
-            "mean_abs_coefficient",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    # =========================================================================
-    # 2. AGGREGATION BY CLINICAL VARIABLE
-    # =========================================================================
-
-    KNOWN_CATEGORICALS = [
-        "admission_type",
-        "icu_ghm",
-        "icu_mode_entree",
-        "hx",
-    ]
-
-    # Root clinical variable corresponding to each TSFEL/OHE feature
-    root_features = [
-        clean_feature_aggregated(
-            feature_name,
-            known_categorical_features=KNOWN_CATEGORICALS,
-        )
-        for feature_name in global_feature_names
-    ]
-
-    # Preserve order of appearance
-    unique_roots = list(
-        dict.fromkeys(root_features)
-    )
-
-    # Matrix:
-    #
-    # rows    = models
-    # columns = root clinical variables
-    #
-    # importance(root, model) = sum of |beta| across features
-    # derived from this clinical variable.
-    cumulative_importance_per_model = np.zeros(
-        (
-            len(models),
-            len(unique_roots),
-        ),
-        dtype=float,
-    )
-
-    n_features_per_root = np.zeros(
-        len(unique_roots),
-        dtype=int,
-    )
-
-    for root_idx, root in enumerate(unique_roots):
-
-        feature_indices = [
-            feature_idx
-            for feature_idx, feature_root in enumerate(root_features)
-            if feature_root == root
-        ]
-
-        n_features_per_root[root_idx] = len(
-            feature_indices
-        )
-
-        cumulative_importance_per_model[
-            :,
-            root_idx,
-        ] = np.sum(
-            np.abs(
-                aligned_coefficients[
-                    :,
-                    feature_indices,
-                ]
-            ),
-            axis=1,
-        )
-
-    # -------------------------------------------------------------------------
-    # Mean and variability across models
-    # -------------------------------------------------------------------------
-
-    cumulative_importance_mean = np.mean(
-        cumulative_importance_per_model,
-        axis=0,
-    )
-
-    cumulative_importance_std = np.std(
-        cumulative_importance_per_model,
-        axis=0,
-        ddof=1,
-    )
-
-    cumulative_importance_table = pd.DataFrame({
-        "root_feature": unique_roots,
-        "n_features": n_features_per_root,
-        "mean_cumulative_importance": cumulative_importance_mean,
-        "std_cumulative_importance": cumulative_importance_std,
-    })
-
-    # Individual values for the five models
-    for model_idx in range(len(models)):
-        cumulative_importance_table[
-            f"model_{model_idx + 1}_cumulative_importance"
-        ] = cumulative_importance_per_model[
-            model_idx
-        ]
-
-    cumulative_importance_table = (
-        cumulative_importance_table
-        .sort_values(
-            "mean_cumulative_importance",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    # =========================================================================
-    # 3. SAVE
-    # =========================================================================
-
-    output_directory = Path(folder)
-
-    if savefig:
-
-        output_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        # Detailed coefficients
-        coefficient_table.to_csv(
-            output_directory
-            / "holdout_ensemble_linear_coefficients.csv",
-            index=False,
-        )
-
-        # Cumulative importance by clinical variable
-        cumulative_importance_table.to_csv(
-            output_directory
-            / "holdout_ensemble_linear_cumulative_importance.csv",
-            index=False,
-        )
-
-    # =========================================================================
-    # 4. RETURN
-    # =========================================================================
-
-    return {
-        # ---------------------------------------------------------------------
-        # Individual-feature level
-        # ---------------------------------------------------------------------
-        "coefficients_per_model":
-            aligned_coefficients,
-
-        "mean_coefficients":
-            mean_coefficients,
-
-        "mean_abs_coefficients":
-            mean_absolute_coefficients,
-
-        "std_coefficients":
-            coefficient_std,
-
-        "feature_names":
-            global_feature_names,
-
-        "coefficient_table":
-            coefficient_table,
-
-        # ---------------------------------------------------------------------
-        # Aggregated clinical-variable level
-        # ---------------------------------------------------------------------
-        "root_feature_names":
-            unique_roots,
-
-        "cumulative_importance_per_model":
-            cumulative_importance_per_model,
-
-        "cumulative_importance_mean":
-            cumulative_importance_mean,
-
-        "cumulative_importance_std":
-            cumulative_importance_std,
-
-        "cumulative_importance_table":
-            cumulative_importance_table,
-    }
-
-
 # ============================================================================
 # TSFEL INTERPRETABILITY
 # ============================================================================
@@ -1162,52 +893,77 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
 def shap_tsfel_importance_matrix(
-    shap_results,
+    shap_results: Dict[str, Any],
     *,
-    savefig=True,
-    folder="",
-    transparent=False,
-    filename="holdout_ensemble_treeshap_tsfel_matrix",
-    title=None,
-    top_raw_variables=None,
-    top_descriptors=None,
-    min_importance=0.0,
-    normalize=False,
-    all_descriptors=False,
-    single_gray_removed=False,
-    transpose=False,
-    figsize=None,
-    cmap="Reds",
-    show=True,
-    feature_trace=None,
+    savefig: bool = True,
+    folder: str = "",
+    transparent: bool = False,
+    filename: str = "holdout_ensemble_treeshap_tsfel_matrix",
+    metric_mode: str = "l2_norm",
+    title: Optional[str] = None,
+    top_raw_variables: Optional[int] = None,
+    top_descriptors: Optional[int] = None,
+    min_importance: float = 0.0,
+    normalize: bool = False,
+    all_descriptors: bool = False,
+    single_gray_removed: bool = False,
+    transpose: bool = False,
+    figsize: Optional[Tuple[float, float]] = None,
+    cmap: str = "Reds",
+    show: bool = True,
+    feature_trace: Any = None,
     output_format: str = "pdf",
-):
-    """Plot a TSFEL SHAP importance heatmap.
-    
-    Args:
-        shap_results: SHAP results dictionary containing detailed feature values.
-        savefig: Whether to save the generated figure.
-        folder: Output directory.
-        transparent: Whether saved figures should use a transparent background.
-        filename: Base filename used when saving the figure.
-        title: Optional figure title.
-        top_raw_variables: Optional maximum number of raw variables to display.
-        top_descriptors: Optional maximum number of TSFEL descriptors to display.
-        min_importance: Minimum SHAP importance required for inclusion.
-        normalize: Whether to normalize the displayed importance matrix.
-        all_descriptors: Whether to include all active standard TSFEL descriptors.
-        single_gray_removed: If True, uses a single gray shade for all removed
-            features instead of stage-specific shades.
-        transpose: Whether to transpose the matrix.
-        figsize: Optional Matplotlib figure size.
-        cmap: Matplotlib colormap used for the heatmap.
-        show: Whether to display the figure.
-        feature_trace: Optional feature-removal mapping or JSON trace path.
-        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
-    """
+) -> Dict[str, Any]:
+    """Plot a structured 2D SHAP importance matrix across TSFEL descriptors.
 
+    Constructs a matrix crossing TSFEL descriptors against raw physiological
+    variables. Aggregates multi-descriptor cells according to ``metric_mode``,
+    overlays pipeline feature removal stages in grayscale, and groups descriptors
+    into functional domains.
+
+    Args:
+        shap_results: SHAP evaluation dictionary containing the ``"detailed"``
+            key.
+        savefig: Whether to persist generated figures and tabular CSVs.
+        folder: Target directory path for exported files.
+        transparent: Whether saved figures have a transparent canvas.
+        filename: Base export filename prefix.
+        metric_mode: Cell aggregation function. Choices: ``"l2_norm"``,
+            ``"sum"``, ``"mean"``, ``"max"``.
+        title: Optional custom figure title.
+        top_raw_variables: Maximum number of raw variables to display.
+        top_descriptors: Maximum number of descriptors to display.
+        min_importance: Minimum SHAP importance threshold for inclusion.
+        normalize: Whether to normalize matrix values to sum to 1.
+        all_descriptors: Whether to display all standard TSFEL descriptors.
+        single_gray_removed: If True, renders all filtered features in a single
+            gray tone instead of stage-specific tones.
+        transpose: Whether to swap axes (raw variables vs descriptors).
+        figsize: Optional Matplotlib figure size tuple.
+        cmap: Colormap applied to active feature importance.
+        show: Whether to render the plot interactively.
+        feature_trace: Path or dictionary mapping removed features to their
+            filtering stage.
+        output_format: File extension for saved figures (e.g., ``"pdf"``, ``"png"``).
+
+    Returns:
+        A dictionary containing:
+            - ``"matrix"``: The final pivoted DataFrame.
+            - ``"long_table"``: Tidy-format DataFrame of active features.
+            - ``"variable_importance"``: Series of column importance scores.
+            - ``"descriptor_info"``: Metadata DataFrame for TSFEL descriptors.
+            - ``"removal_stage_matrix"``: Categorical matrix of removal stages.
+            - ``"transposed"``: Boolean flag indicating orientation.
+            - ``"fig"``: Matplotlib Figure object.
+            - ``"ax"``: Matplotlib Axes object.
+
+    Raises:
+        KeyError: If ``shap_results`` does not contain the ``"detailed"`` key.
+        ValueError: If input dimensions are inconsistent or no valid TSFEL features
+            are identified.
+    """
     # ==================================================================
-    # 1. DETAILED SHAP
+    # 1. EXTRACT DETAILED SHAP DATA
     # ==================================================================
     if "detailed" not in shap_results:
         raise KeyError("shap_results must contain the 'detailed' key.")
@@ -1222,12 +978,14 @@ def shap_tsfel_importance_matrix(
         raise ValueError("The number of SHAP columns does not match feature_names.")
 
     # ==================================================================
-    # 2. STANDARD TSFEL REFERENCE
+    # 2. FEATURE SELECTION REMOVAL TRACE
     # ==================================================================
     standard_tsfel_descriptors = _get_active_standard_tsfel_descriptors()
 
     if isinstance(feature_trace, Mapping):
-        feature_removal_trace = {str(name): str(stage) for name, stage in feature_trace.items()}
+        feature_removal_trace = {
+            str(name): str(stage) for name, stage in feature_trace.items()
+        }
     else:
         feature_removal_trace = load_feature_trace(feature_trace)
 
@@ -1247,7 +1005,9 @@ def shap_tsfel_importance_matrix(
         if descriptor is None:
             continue
 
-        normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
+        normalized_descriptor = re.sub(
+            r"[_\s]+", " ", str(descriptor).lower()
+        ).strip()
         if normalized_descriptor not in standard_tsfel_descriptors:
             continue
         if _get_tsfel_display_group(descriptor) is None:
@@ -1262,7 +1022,7 @@ def shap_tsfel_importance_matrix(
             pair_removal_stages[pair] = removal_stage
 
     # ==================================================================
-    # 3. DETAILED IMPORTANCE
+    # 3. DETAILED IMPORTANCE TABLE
     # ==================================================================
     mean_abs_shap = np.mean(np.abs(mean_shap_values), axis=0)
     rows = []
@@ -1278,7 +1038,9 @@ def shap_tsfel_importance_matrix(
         if descriptor is None:
             continue
 
-        normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
+        normalized_descriptor = re.sub(
+            r"[_\s]+", " ", str(descriptor).lower()
+        ).strip()
         if normalized_descriptor not in standard_tsfel_descriptors:
             continue
 
@@ -1290,16 +1052,20 @@ def shap_tsfel_importance_matrix(
         if not np.isfinite(importance):
             continue
 
-        explainability_score = float(feat_utils.explainability_scores.get(descriptor, 0))
+        explainability_score = float(
+            feat_utils.explainability_scores.get(descriptor, 0)
+        )
 
-        rows.append({
-            "feature": feature_name,
-            "raw_variable": root_name,
-            "descriptor": descriptor,
-            "group": group,
-            "explainability_score": explainability_score,
-            "mean_abs_shap": importance,
-        })
+        rows.append(
+            {
+                "feature": feature_name,
+                "raw_variable": root_name,
+                "descriptor": descriptor,
+                "group": group,
+                "explainability_score": explainability_score,
+                "mean_abs_shap": importance,
+            }
+        )
 
     if not rows:
         raise ValueError("No compatible TSFEL feature was identified.")
@@ -1307,55 +1073,76 @@ def shap_tsfel_importance_matrix(
     long_table = pd.DataFrame(rows)
 
     # ==================================================================
-    # 4. SELECTED COMBINATIONS
+    # 4. ACTIVE FEATURE PAIRS
     # ==================================================================
     selected_pairs = set(zip(long_table["descriptor"], long_table["raw_variable"]))
 
     # ==================================================================
-    # 5. MATRIX PIVOT
+    # 5. MATRIX PIVOT WITH METRIC AGGREGATION
     # ==================================================================
+    if metric_mode == "l2_norm":
+        agg_func = lambda s: float(np.sqrt(np.sum(s**2)))
+    elif metric_mode == "mean":
+        agg_func = "mean"
+    elif metric_mode == "max":
+        agg_func = "max"
+    else:  # "sum"
+        agg_func = "sum"
+
     matrix = long_table.pivot_table(
         index="descriptor",
         columns="raw_variable",
         values="mean_abs_shap",
-        aggfunc="sum",
+        aggfunc=agg_func,
         fill_value=0.0,
     )
 
     traced_descriptors = list(dict.fromkeys(pair[0] for pair in pair_removal_stages))
     traced_variables = list(dict.fromkeys(pair[1] for pair in pair_removal_stages))
     matrix = matrix.reindex(
-        index=[*matrix.index, *[name for name in traced_descriptors if name not in matrix.index]],
-        columns=[*matrix.columns, *[name for name in traced_variables if name not in matrix.columns]],
+        index=[
+            *matrix.index,
+            *[name for name in traced_descriptors if name not in matrix.index],
+        ],
+        columns=[
+            *matrix.columns,
+            *[name for name in traced_variables if name not in matrix.columns],
+        ],
         fill_value=0.0,
     )
 
     # ==================================================================
-    # 6. ALL DESCRIPTORS OPTION
+    # 6. ALL DESCRIPTORS DISPLAY OPTION
     # ==================================================================
     if all_descriptors:
         all_tsfel_descriptors = []
         for descriptor in feat_utils.explainability_scores.keys():
-            normalized_descriptor = re.sub(r"[_\s]+", " ", str(descriptor).lower()).strip()
+            normalized_descriptor = re.sub(
+                r"[_\s]+", " ", str(descriptor).lower()
+            ).strip()
             if normalized_descriptor not in standard_tsfel_descriptors:
                 continue
             if _get_tsfel_display_group(descriptor) is None:
                 continue
             all_tsfel_descriptors.append(descriptor)
 
-        missing_descriptors = [d for d in all_tsfel_descriptors if d not in matrix.index]
+        missing_descriptors = [
+            d for d in all_tsfel_descriptors if d not in matrix.index
+        ]
         if missing_descriptors:
-            missing_matrix = pd.DataFrame(0.0, index=missing_descriptors, columns=matrix.columns)
+            missing_matrix = pd.DataFrame(
+                0.0, index=missing_descriptors, columns=matrix.columns
+            )
             matrix = pd.concat([matrix, missing_matrix], axis=0)
 
     # ==================================================================
-    # 7. MIN IMPORTANCE THRESHOLD
+    # 7. MINIMUM IMPORTANCE FILTERING
     # ==================================================================
     if min_importance > 0:
         matrix = matrix.mask(matrix < min_importance, 0.0)
 
     # ==================================================================
-    # 8. ORDERING VARIABLES
+    # 8. COLUMN (VARIABLE) SORTING
     # ==================================================================
     variable_importance = matrix.sum(axis=0).sort_values(ascending=False)
     ordered_columns = variable_importance.index.tolist()
@@ -1368,7 +1155,7 @@ def shap_tsfel_importance_matrix(
     matrix = matrix.loc[:, ordered_columns]
 
     # ==================================================================
-    # 9. ORDERING DESCRIPTORS
+    # 9. ROW (DESCRIPTOR) SORTING & GROUPING
     # ==================================================================
     descriptor_importance = matrix.sum(axis=1)
     descriptor_infos = []
@@ -1378,12 +1165,14 @@ def shap_tsfel_importance_matrix(
         if group is None:
             continue
         score = float(feat_utils.explainability_scores.get(descriptor, 0))
-        descriptor_infos.append({
-            "descriptor": descriptor,
-            "group": group,
-            "explainability_score": score,
-            "importance": float(descriptor_importance.loc[descriptor]),
-        })
+        descriptor_infos.append(
+            {
+                "descriptor": descriptor,
+                "group": group,
+                "explainability_score": score,
+                "importance": float(descriptor_importance.loc[descriptor]),
+            }
+        )
 
     descriptor_info_df = pd.DataFrame(descriptor_infos)
     group_order = ["Statistical", "Temporal", "Spectral", "Wavelet"]
@@ -1406,20 +1195,17 @@ def shap_tsfel_importance_matrix(
 
     matrix = matrix.loc[ordered_descriptors]
 
-    # Display positions
     displayed_groups = {}
     for descriptor_idx, descriptor in enumerate(matrix.index):
         group = _get_tsfel_display_group(descriptor)
         if group is not None:
             displayed_groups.setdefault(group, []).append(descriptor_idx)
 
-    # Normalization
     if normalize:
         total = float(matrix.to_numpy().sum())
         if total > 0:
             matrix = matrix / total
 
-    # Transposition
     if transpose:
         matrix = matrix.T
         effective_filename = f"{filename}_transpose"
@@ -1427,7 +1213,7 @@ def shap_tsfel_importance_matrix(
         effective_filename = filename
 
     # ==================================================================
-    # 10. FIGURE DIMENSIONS & PLOT
+    # 10. PLOT INITIALIZATION
     # ==================================================================
     n_rows, n_cols = matrix.shape
 
@@ -1455,36 +1241,49 @@ def shap_tsfel_importance_matrix(
     # 11. REMOVAL OVERLAY
     # ==================================================================
     if not transpose:
-        selected_mask = np.array([
-            [(d, v) in selected_pairs for v in matrix.columns]
-            for d in matrix.index
-        ], dtype=bool)
-
-        removal_stage_matrix = np.array([
+        selected_mask = np.array(
             [
-                "selected" if selected_mask[r, c]
-                else pair_removal_stages.get((d, v), "absent")
-                for c, v in enumerate(matrix.columns)
-            ]
-            for r, d in enumerate(matrix.index)
-        ], dtype=object)
+                [(d, v) in selected_pairs for v in matrix.columns]
+                for d in matrix.index
+            ],
+            dtype=bool,
+        )
+
+        removal_stage_matrix = np.array(
+            [
+                [
+                    "selected"
+                    if selected_mask[r, c]
+                    else pair_removal_stages.get((d, v), "absent")
+                    for c, v in enumerate(matrix.columns)
+                ]
+                for r, d in enumerate(matrix.index)
+            ],
+            dtype=object,
+        )
     else:
-        selected_mask = np.array([
-            [(d, v) in selected_pairs for d in matrix.columns]
-            for v in matrix.index
-        ], dtype=bool)
-
-        removal_stage_matrix = np.array([
+        selected_mask = np.array(
             [
-                "selected" if selected_mask[r, c]
-                else pair_removal_stages.get((d, v), "absent")
-                for c, d in enumerate(matrix.columns)
-            ]
-            for r, v in enumerate(matrix.index)
-        ], dtype=object)
+                [(d, v) in selected_pairs for d in matrix.columns]
+                for v in matrix.index
+            ],
+            dtype=bool,
+        )
+
+        removal_stage_matrix = np.array(
+            [
+                [
+                    "selected"
+                    if selected_mask[r, c]
+                    else pair_removal_stages.get((d, v), "absent")
+                    for c, d in enumerate(matrix.columns)
+                ]
+                for r, v in enumerate(matrix.index)
+            ],
+            dtype=object,
+        )
 
     if single_gray_removed:
-        # 1: Removed (unique shade), 2: Unavailable/Absent
         stage_codes = {
             "zero_variance": 1,
             "correlation": 1,
@@ -1494,20 +1293,24 @@ def shap_tsfel_importance_matrix(
         gray_cmap = ListedColormap(["#a0a0a0", "#000000"])
         vmax_gray = 2.5
     else:
-        # Nuances de gris par étape
         stage_codes = {
             "zero_variance": 1,
             "correlation": 2,
             "boruta": 3,
             "absent": 4,
         }
-        gray_cmap = ListedColormap(["#d3d3d3", "#858585", "#535353", "#000000"])
+        gray_cmap = ListedColormap(
+            ["#d3d3d3", "#858585", "#535353", "#000000"]
+        )
         vmax_gray = 4.5
 
-    gray_values = np.array([
-        [stage_codes.get(stage, stage_codes["absent"]) for stage in row]
-        for row in removal_stage_matrix
-    ], dtype=float)
+    gray_values = np.array(
+        [
+            [stage_codes.get(stage, stage_codes["absent"]) for stage in row]
+            for row in removal_stage_matrix
+        ],
+        dtype=float,
+    )
 
     gray_overlay = np.ma.masked_where(selected_mask, gray_values)
 
@@ -1520,22 +1323,42 @@ def shap_tsfel_importance_matrix(
         vmax=vmax_gray,
     )
 
-    # Ticks and Labels
+    # Axis ticks and orientation labels
     ax.set_xticks(np.arange(n_cols))
     ax.set_yticks(np.arange(n_rows))
 
     if not transpose:
-        ax.set_xticklabels([_wrap_feature_name(str(name), width=18) for name in matrix.columns],
-                           rotation=45, ha="right", rotation_mode="anchor", fontsize=9)
-        ax.set_yticklabels([_wrap_feature_name(str(name), width=28) for name in matrix.index],
-                           fontsize=9)
+        ax.set_xticklabels(
+            [
+                _wrap_feature_name(str(name), width=18)
+                for name in matrix.columns
+            ],
+            rotation=45,
+            ha="right",
+            rotation_mode="anchor",
+            fontsize=9,
+        )
+        ax.set_yticklabels(
+            [_wrap_feature_name(str(name), width=28) for name in matrix.index],
+            fontsize=9,
+        )
         ax.set_xlabel("Raw variables")
         ax.set_ylabel("Extracted TSFEL features")
     else:
-        ax.set_xticklabels([_wrap_feature_name(str(name), width=22) for name in matrix.columns],
-                           rotation=45, ha="right", rotation_mode="anchor", fontsize=9)
-        ax.set_yticklabels([_wrap_feature_name(str(name), width=24) for name in matrix.index],
-                           fontsize=9)
+        ax.set_xticklabels(
+            [
+                _wrap_feature_name(str(name), width=22)
+                for name in matrix.columns
+            ],
+            rotation=45,
+            ha="right",
+            rotation_mode="anchor",
+            fontsize=9,
+        )
+        ax.set_yticklabels(
+            [_wrap_feature_name(str(name), width=24) for name in matrix.index],
+            fontsize=9,
+        )
         ax.set_xlabel("Extracted TSFEL features")
         ax.set_ylabel("Raw variables")
 
@@ -1544,7 +1367,7 @@ def shap_tsfel_importance_matrix(
     ax.grid(which="minor", linewidth=0.25, alpha=0.25)
     ax.tick_params(which="minor", bottom=False, left=False)
 
-    # Group separators & text
+    # Domain separator rules and labels
     if not transpose:
         for group in group_order:
             if group not in displayed_groups:
@@ -1553,8 +1376,18 @@ def shap_tsfel_importance_matrix(
             f_pos, l_pos = min(pos), max(pos)
             if f_pos > 0:
                 ax.axhline(y=f_pos - 0.5, linewidth=1.5, color="black", alpha=0.75)
-            ax.text(0.01, (f_pos + l_pos) / 2.0, group, transform=ax.get_yaxis_transform(),
-                    ha="left", va="center", fontsize=10, fontweight="bold", rotation=90, clip_on=False)
+            ax.text(
+                0.01,
+                (f_pos + l_pos) / 2.0,
+                group,
+                transform=ax.get_yaxis_transform(),
+                ha="left",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                rotation=90,
+                clip_on=False,
+            )
     else:
         for group in group_order:
             if group not in displayed_groups:
@@ -1563,29 +1396,49 @@ def shap_tsfel_importance_matrix(
             f_pos, l_pos = min(pos), max(pos)
             if f_pos > 0:
                 ax.axvline(x=f_pos - 0.5, linewidth=1.5, color="black", alpha=0.75)
-            ax.text((f_pos + l_pos) / 2.0, 0.01, group, transform=ax.get_xaxis_transform(),
-                    ha="center", va="bottom", fontsize=10, fontweight="bold", rotation=0, clip_on=False)
+            ax.text(
+                (f_pos + l_pos) / 2.0,
+                0.01,
+                group,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                fontweight="bold",
+                rotation=0,
+                clip_on=False,
+            )
 
     # ==================================================================
-    # 12. COLORBAR & REMOVAL LEGEND (RIGHT-HAND SIDE)
+    # 12. COLORBAR AND REMOVAL LEGEND
     # ==================================================================
     cbar = fig.colorbar(image, ax=ax, fraction=0.03, pad=0.03)
+
     if normalize:
-        cbar.set_label("Relative cumulative SHAP importance")
+        cbar.set_label("Relative SHAP importance")
     else:
-        cbar.set_label(r"Cumulative SHAP importance ($\sum \mathrm{mean}(|SHAP|)$)")
+        metric_labels = {
+            "l2_norm": r"SHAP importance ($L_2$ norm: $\sqrt{\sum \mathrm{mean}(|\mathrm{SHAP}|)^2}$)",
+            "mean": r"Mean SHAP importance ($\mathrm{mean}(|\mathrm{SHAP}|)$)",
+            "max": r"Peak SHAP importance ($\max |\mathrm{SHAP}|)$",
+            "sum": r"Cumulative SHAP importance ($\sum \mathrm{mean}(|\mathrm{SHAP}|)$)",
+        }
+        cbar.set_label(
+            metric_labels.get(
+                metric_mode,
+                r"Cumulative SHAP importance ($\sum \mathrm{mean}(|\mathrm{SHAP}|)$)",
+            )
+        )
 
     if single_gray_removed:
         removal_legend = [
             Patch(facecolor="#a0a0a0", label="Removed during selection"),
-            # Patch(facecolor="#000000", label="Unavailable combination"),
         ]
     else:
         removal_legend = [
             Patch(facecolor="#d3d3d3", label="Removed: zero variance"),
             Patch(facecolor="#858585", label="Removed: correlation"),
             Patch(facecolor="#535353", label="Removed: Boruta"),
-            # Patch(facecolor="#000000", label="Unavailable combination"),
         ]
 
     cbar.ax.legend(
@@ -1596,18 +1449,18 @@ def shap_tsfel_importance_matrix(
         frameon=False,
         fontsize=8,
         title_fontsize=8,
-        alignment="left",   
+        alignment="left",
     )
+
     if title is not None:
         ax.set_title(title, pad=15)
 
-    # Subplots adjust with extended right margin
     if not transpose:
         fig.subplots_adjust(left=0.25, bottom=0.20, right=0.80, top=0.94)
     else:
         fig.subplots_adjust(left=0.18, bottom=0.26, right=0.80, top=0.94)
 
-    # Save & Export
+    # Save artifacts
     output_directory = Path(folder)
     if savefig:
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -1619,10 +1472,12 @@ def shap_tsfel_importance_matrix(
             transparent=transparent,
         )
         matrix.to_csv(output_directory / f"{effective_filename}.csv")
-        long_table.to_csv(output_directory / f"{effective_filename}_details.csv", index=False)
-        pd.DataFrame(removal_stage_matrix, index=matrix.index, columns=matrix.columns).to_csv(
-            output_directory / f"{effective_filename}_removal_stages.csv"
+        long_table.to_csv(
+            output_directory / f"{effective_filename}_details.csv", index=False
         )
+        pd.DataFrame(
+            removal_stage_matrix, index=matrix.index, columns=matrix.columns
+        ).to_csv(output_directory / f"{effective_filename}_removal_stages.csv")
 
     if show:
         plt.show()
@@ -1634,7 +1489,9 @@ def shap_tsfel_importance_matrix(
         "long_table": long_table,
         "variable_importance": variable_importance,
         "descriptor_info": descriptor_info_df,
-        "removal_stage_matrix": pd.DataFrame(removal_stage_matrix, index=matrix.index, columns=matrix.columns),
+        "removal_stage_matrix": pd.DataFrame(
+            removal_stage_matrix, index=matrix.index, columns=matrix.columns
+        ),
         "transposed": transpose,
         "fig": fig,
         "ax": ax,

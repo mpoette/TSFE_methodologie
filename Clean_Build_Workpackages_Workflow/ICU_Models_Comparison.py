@@ -173,8 +173,8 @@ from utilitaries.figures.icu_stability import run_icu_stability
 
 # Coefficient fits: 400 per fold = 2,000 total, cached for subsequent runs.
 # Set to 0 for fixed-model caterpillars + cached-prediction performance only.
-# STABILITY_BOOTSTRAPS_PER_FOLD = 400
-STABILITY_BOOTSTRAPS_PER_FOLD = 0
+STABILITY_BOOTSTRAPS_PER_FOLD = 400
+# STABILITY_BOOTSTRAPS_PER_FOLD = 0
 STABILITY_TOP_N = 20
 STABILITY_INCLUDE_OUTLIERS_IN_TOP = False
 
@@ -935,6 +935,23 @@ for mode_run in mode_names:
                                         print(
                                             f"Optimal correlation threshold computed and saved: "
                                             f"{corr_threshold:.4f}"
+                                        )
+                                    
+                                    # --------------------------------------------------------
+                                    # Correlation maps & Static vs Temporal synthesis
+                                    # --------------------------------------------------------
+                                    if save_figure.value:
+                                        update_progress(
+                                            "Rendering correlation maps and static synthesis"
+                                        )
+                                        feature_analysis_figures.analyze_pipeline_correlation(
+                                            df=train_init_tsfel,
+                                            source_features=final_features,
+                                            static_features=static_feats,
+                                            exclude_cols=[extract.ID_COL, target_col],
+                                            threshold=corr_threshold, 
+                                            output_dir=str(compare_figs_dir),
+                                            output_format="pdf",
                                         )
 
                                     fold_processing_config["corr_threshold"] = corr_threshold
@@ -2815,82 +2832,59 @@ for mode_run in mode_names:
                                             # Random Forest / XGBoost -> TreeSHAP
                                             # --------------------------------------------------------
 
-                                            if model_name in {
-                                                "Random Forest TSFEL",
-                                                "XGBoost TSFEL",
-                                            }:
+                                            if model_name in {"Random Forest TSFEL", "XGBoost TSFEL"}:
                                                 update_progress(
-                                                    "Computing ensemble TreeSHAP values "
-                                                    "on the holdout"
+                                                    "Computing ensemble TreeSHAP values on the holdout"
                                                 )
 
-                                                interpretability_holdout_results = (
-                                                    explainability_figures.shap_tree_holdout_ensemble(
-                                                        models=(
-                                                            fold_models_for_interpretability
-                                                        ),
-                                                        X_test_per_model=(
-                                                            folds_X_holdout
-                                                        ),
-                                                        feature_names_per_model=(
-                                                            folds_feature_names
-                                                        ),
-                                                        model_name=(
-                                                            model_name
-                                                        ),
-                                                        savefig=(
-                                                            save_figure.value
-                                                        ),
-                                                        folder=(
-                                                            holdout_output_dir
-                                                        ),
-                                                        transparent=(
-                                                            config_transparent
-                                                        ),
+                                                aggregation_modes = ["sum", "signed_l2", "mean"]
+                                                all_holdout_results = {}
+                                                cached_shap = None
+
+                                                for agg_mode in aggregation_modes:
+                                                    res = explainability_figures.shap_tree_holdout_ensemble(
+                                                        models=fold_models_for_interpretability,
+                                                        X_test_per_model=folds_X_holdout,
+                                                        feature_names_per_model=folds_feature_names,
+                                                        model_name=model_name,
+                                                        savefig=save_figure.value,
+                                                        folder=holdout_output_dir,
+                                                        transparent=config_transparent,
+                                                        aggregation_mode=agg_mode,
+                                                        precomputed_shap=cached_shap,  # None au tour 1, réutilisé aux tours 2 et 3
                                                     )
-                                                )
-                                                explainability_figures.shap_tsfel_importance_matrix(
-                                                    interpretability_holdout_results,
-                                                    savefig=True,
-                                                    folder=holdout_output_dir,
-                                                    top_raw_variables=None,
-                                                    top_descriptors=None,
-                                                    feature_trace=feature_trace_path,
-                                                )
+                                                    all_holdout_results[agg_mode] = res
+                                                    if cached_shap is None:
+                                                        cached_shap = res["raw_fold_data"]  # Conserve les explications brutes
 
-                                                explainability_figures.shap_tsfel_importance_matrix(
-                                                    interpretability_holdout_results,
-                                                    filename = "holdout_ensemble_treeshap_tsfel_all_matrix",
-                                                    savefig=True,
-                                                    all_descriptors = True,
-                                                    folder=holdout_output_dir,
-                                                    top_raw_variables=None,
-                                                    top_descriptors=None,
-                                                    feature_trace=feature_trace_path,
-                                                    single_gray_removed=True
-                                                )
+                                                # Matrice TSFEL (travaille directement sur la décomposition détaillée)
+                                                import itertools
 
-                                                explainability_figures.shap_tsfel_importance_matrix(
-                                                    interpretability_holdout_results,
-                                                    savefig=True,
-                                                    folder=holdout_output_dir,
-                                                    top_raw_variables=None,
-                                                    top_descriptors=None,
-                                                    transpose = True,
-                                                    feature_trace=feature_trace_path,
-                                                )
+                                                matrix_variants = [
+                                                    ("holdout_ensemble_treeshap_tsfel_matrix", False),
+                                                    ("holdout_ensemble_treeshap_tsfel_all_matrix", True),
+                                                ]
+                                                metric_modes = ["l2_norm", "sum", "mean", "max"]
+                                                transpositions = [False, True]
 
-                                                explainability_figures.shap_tsfel_importance_matrix(
-                                                    interpretability_holdout_results,
-                                                    filename = "holdout_ensemble_treeshap_tsfel_all_matrix",
-                                                    savefig=True,
-                                                    all_descriptors = True,
-                                                    folder=holdout_output_dir,
-                                                    top_raw_variables=None,
-                                                    top_descriptors=None,
-                                                    transpose = True,
-                                                    feature_trace=feature_trace_path,
-                                                )
+                                                for (base_name, all_desc), mode, transpose_flag in itertools.product(
+                                                    matrix_variants, metric_modes, transpositions
+                                                ):
+                                                    versioned_filename = f"{base_name}_{mode}"
+                                                    explainability_figures.shap_tsfel_importance_matrix(
+                                                        all_holdout_results["sum"],  # Contient la clé "detailed"
+                                                        filename=versioned_filename,
+                                                        metric_mode=mode,
+                                                        savefig=True,
+                                                        folder=holdout_output_dir,
+                                                        all_descriptors=all_desc,
+                                                        single_gray_removed=True,
+                                                        transpose=transpose_flag,
+                                                        top_raw_variables=None,
+                                                        top_descriptors=None,
+                                                        feature_trace=feature_trace_path,
+                                                        show=False,
+                                                    )
 
                                             # --------------------------------------------------------
                                             # Logistic regression + Lasso -> coefficients
