@@ -45,7 +45,7 @@ from utilitaries.postprocessing_utils import (
 
 
 DEFAULT_NAMES_MAP = {
-    "IGS2": "IGS2",
+    "IGS2": "SAPS II",
     "Logistic_Regression_Lasso_TSFEL": "L1-LR",
     "SVC_TSFEL": "SVC",
     "RandomForest_TSFEL": "Random Forest",
@@ -431,7 +431,7 @@ def plot_holdout_metrics_barplot(
         return
 
     default_names_map = {
-        "IGS2": "IGS2",
+        "IGS2": "SAPS II",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
@@ -940,7 +940,7 @@ def generate_comparative_report(
 
     # Predefined model labels fallback mapping (covers all transformer aliases)
     default_names_map = {
-        "IGS2": "IGS2",
+        "IGS2": "SAPS II",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
@@ -1639,3 +1639,365 @@ def plot_paired_bootstrap_forest(
     print(f"[Saved] Figure: {fig_path.name} | Data: {csv_path.name}")
 
     return df_results
+
+
+# ============================================================================
+# LEGACY REPORT FUNCTIONS (restored from the pre-refactor build; still called
+# by ICU_Models_Comparison.py)
+# ============================================================================
+
+def old_generate_comparative_report(
+    configurations,
+    y_true_base=None,
+    save_dir=None,
+    table_format="fancy_grid",
+    evaluation_mode="oof",
+    model_names_map=None,
+    title=...,
+    color_offset = 0,
+
+    output_format: str = "pdf",
+):
+    """Generate comparison tables and collective OOF or Holdout figures.
+
+    The summary table contains fold-level ``mean ± std`` values for OOF mode,
+    or bootstrap ``estimate [CI95%]`` values for holdout mode.
+    ROC, precision-recall, and calibration figures use pooled predictions
+    and the corresponding stored metrics.
+
+    Args:
+        configurations:
+            Iterable of ``(model_name, all_results)`` pairs.
+        y_true_base:
+            Optional common labels. When omitted, labels are read from each
+            configuration (``y_true_oof`` or ``y_true_holdout``).
+        save_dir:
+            Optional output directory.
+        table_format:
+            Console format passed to :func:`tabulate`.
+        evaluation_mode:
+            Either ``"oof"`` to use out-of-fold results (default) or
+            ``"holdout"`` to use independent holdout results.
+        model_names_map:
+            Optional dictionary mapping technical model names to formatted
+            display names (e.g. {"Logistic_Regression_Lasso_TSFEL": "L1-LR"}).
+        title:
+            Optional figure title prefix. Omit (default ``...``) to keep the
+            automatic titles, pass ``None`` to remove them, or provide a custom
+            string prepended to each subtitle.
+
+        output_format: Figure format: ``"pdf"`` (default) or ``"png"`` at 300 DPI.
+
+    Returns:
+        A pandas DataFrame containing formatted metric values.
+    """
+    if evaluation_mode not in ("oof", "holdout"):
+        raise ValueError(
+            f"evaluation_mode must be 'oof' or 'holdout', got {evaluation_mode!r}."
+        )
+
+    configurations = list(configurations)
+
+    # ---- Display Names Mapping ----
+    # Default mapping when no explicit dictionary is provided
+    default_names_map = {
+        "IGS2": "SAPS II",
+        "Logistic_Regression_Lasso_TSFEL": "L1-LR",  # or "Logistic Regression"
+        "SVC_TSFEL": "SVC",
+        "RandomForest_TSFEL": "Random Forest",
+        "XGBoost_TSFEL": "XGBoost",
+        "InceptionTimeModified": "Inception Time",
+        "LstmTimeModified": "LSTM",
+        "VanillaTransformer": "Vanilla Transformer",
+    }
+    
+    # Merge any user-provided overrides
+    names_map = default_names_map.copy()
+    if model_names_map is not None:
+        names_map.update(model_names_map)
+
+    predefined_order = [
+        "IGS2",
+        "Logistic_Regression_Lasso_TSFEL",
+        "SVC_TSFEL",
+        "RandomForest_TSFEL",
+        "XGBoost_TSFEL",
+        "InceptionTimeModified",
+        "LstmTimeModified",
+    ]
+
+    def get_sort_key(item):
+        """Build a stable model-ordering key.
+
+        Args:
+            item: A ``(model_name, configuration)`` pair.
+
+        Returns:
+            A tuple that places predefined models first and sorts all others
+            alphabetically.
+        """
+        model_name = item[0]
+        if model_name in predefined_order:
+            return 0, predefined_order.index(model_name)
+        return 1, model_name
+
+    def require_key(config, key, model_name):
+        """Retrieve a required result value with model-specific diagnostics.
+
+        Args:
+            config: Model result mapping.
+            key: Required mapping key.
+            model_name: Model name included in error messages.
+
+        Returns:
+            The value stored under ``key``.
+
+        Raises:
+            KeyError: If ``key`` is absent from ``config``.
+        """
+        if key not in config:
+            raise KeyError(
+                f"{model_name}: required result key '{key}' is missing."
+            )
+        return config[key]
+
+    # ---- Key mapping depending on mode ----
+    if evaluation_mode == "oof":
+        y_true_key = "y_true_oof"
+        probas_key = "probas_oof"
+        metric_suffix = ""  # e.g. "auc_oof", "auc_mean"
+    else:
+        y_true_key = "y_true_holdout"
+        probas_key = "probas_holdout"
+        metric_suffix = "_holdout"  # not used for bootstrap, see below
+
+    def format_metric(config, metric_name, model_name):
+        """Format metric value: mean±std for OOF, estimate[CI] for holdout."""
+        if evaluation_mode == "oof":
+            mean_value = float(
+                require_key(config, f"{metric_name}_mean", model_name)
+            )
+            std_value = float(
+                require_key(config, f"{metric_name}_std", model_name)
+            )
+            return f"{mean_value:.3f} ± {std_value:.3f}"
+        else:
+            bootstrap = require_key(config, "bootstrap_holdout", model_name)
+            summary = bootstrap["summary"]
+            entry = summary[metric_name]
+            estimate = float(entry["estimate"])
+            ci_lower = float(entry["ci_lower"])
+            ci_upper = float(entry["ci_upper"])
+            return f"{estimate:.3f} [{ci_lower:.3f}, {ci_upper:.3f}]"
+
+    configurations = sorted(configurations, key=get_sort_key)
+    default_colors = sns.color_palette(
+        "tab10",
+        n_colors=max(len(configurations), 10),
+    )
+
+    results = {}
+    plot_data_list = []
+    for idx, (name, config) in enumerate(configurations):
+        # Retrieve the normalized display name
+        display_name = names_map.get(name, name)
+
+        probas = np.asarray(
+            require_key(config, probas_key, name),
+            dtype=float,
+        ).ravel()
+
+        current_y = (
+            y_true_base
+            if y_true_base is not None
+            else require_key(config, y_true_key, name)
+        )
+
+        y_true = np.asarray(current_y, dtype=int).ravel()
+
+        if probas.shape[0] != y_true.shape[0]:
+            raise ValueError(
+                f"{name}: probas and y_true have different "
+                f"lengths: {len(probas)} != {len(y_true)}."
+            )
+
+        color = config.get(
+            "color",
+            default_colors[idx % len(default_colors)],
+        )
+
+        constant_predictions = np.all(probas == probas[0])
+
+        if constant_predictions:
+            prevalence = float(np.mean(y_true))
+            fpr = np.array([0.0, 1.0])
+            tpr = np.array([0.0, 1.0])
+            precision = np.array([1.0, prevalence, prevalence])
+            recall = np.array([0.0, 0.0, 1.0])
+            fop = np.array([prevalence])
+            mpv = np.array([float(probas[0])])
+        else:
+            fpr, tpr, _ = roc_curve(y_true, probas)
+            precision, recall, _ = precision_recall_curve(y_true, probas)
+            fop, mpv = calibration_curve(
+                y_true, probas, n_bins=10, strategy="uniform"
+            )
+
+        # ---- Get AUC/AUPRC for labels ----
+        if evaluation_mode == "oof":
+            auc_val = float(require_key(config, "auc_oof", name))
+            auprc_val = float(require_key(config, "auprc_oof", name))
+            intercept_val = float(require_key(config, "calibration_intercept_oof", name))
+            slope_val = float(require_key(config, "calibration_slope_oof", name))
+            ici_val = float(require_key(config, "ici_oof", name))
+        else:
+            bootstrap = require_key(config, "bootstrap_holdout", name)
+            summary = bootstrap["summary"]
+            auc_val = float(summary["auc"]["estimate"])
+            auprc_val = float(summary["auprc"]["estimate"])
+            cal_stats = get_calibration_stats(probas, y_true)
+            intercept_val = cal_stats["intercept"]
+            slope_val = cal_stats["slope"]
+            ici_val = cal_stats["ici"]
+
+        # ---- Results table ----
+        metrics_dict = {
+            "AUC ROC": format_metric(config, "auc", name),
+            "AUPRC": format_metric(config, "auprc", name),
+            "F1-Score": format_metric(config, "f1_score" if evaluation_mode == "oof" else "f1", name),
+            "MCC": format_metric(config, "mcc", name),
+            "Brier": format_metric(config, "brier", name),
+            "Intercept": format_metric(config, "calibration_intercept", name),
+            "Slope": format_metric(config, "calibration_slope", name),
+            "ICI": format_metric(config, "ici", name),
+            "E90": format_metric(config, "e90", name),
+        }
+
+        # Use display_name as the key in the final table
+        results[display_name] = metrics_dict
+
+        label_prefix = "OOF" if evaluation_mode == "oof" else "Holdout"
+        prevalence = float(np.mean(y_true))
+        plot_data_list.append({
+            "name": display_name,  # Use the display name in plot legends
+            "color": color,
+            "fpr": fpr,
+            "tpr": tpr,
+            "auc_val": auc_val,
+            "recall": recall,
+            "precision": precision,
+            "auprc_val": auprc_val,
+            "fop": fop,
+            "mpv": mpv,
+            "prevalence" : prevalence,
+            "intercept_val": intercept_val,
+            "slope_val": slope_val,
+            "ici_val": ici_val,
+            "label_prefix": label_prefix,
+        })
+
+    # ---- Mode label (used for titles) ----
+    mode_label = "OOF" if evaluation_mode == "oof" else "Holdout"
+
+    # ---- Figures ----
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(15, 5),
+        layout="constrained",
+    )
+
+    plot_comparative_axes(
+        plot_data_list=plot_data_list,
+        axes=axes,
+        show_legend=True,
+    )
+
+    if title is not None:
+        fig.suptitle(
+            f"{title} — {mode_label} comparison",
+            fontsize=14,
+            fontweight="bold",
+        )
+
+    # ---- Table ----
+    results_df = pd.DataFrame(results).T
+    print(f"\n=== {mode_label} PERFORMANCE COMPARISON TABLE ===")
+    print(tabulate(results_df, headers="keys", tablefmt=table_format, showindex=True))
+
+    if save_dir is not None:
+        output_path = Path(save_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        save_figure_file(
+            fig,
+            output_path / f"collective_performance_{mode_label.lower()}",
+            output_format,
+            bbox_inches="tight",
+        )
+
+        with open(
+            output_path / f"results_table_{mode_label.lower()}.tex",
+            "w",
+            encoding="utf-8",
+        ) as output_file:
+            output_file.write(
+                tabulate(
+                    results_df,
+                    headers="keys",
+                    tablefmt="latex_booktabs",
+                    showindex=True,
+                )
+            )
+
+    # ---- Holdout barplot with CI ----
+    fig_bar = None
+    if evaluation_mode == "holdout":
+        fig_bar = plot_holdout_metrics_barplot(
+            configurations=configurations,
+            save_dir=save_dir,
+            model_names_map = model_names_map,
+            color_offset = color_offset
+        , output_format=output_format)
+
+    plt.show()
+    plt.close(fig)
+
+    if fig_bar is not None:
+        plt.close(fig_bar)
+    
+    return results_df
+
+
+def generate_subgroup_comparative_report(
+    probas,
+    y_true,
+    subgroup_labels,
+    subgroup_names=None,
+    n_bootstrap=2000,
+    confidence_level=0.95,
+    seed=42,
+    save_dir=None,
+    table_format="fancy_grid",
+    model_names_map=None,
+    title = ...
+):
+    """Generate a comparative holdout report across patient subgroups."""
+    subgroup_results = compute_subgroup_holdout_metrics(
+        probas=probas,
+        y_true=y_true,
+        subgroup_labels=subgroup_labels,
+        subgroup_names=subgroup_names,
+        n_bootstrap=n_bootstrap,
+        confidence_level=confidence_level,
+        seed=seed,
+    )
+
+    return generate_comparative_report(
+        configurations=subgroup_results,
+        save_dir=save_dir,
+        table_format=table_format,
+        evaluation_mode="holdout",
+        model_names_map=model_names_map,
+        title = title,
+    )

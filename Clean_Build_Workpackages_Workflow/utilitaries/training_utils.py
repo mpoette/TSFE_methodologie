@@ -757,6 +757,36 @@ def fit_model_by_name(
     )
 
 
+def dl_validation_auc(model_name, model, X_val, y_val):
+    """Compute the ROC-AUC of a fitted deep-learning model on a given set.
+
+    Used for the learning curve when early stopping and temperature scaling
+    were fitted on the held-out calibration split instead of the CV
+    validation fold.
+
+    Args:
+        model_name:
+            Internal deep-learning model identifier.
+        model:
+            Fitted PyTorch model returned by ``fit_model_by_name``.
+        X_val:
+            Validation tensor of shape (N, T, F).
+        y_val:
+            Validation labels.
+
+    Returns:
+        The ROC-AUC on ``(X_val, y_val)``.
+    """
+    predictors = {
+        "InceptionTimeModified": predict_proba,
+        "LstmTimeModified": predict_proba_lstm,
+        "VanillaTransformerModified": predict_proba_vt,
+    }
+    temperature = float(getattr(model, "temperature_", 1.0))
+    probas = predictors[model_name](model, np.asarray(X_val), T=temperature)
+    return roc_auc_score(np.asarray(y_val).reshape(-1), np.asarray(probas).reshape(-1))
+
+
 # ============================================================================
 # POST-TRAINING CALIBRATION
 # ============================================================================

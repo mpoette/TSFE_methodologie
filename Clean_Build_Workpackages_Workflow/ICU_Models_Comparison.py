@@ -388,14 +388,14 @@ for mode_run in mode_names:
                                 df_merged = pl.scan_parquet(_path)
                                 logger.debug(
                                     "LOG df_merged unique encounterIds: %d",
-                                    df_merged.collect().select("encounterId").unique().shape[0],
+                                    df_merged.select(pl.col("encounterId").n_unique()).collect().item(),
                                 )
                                 if not keep_duplicates:
                                     _path = os.path.join(dataset_path, 'df_static_full_clean.parquet')
                                     df_without_anomalies = pl.scan_parquet(_path)
                                     df_merged = extract.remove_duplicates(df_without_anomalies, df_merged, mode_duplicates == "prio_last")
                                 else:
-                                    df_merged.collect()
+                                    df_merged = df_merged = df_merged.collect()
                                 logger.debug(
                                     "LOG df_merged without duplicates unique encounterIds: %d",
                                     df_merged.select("encounterId").unique().shape[0],
@@ -646,7 +646,7 @@ for mode_run in mode_names:
                                     if extract_tsfel.value or not os.path.exists(raw_global_tsfel_path):
                                         print("Starting global TSFEL extraction for all patients")
                                         tsfel_features = [target_label for target_label in final_features if target_label not in static_feats]
-                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col, n_jobs = n_jobs)
+                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col, n_jobs = n_jobs, checkpoint_dir=str(raw_global_tsfel_path) + '.chunks')
                                         static_global_df = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
     
                                         # robustness verification
@@ -671,7 +671,12 @@ for mode_run in mode_names:
                                         )
     
                                         complete_tsfel_df = tsfel_global_df.join(static_global_df, on=extract.ID_COL, how='inner')
-                                        complete_tsfel_df.write_parquet(raw_global_tsfel_path)
+                                        # Atomic write: a crash during the write never leaves a truncated cache.
+                                        import shutil as _shutil
+                                        _tmp_tsfel_path = str(raw_global_tsfel_path) + '.tmp'
+                                        complete_tsfel_df.write_parquet(_tmp_tsfel_path)
+                                        os.replace(_tmp_tsfel_path, raw_global_tsfel_path)
+                                        _shutil.rmtree(str(raw_global_tsfel_path) + '.chunks', ignore_errors=True)
                                         print('Global extraction saved')
                                     else:
                                         complete_tsfel_df = pl.read_parquet(raw_global_tsfel_path)
@@ -1536,7 +1541,18 @@ for mode_run in mode_names:
                                             FC_UNITS_MAP = {'none': None, '64': (64,), '128': (128,), '256': (256,), '128_64': (128, 64), '256_128': (256, 128)}
                                             if 'fc_units' in parameters and isinstance(parameters['fc_units'], str):
                                                 parameters['fc_units'] = FC_UNITS_MAP[parameters['fc_units']]
-                                            final_model_to_save, train_auc, val_auc = training.fit_model_by_name(model_name=config_models.models_name, X_train=x_subset, y_train=y_subset, X_val=X_val_np, y_val=y_val_np, seed=seed, is_final_palier=is_final_stage, save_path=current_save_path, lasso_args=lasso_args, **parameters)
+                                            # Deep-learning models use X_val for early stopping and temperature scaling.
+                                            # Use the held-out calibration split so the CV validation fold (used for the
+                                            # out-of-fold metrics) is never seen during training or calibration.
+                                            if is_dl_model and X_calib is not None:
+                                                X_fit_val, y_fit_val = X_calib, y_calib
+                                            else:
+                                                X_fit_val, y_fit_val = X_val_np, y_val_np
+                                                if is_dl_model:
+                                                    logger.warning('No calibration split for %s: early stopping and temperature scaling use the CV validation fold.', config_models.models_name)
+                                            final_model_to_save, train_auc, val_auc = training.fit_model_by_name(model_name=config_models.models_name, X_train=x_subset, y_train=y_subset, X_val=X_fit_val, y_val=y_fit_val, seed=seed, is_final_palier=is_final_stage, save_path=current_save_path, lasso_args=lasso_args, **parameters)
+                                            if is_dl_model and X_calib is not None:
+                                                val_auc = training.dl_validation_auc(config_models.models_name, final_model_to_save, X_val_np, y_val_np)
                                             lc_train_scores[training_fold_index, fraction_index] = train_auc
                                             lc_val_scores[training_fold_index, fraction_index] = val_auc
                                             if is_final_stage and (not is_dl_model) and (final_model_to_save is not None):
@@ -3046,7 +3062,11 @@ for mode_run in mode_names:
                                         print("[COMPARISON] Computing ICU GHM labels...", flush=True)
                                         
                                         # 1. Extract the first list element if it's a List(String), or direct conversion
-                                        icu_ghm_series = holdout_static_aligned["icu_ghm"]
+                                        if "icu_ghm" in holdout_static_aligned.columns:
+                                            icu_ghm_series = holdout_static_aligned["icu_ghm"]
+                                        else:
+                                            print("[COMPARISON] Column icu_ghm not found: GHM subgroup labelled Other.", flush=True)
+                                            icu_ghm_series = pl.Series("icu_ghm", [None] * holdout_static_aligned.height, dtype=pl.String)
                                         
                                         if icu_ghm_series.dtype == pl.List:
                                             icu_ghm_series = icu_ghm_series.list.get(0)
@@ -3109,6 +3129,10 @@ for mode_run in mode_names:
                                             print(f"[COMPARISON] Model {model_name}: probas shape={probas.shape}, y_true shape={y_true.shape}", flush=True)
 
                                             for sg in subgroup_configs:
+                                                matching = set(np.unique(np.asarray(sg['labels'], dtype=object))) & set(sg['names'])
+                                                if len(matching) < 2:
+                                                    print(f"[COMPARISON]   -> Subgroup {sg['name']} skipped: fewer than 2 expected categories in the data.", flush=True)
+                                                    continue
                                                 print(f"[COMPARISON]   -> Subgroup: {sg['name']}", flush=True)
                                                 comparison_figures.generate_subgroup_comparative_report(
                                                     probas=probas,

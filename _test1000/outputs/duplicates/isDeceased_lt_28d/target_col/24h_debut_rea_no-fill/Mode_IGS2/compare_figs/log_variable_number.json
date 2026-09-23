@@ -1,0 +1,30 @@
+{
+    "initial_features": {
+        "dynamic": 1364,
+        "static": 9,
+        "total": 1373
+    },
+    "after_variance": {
+        "dynamic": 1215,
+        "static": 9,
+        "total": 1224,
+        "variance_threshold": 0.0
+    },
+    "after_correlation": {
+        "dynamic": 307,
+        "static": 9,
+        "total": 316,
+        "correlation_threshold": 0.7000000000000001
+    },
+    "boruta": {
+        "perc": 90,
+        "max_iter": 100,
+        "folds": {
+            "1": {
+                "dynamic": 33,
+                "static": 9,
+                "total": 42
+            }
+        }
+    }
+}

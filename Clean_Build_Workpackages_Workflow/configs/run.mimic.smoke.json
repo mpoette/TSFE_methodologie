@@ -1,0 +1,40 @@
+{
+  "seed": 42,
+  "modes": ["smoke_wp1_mimic"],
+  "run_comparison": true,
+  "run_training": true,
+  "run_lasso": true,
+  "run_interpretability": true,
+  "run_test": true,
+  "figure_output_format": "pdf",
+  "population": "Tout",
+  "save_figure": true,
+  "transparent": false,
+  "dataset_path": "/data2/poette.m/external_db/data_mimic/full",
+  "target_columns": {
+    "Survie à 28 jours": "isDeceased_lt_28d"
+  },
+  "keep_duplicates": true,
+  "profiles": {
+    "smoke_wp1_mimic": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    },
+    "wp1_mimic": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["VanillaTransformerModified", "InceptionTimeModified", "XGBoost TSFEL", "LstmTimeModified", "RandomForest TSFEL", "SVC TSFEL", "Logistic Regression Lasso TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false, true],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    }
+  }
+}

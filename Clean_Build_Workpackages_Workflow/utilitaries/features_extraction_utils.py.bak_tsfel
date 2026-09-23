@@ -1205,21 +1205,13 @@ def extract_tsfel_per_patient(
     target_col: str,
     n_jobs: int = 8,
     sampling_interval_hours: float = 1.0,
-    checkpoint_dir: str | os.PathLike | None = None,
-    chunk_size: int = 1000,
 ) -> pl.DataFrame:
     """Extract TSFEL features independently for each patient or ICU stay.
 
-    Patients are processed in chunks. Each chunk is dispatched to a fresh pool
-    of Joblib workers and its per-patient results are concatenated into a
-    single DataFrame, which bounds the memory held by the parent process (tens
-    of thousands of one-row, very wide DataFrames otherwise exhaust RAM). When
-    ``checkpoint_dir`` is given, each finished chunk is written atomically to
-    disk so that an interrupted extraction resumes at the first missing chunk.
+    The input is sorted chronologically, partitioned by patient, and processed
+    in parallel using Joblib generator mode to minimize peak memory consumption.
     Fractal features are excluded, along with Histogram mode and MFCC spectral
-    features. All other spectral features are retained. Row order (patients
-    sorted by ``patient_col``) and column values are unchanged compared with a
-    single-pass extraction.
+    features. All other spectral features are retained.
 
     Args:
         df: Patient time-series dataset.
@@ -1232,11 +1224,6 @@ def extract_tsfel_per_patient(
         sampling_interval_hours: Time between two consecutive observations, in
             hours. Defaults to 1.0 (one observation per hour). It is converted
             to hertz before being passed to TSFEL: ``fs = 1 / (hours * 3600)``.
-        checkpoint_dir: Optional directory used to store one parquet file per
-            finished chunk. Checkpoints are discarded automatically when the
-            extraction settings or the patient list differ from the stored
-            metadata.
-        chunk_size: Number of patients per chunk.
 
     Returns:
         A DataFrame containing one row per patient and one column per
@@ -1246,11 +1233,6 @@ def extract_tsfel_per_patient(
         ValueError: If the input is empty, required columns are missing, no
             feature column is provided, or no patient group is processed.
     """
-    import gc
-    import json
-    import shutil
-    from pathlib import Path
-
     df = _ensure_dataframe(df)
 
     if df.is_empty():
@@ -1316,6 +1298,11 @@ def extract_tsfel_per_patient(
     # MFCC is excluded because it reduces explainability.
     config["spectral"].pop("MFCC", None)
 
+    patient_groups = df.partition_by(
+        patient_col,
+        maintain_order=True,
+    )
+
     # Log feature columns passed to TSFEL to detect static features leaking in.
     logger.info(
         "TSFEL feature_cols (%d columns): %s",
@@ -1323,181 +1310,41 @@ def extract_tsfel_per_patient(
         feature_cols,
     )
 
-    patient_ids = (
-        df.get_column(patient_col)
-        .unique(maintain_order=True)
-        .to_list()
-    )
-    n_patients = len(patient_ids)
-    if n_patients == 0:
-        raise ValueError(
-            "No patient group was processed during TSFEL extraction."
-        )
-
-    chunk_size = max(1, int(chunk_size))
-    chunks = [
-        patient_ids[start:start + chunk_size]
-        for start in range(0, n_patients, chunk_size)
-    ]
-
     logger.debug(
-        "Starting parallel TSFEL extraction for %d patients in %d chunk(s) (n_jobs=%d)",
-        n_patients,
-        len(chunks),
+        "Starting parallel TSFEL extraction for %d patients (n_jobs=%d)",
+        len(patient_groups),
         n_jobs,
     )
 
-    # ------------------------------------------------------------------
-    # Checkpoint directory and metadata
-    # ------------------------------------------------------------------
-    checkpoint_path = Path(checkpoint_dir) if checkpoint_dir is not None else None
-
-    def _chunk_file(chunk_index):
-        return checkpoint_path / f"chunk_{chunk_index:05d}.parquet"
-
-    if checkpoint_path is not None:
-        metadata = {
-            "feature_cols": [str(c) for c in feature_cols],
-            "patient_col": str(patient_col),
-            "time_col": str(time_col),
-            "target_col": str(target_col),
-            "sampling_interval_hours": float(sampling_interval_hours),
-            "n_patients": n_patients,
-            "chunk_size": chunk_size,
-            "first_ids": [str(x) for x in patient_ids[:5]],
-            "last_ids": [str(x) for x in patient_ids[-5:]],
-        }
-        metadata_file = checkpoint_path / "meta.json"
-        if checkpoint_path.exists():
-            try:
-                previous_metadata = json.loads(metadata_file.read_text())
-            except Exception:
-                previous_metadata = None
-            if previous_metadata != metadata:
-                logger.warning(
-                    "TSFEL checkpoints in %s do not match the current extraction "
-                    "settings and will be discarded.",
-                    checkpoint_path,
-                )
-                shutil.rmtree(checkpoint_path, ignore_errors=True)
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
-        metadata_file.write_text(json.dumps(metadata))
-
-    # ------------------------------------------------------------------
-    # Identify chunks that still need to be computed
-    # ------------------------------------------------------------------
-    already_done = 0
-    pending_chunks = []
-    for chunk_index, chunk_ids in enumerate(chunks):
-        if checkpoint_path is not None:
-            chunk_file = _chunk_file(chunk_index)
-            if chunk_file.exists():
-                try:
-                    stored_ids = (
-                        pl.read_parquet(chunk_file, columns=[patient_col])
-                        .get_column(patient_col)
-                        .to_list()
-                    )
-                    if stored_ids and {str(x) for x in stored_ids} <= {str(x) for x in chunk_ids}:
-                        already_done += len(chunk_ids)
-                        continue
-                except Exception:
-                    pass
-                chunk_file.unlink(missing_ok=True)
-        pending_chunks.append(chunk_index)
-
-    if already_done:
-        print(
-            f"[TSFEL] Resuming from checkpoints: {already_done}/{n_patients} "
-            f"patients already extracted ({len(chunks) - len(pending_chunks)}/{len(chunks)} chunks).",
-            flush=True,
+    # Placing tqdm directly over patient_groups displays the progress bar immediately as tasks are submitted
+    results_generator = Parallel(n_jobs=n_jobs, return_generator=True)(
+        delayed(_process_single_patient)(
+            patient_df=patient_group,
+            config=config,
+            feature_cols=feature_cols,
+            patient_col=patient_col,
+            target_col=target_col,
+            sampling_frequency_hz=sampling_frequency_hz,
         )
-
-    def _restart_workers():
-        # Fresh worker processes for each chunk release memory accumulated by
-        # long-lived Loky workers.
-        try:
-            from joblib.externals.loky import get_reusable_executor
-
-            get_reusable_executor().shutdown(wait=True)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Chunked extraction
-    # ------------------------------------------------------------------
-    in_memory_chunks = []
-    progress_bar = tqdm(
-        total=n_patients,
-        initial=already_done,
-        desc="Parallel TSFEL extraction",
-        unit="patient",
+        for patient_group in tqdm(
+            patient_groups,
+            desc="Parallel TSFEL extraction",
+            unit="patient",
+        )
     )
-    try:
-        for chunk_index in pending_chunks:
-            chunk_ids = chunks[chunk_index]
-            patient_groups = (
-                df.filter(pl.col(patient_col).is_in(chunk_ids))
-                .partition_by(patient_col, maintain_order=True)
-            )
 
-            results_generator = Parallel(n_jobs=n_jobs, return_generator=True)(
-                delayed(_process_single_patient)(
-                    patient_df=patient_group,
-                    config=config,
-                    feature_cols=feature_cols,
-                    patient_col=patient_col,
-                    target_col=target_col,
-                    sampling_frequency_hz=sampling_frequency_hz,
-                )
-                for patient_group in patient_groups
-            )
+    # Materialize the generator directly into a list
+    results = list(results_generator)
 
-            chunk_results = []
-            for patient_result in results_generator:
-                chunk_results.append(patient_result)
-                progress_bar.update(1)
-            del patient_groups
-
-            if chunk_results:
-                # One vertical concatenation per chunk keeps memory bounded.
-                chunk_df = pl.concat(chunk_results, how="vertical")
-                del chunk_results
-
-                if checkpoint_path is not None:
-                    chunk_file = _chunk_file(chunk_index)
-                    temporary_file = chunk_file.with_name(chunk_file.name + ".tmp")
-                    chunk_df.write_parquet(temporary_file)
-                    os.replace(temporary_file, chunk_file)
-                    del chunk_df
-                else:
-                    in_memory_chunks.append(chunk_df)
-
-            _restart_workers()
-            gc.collect()
-    finally:
-        progress_bar.close()
-
-    # ------------------------------------------------------------------
-    # Final assembly (same patient order as a single-pass extraction)
-    # ------------------------------------------------------------------
-    if checkpoint_path is not None:
-        chunk_frames = [
-            pl.read_parquet(_chunk_file(chunk_index))
-            for chunk_index in range(len(chunks))
-            if _chunk_file(chunk_index).exists()
-        ]
-    else:
-        chunk_frames = in_memory_chunks
-
-    if not chunk_frames:
+    if not results:
         raise ValueError(
             "No patient group was processed during TSFEL extraction."
         )
 
+    # Single vertical concatenation of all processed patient DataFrames.
     return pl.concat(
-        chunk_frames,
-        how="vertical_relaxed",
+        results,
+        how="vertical",
     )
 
 # ============================================================================

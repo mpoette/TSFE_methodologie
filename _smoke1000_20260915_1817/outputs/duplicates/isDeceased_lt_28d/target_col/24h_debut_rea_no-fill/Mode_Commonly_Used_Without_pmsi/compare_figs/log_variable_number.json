@@ -1,0 +1,58 @@
+{
+    "initial_features": {
+        "dynamic": 3224,
+        "static": 9,
+        "total": 3233
+    },
+    "after_variance": {
+        "dynamic": 2738,
+        "static": 9,
+        "total": 2747,
+        "variance_threshold": 0.0
+    },
+    "after_correlation": {
+        "dynamic": 639,
+        "static": 9,
+        "total": 648,
+        "correlation_threshold": 0.7000000000000001
+    },
+    "boruta": {
+        "perc": 90,
+        "max_iter": 100,
+        "folds": {
+            "1": {
+                "dynamic": 84,
+                "static": 9,
+                "total": 93
+            },
+            "2": {
+                "dynamic": 86,
+                "static": 9,
+                "total": 95
+            },
+            "3": {
+                "dynamic": 85,
+                "static": 9,
+                "total": 94
+            },
+            "4": {
+                "dynamic": 103,
+                "static": 9,
+                "total": 112
+            },
+            "5": {
+                "dynamic": 90,
+                "static": 9,
+                "total": 99
+            }
+        },
+        "frequency_threshold": 0.6000000000000001,
+        "minimum_folds_required": 4,
+        "final": {
+            "dynamic": 60,
+            "static": 9,
+            "total": 69,
+            "loaded_from_cache": true
+        }
+    }
+}

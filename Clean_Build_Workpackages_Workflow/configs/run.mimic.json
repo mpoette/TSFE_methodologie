@@ -1,0 +1,72 @@
+{
+  "seed": 42,
+  "modes": [
+    "wp1_mimic"
+  ],
+  "run_comparison": false,
+  "run_training": true,
+  "run_lasso": true,
+  "run_interpretability": false,
+  "run_test": true,
+  "figure_output_format": "pdf",
+  "population": "Tout",
+  "save_figure": true,
+  "transparent": false,
+  "dataset_path": "/data2/poette.m/external_db/data_mimic/full",
+  "target_columns": {
+    "Survie à 28 jours": "isDeceased_lt_28d"
+  },
+  "keep_duplicates": true,
+  "profiles": {
+    "wp1_mimic": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": [
+        "Survie à 28 jours"
+      ],
+      "model_names": [
+        "XGBoost TSFEL",
+        "Logistic Regression Lasso TSFEL",
+        "RandomForest TSFEL",
+        "VanillaTransformerModified",
+        "InceptionTimeModified",
+        "LstmTimeModified",
+        "SVC TSFEL"
+      ],
+      "stratify_modes": [
+        "target_col"
+      ],
+      "optuna_run_options": [
+        true
+      ],
+      "feature_modes": [
+        "Mode Commonly Used Without pmsi"
+      ],
+      "balancing_methods": [
+        "Aucune Méthode"
+      ],
+      "mode_duplicates": "prio_first"
+    },
+    "compare_mimic": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": [
+        "Survie à 28 jours"
+      ],
+      "model_names": [
+        "XGBoost TSFEL"
+      ],
+      "stratify_modes": [
+        "target_col"
+      ],
+      "optuna_run_options": [
+        true
+      ],
+      "feature_modes": [
+        "Mode Commonly Used Without pmsi"
+      ],
+      "balancing_methods": [
+        "Aucune Méthode"
+      ],
+      "mode_duplicates": "prio_first"
+    }
+  }
+}

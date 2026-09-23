@@ -792,15 +792,18 @@ def generate_correlation_analysis(
     logger.info("=" * 60)
 
     df_pl = pl.from_pandas(numeric_df, include_index=False)
-    analyze_pipeline_correlation(
+    afficher_correlation_par_blocs(
         df=df_pl,
         source_features=source_features,
         static_features=static_features,
         threshold=final_threshold,
         output_dir=output_folder,
-        dpi=block_heatmap_dpi,
-        output_format=output_format,
-    )
+        corr_matrix=corr_matrix_pd,
+        max_cross_heatmaps=max_cross_heatmaps,
+        block_heatmap_dpi=block_heatmap_dpi,
+        show_colorbar=show_colorbar,
+        annotate_static_summary=annotate_static_summary,
+    output_format=output_format)
 
     # Keep the global map only when its size remains safe. Produce both an
     # unmasked and a threshold-masked version in the corresponding folders.

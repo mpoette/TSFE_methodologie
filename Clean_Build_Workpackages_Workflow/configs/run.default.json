@@ -24,7 +24,7 @@
       "target_labels": ["Survie à 28 jours"],
       "model_names": ["IGS2"],
       "stratify_modes": ["target_col"],
-      "optuna_run_options": [false],
+      "optuna_run_options": [true],
       "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
       "balancing_methods": ["Aucune Méthode"],
       "mode_duplicates": "prio_first"
