@@ -3,10 +3,10 @@
   "modes": [
     "wp1_mimic"
   ],
-  "run_comparison": false,
+  "run_comparison": true,
   "run_training": true,
   "run_lasso": true,
-  "run_interpretability": false,
+  "run_interpretability": true,
   "run_test": true,
   "figure_output_format": "pdf",
   "population": "Tout",

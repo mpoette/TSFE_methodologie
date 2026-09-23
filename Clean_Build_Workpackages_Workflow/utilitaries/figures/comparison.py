@@ -4,6 +4,7 @@ from utilitaries.figures.output import save_figure as save_figure_file
 
 import functools
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 import pandas as pd
 from tabulate import tabulate
 import polars as pl
@@ -1640,7 +1641,213 @@ def plot_paired_bootstrap_forest(
 
     return df_results
 
+# -----------------------------------------------------------------------------
+# To paste into utilitaries/figures/comparison.py, after plot_paired_bootstrap_forest.
+# Requires the imports already present in comparison.py (numpy, pandas,
+# matplotlib.pyplot, pathlib.Path, typing) plus:
+from matplotlib.transforms import blended_transform_factory
+# -----------------------------------------------------------------------------
 
+
+def _format_p_jmir(p: float) -> str:
+    """Formats a two-sided P value in JMIR style, with an italic P."""
+    if p < 0.001:
+        return r"$P$<.001"
+    if p < 0.01:
+        return r"$P$=" + f"{p:.3f}".lstrip("0")
+    if p >= 0.995:
+        return r"$P$>.99"
+    return r"$P$=" + f"{p:.2f}".lstrip("0")
+
+
+def _format_p_column(p: float) -> str:
+    """P value for a table column headed by an italic P (JMIR style, no leading zero)."""
+    if p < 0.001:
+        return "<.001"
+    if p < 0.01:
+        return f"{p:.3f}".lstrip("0")
+    if p >= 0.995:
+        return ">.99"
+    return f"{p:.2f}".lstrip("0")
+
+
+def _format_delta(x: float) -> str:
+    """Formats a difference with 3 decimals and a typographic minus sign."""
+    s = f"{x:.3f}"
+    if s == "-0.000":
+        s = "0.000"
+    return s.replace("-", "\u2212")
+
+
+def plot_paired_bootstrap_forest_publication(
+    models_dict: Dict[str, Dict[str, np.ndarray]],
+    output_dir: Union[str, Path],
+    pairs: List[Tuple[str, str]],
+    names_map: Optional[Dict[str, str]] = None,
+    save_filename: str = "fig_paired_bootstrap_forest.pdf",
+    figsize: Tuple[float, float] = (7.2, 6.4),
+    base_fontsize: float = 9.0,
+    show_plot: bool = True,
+) -> Optional[pd.DataFrame]:
+    """Publication forest plot of paired bootstrap differences between models.
+
+    Each pair is given as (first, second). For every metric the difference is
+    oriented so that positive values favor the first model: first minus second
+    for AUROC and AUPRC, second minus first for the Brier score. This matches
+    the convention of the paired comparison table (reference minus comparator).
+
+    Layout: one panel per metric, stacked vertically, each with its own x-axis;
+    the estimate, 95% CI and P value are printed in a text column on the right.
+    The figure is drawn at print size, so that fonts keep their size once the
+    PDF is included at the width of the text block.
+
+    Args:
+        models_dict: Model identifier -> {"auc", "auprc", "brier": bootstrap arrays}.
+            Arrays must come from the same resamples (paired bootstrap).
+        output_dir: Directory where the figure and the CSV are written.
+        pairs: List of (first, second) identifiers (raw keys, substrings or
+            display names).
+        names_map: Raw key -> display name. Defaults to DEFAULT_NAMES_MAP.
+        save_filename: Output file name (PDF).
+        figsize: Figure size in inches, close to the printed size.
+        base_fontsize: Base font size in points.
+        show_plot: Whether to display the figure in the notebook.
+
+    Returns:
+        DataFrame with, for each pair and metric, the mean difference, the 95%
+        CI bounds and the two-sided P value, or None if no pair could be resolved.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if names_map is None:
+        names_map = DEFAULT_NAMES_MAP
+    available_keys = list(models_dict.keys())
+
+    def _display(raw_key: str) -> str:
+        if raw_key in names_map:
+            return names_map[raw_key]
+        for k, v in names_map.items():
+            if k.lower() in raw_key.lower():
+                return v
+        return raw_key
+
+    def _match(query: str) -> Optional[str]:
+        if query in available_keys:
+            return query
+        for raw_k, disp_k in names_map.items():
+            if query.lower() == disp_k.lower():
+                for real_k in available_keys:
+                    if raw_k.lower() in real_k.lower():
+                        return real_k
+        return next((k for k in available_keys if query.lower() in k.lower()), None)
+
+    resolved = []
+    for first_q, second_q in pairs:
+        first, second = _match(first_q), _match(second_q)
+        if first is None or second is None:
+            print(f"[Warning] Could not resolve pair ({first_q}, {second_q}).")
+            continue
+        resolved.append((first, second, f"{_display(first)} vs {_display(second)}"))
+    if not resolved:
+        print("[Error] No valid model pairs to compare.")
+        return None
+
+    # key, panel title, x-axis label, True if higher values are better
+    metrics = [
+        ("auc", "AUROC", "Difference in AUROC", True),
+        ("auprc", "AUPRC", "Difference in AUPRC", True),
+        ("brier", "Brier score", "Difference in Brier score", False),
+    ]
+
+    records = []
+    for first, second, label in resolved:
+        row = {"pair": label, "first": _display(first), "second": _display(second),
+               "raw_first": first, "raw_second": second}
+        for key, _, _, higher_is_better in metrics:
+            a = np.asarray(models_dict[first][key], dtype=np.float64)
+            b = np.asarray(models_dict[second][key], dtype=np.float64)
+            delta = (a - b) if higher_is_better else (b - a)
+            row[f"{key}_mean"] = float(np.mean(delta))
+            row[f"{key}_ci_low"], row[f"{key}_ci_high"] = np.percentile(delta, [2.5, 97.5])
+            row[f"{key}_pval"] = float(min(1.0, 2.0 * min(np.mean(delta <= 0), np.mean(delta >= 0))))
+        records.append(row)
+    df = pd.DataFrame(records)
+    df.to_csv(output_dir / f"{Path(save_filename).stem}_data.csv", index=False)
+
+    n_pairs = len(df)
+    y_pos = np.arange(n_pairs)
+    rc = {
+        "font.size": base_fontsize,
+        "axes.titlesize": base_fontsize + 0.5,
+        "axes.labelsize": base_fontsize,
+        "xtick.labelsize": base_fontsize - 1,
+        "ytick.labelsize": base_fontsize,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "pdf.fonttype": 42,
+    }
+    with plt.rc_context(rc):
+        fig, axes = plt.subplots(len(metrics), 1, figsize=figsize)
+        fig.subplots_adjust(left=0.19, right=0.62, top=0.93, bottom=0.08, hspace=0.95)
+
+        for panel, (ax, (key, title, xlabel, _)) in enumerate(zip(axes, metrics)):
+            means = df[f"{key}_mean"].to_numpy()
+            lows = df[f"{key}_ci_low"].to_numpy()
+            highs = df[f"{key}_ci_high"].to_numpy()
+            pvals = df[f"{key}_pval"].to_numpy()
+
+            ax.axvline(0, color="0.45", linestyle="--", linewidth=0.8, zorder=0)
+            for i in range(n_pairs):
+                filled = pvals[i] < 0.05
+                ax.errorbar(
+                    means[i], y_pos[i],
+                    xerr=[[means[i] - lows[i]], [highs[i] - means[i]]],
+                    fmt="o", color="black", ecolor="black",
+                    elinewidth=1.2, capsize=3.0, capthick=1.0, markersize=5.5,
+                    markerfacecolor="black" if filled else "white", markeredgewidth=1.2,
+                )
+
+            span_low = min(lows.min(), 0.0)
+            span_high = max(highs.max(), 0.0)
+            pad = 0.12 * (span_high - span_low if span_high > span_low else 1.0)
+            ax.set_xlim(span_low - pad, span_high + pad)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=7, steps=[1, 2, 5, 10]))
+            ticks = ax.get_xticks()
+            step = float(np.min(np.diff(ticks))) if len(ticks) > 1 else 1.0
+            decimals = max(0, int(np.ceil(-np.log10(step) - 1e-9)))
+            ax.xaxis.set_major_formatter(FuncFormatter(
+                lambda v, _pos, d=decimals: (f"{0:.{d}f}" if abs(v) < 0.5 * 10 ** (-d)
+                                             else f"{v:.{d}f}".replace("-", "\u2212"))
+            ))
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(df["pair"])
+            ax.set_ylim(n_pairs - 0.5, -0.5)
+            ax.tick_params(axis="y", length=0)
+            ax.set_xlabel(xlabel)
+            ax.set_title(f"{chr(65 + panel)}. {title}", loc="left", fontweight="bold")
+            ax.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
+
+            # Text column: estimate (95% CI) and P value
+            trans = blended_transform_factory(ax.transAxes, ax.transData)
+            ax.text(1.05, -0.85, "Difference (95% CI)", transform=trans,
+                    ha="left", va="center", fontweight="bold", clip_on=False)
+            ax.text(1.70, -0.85, r"$P$", transform=trans,
+                    ha="left", va="center", fontweight="bold", clip_on=False)
+            for i in range(n_pairs):
+                ax.text(1.05, y_pos[i],
+                        f"{_format_delta(means[i])} ({_format_delta(lows[i])} to {_format_delta(highs[i])})",
+                        transform=trans, ha="left", va="center", clip_on=False)
+                ax.text(1.70, y_pos[i], _format_p_column(pvals[i]),
+                        transform=trans, ha="left", va="center", clip_on=False)
+
+        fig_path = output_dir / save_filename
+        fig.savefig(fig_path, bbox_inches="tight")
+        if show_plot:
+            plt.show()
+        plt.close(fig)
+
+    print(f"[Saved] {fig_path} and {Path(save_filename).stem}_data.csv")
+    return df
 # ============================================================================
 # LEGACY REPORT FUNCTIONS (restored from the pre-refactor build; still called
 # by ICU_Models_Comparison.py)

@@ -2094,7 +2094,7 @@ def plot_holdout_metrics_barplot(
         return
 
     default_names_map = {
-        "IGS2": "IGS2",
+        "IGS2": "SAPS II",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
@@ -2541,7 +2541,7 @@ def old_generate_comparative_report(
     # ---- Display Names Mapping ----
     # Mapping par défaut si aucun dictionnaire explicite n'est transmis
     default_names_map = {
-        "IGS2": "IGS2",
+        "IGS2": "SAPS II",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",  # ou "Logistic Regression"
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",
@@ -2955,7 +2955,7 @@ def generate_comparative_report(
     configurations = list(configurations)
 
     default_names_map = {
-        "IGS2": "IGS2",
+        "IGS2": "SAPS II",
         "Logistic_Regression_Lasso_TSFEL": "L1-LR",
         "SVC_TSFEL": "SVC",
         "RandomForest_TSFEL": "Random Forest",

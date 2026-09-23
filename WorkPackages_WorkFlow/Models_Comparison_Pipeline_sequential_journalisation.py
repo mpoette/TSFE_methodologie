@@ -149,9 +149,9 @@ pl.Config.set_tbl_cols(-1)
 mode_names = ["score", "wp1", "wp2", "wp3"]
 mode_names = ["wp3_test"]
 mode_names = ["LR"]
-RUN_COMPARISON = False
+RUN_COMPARISON = True
 RUN_TRAINING = True
-RUN_LASSO = True
+RUN_LASSO = False
 RUN_INTERPRETABILITY = True
 RUN_TEST = True
 POPULATION = "Tout"
