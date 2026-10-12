@@ -1,0 +1,39 @@
+{
+  "seed": 42,
+  "modes": ["article_comparison"],
+  "run_comparison": true,
+  "run_training": false,
+  "run_lasso": false,
+  "run_interpretability": true,
+  "run_test": true,
+  "figure_output_format": "pdf",
+  "population": "Tout",
+  "save_figure": true,
+  "transparent": false,
+  "dataset_path": "/data2/paquie.d/Datasets/output",
+  "target_columns": {
+    "Survie à 28 jours": "isDeceased_lt_28d"
+  },
+  "keep_duplicates": false,
+  "profiles": {
+    "article_comparison": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": [
+          "VanillaTransformerModified", 
+          "InceptionTimeModified", 
+          "LstmTimeModified",
+          "XGBoost_TSFEL", 
+          "RandomForest_TSFEL", 
+          "SVC_TSFEL", 
+          "Logistic Regression Lasso_TSFEL", 
+          "IGS2"
+      ],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [true],
+      "feature_modes": ["Mode IGS2", "Mode Commonly Used Without pmsi", "Mode Commonly Used"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    }
+  }
+}
