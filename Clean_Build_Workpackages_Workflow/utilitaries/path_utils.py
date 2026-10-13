@@ -7,9 +7,93 @@ structures to keep results from different targets, preprocessing modes,
 feature sets, populations, seeds, and calibration settings isolated.
 """
 
+from datetime import datetime
 from pathlib import Path
 
 import joblib
+
+# ============================================================================
+# RUN-SCOPED ARTIFACT ROOT
+# ============================================================================
+
+class RunContext:
+    """Identify one pipeline launch and own its artifact root directory.
+
+    Every run writes its ``models``, ``outputs``, ``inputs``, ``optuna.db``,
+    and pipeline log into a dedicated ``run_YYYYMMDD_HHMMSS[_suffix]`` folder
+    so that successive runs on the same dataset never share (or overwrite)
+    artifact trees.
+    """
+
+    def __init__(self, run_dir: str | Path, run_name: str | None = None):
+        """Initialize a run context around an existing directory.
+
+        Args:
+            run_dir: Directory holding all artifacts of the run.
+            run_name: Run identifier, derived from the directory name when
+                omitted.
+        """
+        self.run_dir = Path(run_dir)
+        self.run_name = run_name or self.run_dir.name
+
+    @classmethod
+    def new(cls, base_dir: str | Path = ".", suffix: str = "") -> "RunContext":
+        """Create a fresh, uniquely named run directory.
+
+        Args:
+            base_dir: Directory in which the run folder is created.
+            suffix: Optional label appended to the run name (e.g. the config
+                file stem).
+
+        Returns:
+            A context pointing at the newly created run directory.
+        """
+        # Resolve to an absolute path so that artifact paths stay correct after
+        # the pipeline chdir's into the run directory (a relative run_dir would
+        # otherwise double-nest, e.g. run_x/run_x/models/...).
+        base_dir = Path(base_dir).expanduser().resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_suffix = (
+            suffix.replace("/", "_")
+            .replace("\\", "_")
+            .replace(" ", "_")
+            .replace(".", "_")
+            .strip("_")
+        )
+        name = f"run_{stamp}" if not safe_suffix else f"run_{stamp}_{safe_suffix}"
+        run_dir = base_dir / name
+        index = 1
+        while run_dir.exists():
+            run_dir = base_dir / f"{name}_{index}"
+            index += 1
+        run_dir.mkdir(parents=True)
+        return cls(run_dir, run_name=name)
+
+    @property
+    def models_dir(self) -> Path:
+        """Return the run-local ``models`` artifact root."""
+        return self.run_dir / "models"
+
+    @property
+    def outputs_dir(self) -> Path:
+        """Return the run-local ``outputs`` artifact root."""
+        return self.run_dir / "outputs"
+
+    @property
+    def inputs_dir(self) -> Path:
+        """Return the run-local ``inputs`` artifact root."""
+        return self.run_dir / "inputs"
+
+    @property
+    def log_dir(self) -> Path:
+        """Return the run-local pipeline log directory."""
+        return self.run_dir / "pipeline_logs"
+
+    @property
+    def optuna_db(self) -> Path:
+        """Return the run-local Optuna storage file path."""
+        return self.run_dir / "optuna.db"
 
 
 # ============================================================================
@@ -40,7 +124,9 @@ class Experiment:
         stratify_mode="",
         calibrated_mode="",
         keep_duplicates = False,
-        mode_duplicates = "prio_first"
+        mode_duplicates = "prio_first",
+        run_context=None,
+        tsfel_domains=(),
     ):
         """Initialize an experiment configuration.
 
@@ -72,6 +158,16 @@ class Experiment:
             mode_duplicates:
                 Strategy used when dropping duplicates (e.g., "prio_first" or "prio_last").
                 Ignored if ``keep_duplicates`` is True.
+            run_context:
+                Optional :class:`RunContext` scoping every generated artifact
+                path to a dedicated per-run directory. When omitted, paths are
+                created relative to the current working directory (legacy
+                behavior).
+            tsfel_domains:
+                TSFEL feature domains extracted for this experiment. When
+                non-empty, a slug is added to every artifact path so that runs
+                with different domain subsets never share caches (e.g. the
+                TSFEL global parquet) or model/output trees.
         """
         self.config_mode = config_mode
         self.clean = config_cleaning.clean
@@ -85,6 +181,11 @@ class Experiment:
         self.calibrated_mode = calibrated_mode
         self.mode_duplicates = mode_duplicates
         self.duplicates_folder = "duplicates" if keep_duplicates else f"no_duplicates_{mode_duplicates}"
+        self.run_context = run_context
+        self.tsfel_domains = tuple(str(d) for d in tsfel_domains)
+        self.tsfel_domains_slug = (
+            "tsfel_" + "_".join(self.tsfel_domains) if self.tsfel_domains else ""
+        )
 
     def shortdirname(self, class_weight=None, uses_optuna_config=False):
         """Build a compact directory name for the experiment.
@@ -176,10 +277,17 @@ class Experiment:
         Notes:
             The cleaning configuration is intentionally omitted because
             cleaning is always enabled.
+            When the experiment is bound to a :class:`RunContext`, the root
+            (``"models"``, ``"outputs"``, ``"inputs"``) is resolved inside the
+            run's dedicated directory; otherwise it stays relative to the
+            current working directory.
         """
         mode = config_mode if config_mode != "" else self.config_mode
 
-        return (
+        if self.run_context is not None:
+            root = getattr(self.run_context, f"{root}_dir")
+
+        base = (
             Path(root)
             / self.duplicates_folder
             / self._normalize_component(self.target_name)
@@ -187,6 +295,13 @@ class Experiment:
             / self._normalize_component(mode)
             / self._get_feature_slug()
         )
+
+        # When the TSFEL feature domains are restricted, tag every subtree with
+        # the domain set so distinct variants never share artifacts.
+        if self.tsfel_domains_slug:
+            base = base / self.tsfel_domains_slug
+
+        return base
 
     def _get_run_slug(
         self,

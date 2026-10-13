@@ -7,3 +7,6 @@ __pycache__/
 build/
 dist/
 pipeline_logs/
+
+# Per-run artifact directories (Phase 3): each run writes into run_YYYYMMDD_HHMMSS[_config]/
+run_*/

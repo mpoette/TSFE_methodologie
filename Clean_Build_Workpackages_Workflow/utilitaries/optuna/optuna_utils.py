@@ -8,7 +8,22 @@ model-specific Optuna objective functions.
 import optuna
 import numpy as np
 
-OPTUNA_STORAGE = "sqlite:///optuna.db"
+DEFAULT_OPTUNA_STORAGE = "sqlite:///optuna.db"
+
+# Storage URL used by every search launched after this module is imported.
+# The pipeline points it at the per-run optuna.db (see RunContext) so that
+# each run owns its studies; the default keeps the legacy shared location.
+OPTUNA_STORAGE = DEFAULT_OPTUNA_STORAGE
+
+
+def set_storage(storage: str) -> None:
+    """Point all Optuna searches at the given storage URL.
+
+    Args:
+        storage: Storage URL, for example ``"sqlite:///run_x/optuna.db"``.
+    """
+    global OPTUNA_STORAGE
+    OPTUNA_STORAGE = storage
 
 
 # ============================================================================

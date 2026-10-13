@@ -16,6 +16,17 @@ import utilitaries.resampling_utils as resampling
 import utilitaries.timestamp_sampling_utils as tsu
 import utilitaries.config_utils as config_dataclass
 
+# Feature metadata JSONs live in the sibling workspace repo. Resolve them from
+# this module's location so the pipeline works regardless of the CWD it is
+# launched from (the per-run artifact directory chdir would otherwise break a
+# hardcoded relative path).
+_FEATURE_METADATA_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "Preprocessing_pipeline"
+    / "preprocessing-pipelines"
+    / "json"
+)
+
 # ============================================================================
 # CONFIGURATION HELPERS
 # ============================================================================
@@ -125,14 +136,8 @@ def prepare_dataset_from_config(
     patient_col: str,
     targets: list[str],
     seed: int,
-    dynamic_features_path: str | Path = (
-        "../../Preprocessing_pipeline/preprocessing-pipelines/"
-        "json/dynamic_features.json"
-    ),
-    calculated_features_path: str | Path = (
-        "../../Preprocessing_pipeline/preprocessing-pipelines/"
-        "json/calculated_features_to_original_features.json"
-    ),
+    dynamic_features_path: str | Path = _FEATURE_METADATA_DIR / "dynamic_features.json",
+    calculated_features_path: str | Path = _FEATURE_METADATA_DIR / "calculated_features_to_original_features.json",
     show_fig: bool = True,
 ) -> tuple[pl.DataFrame, list[str], int | None]:
     """Prepare a merged patient dataset according to a configured mode.

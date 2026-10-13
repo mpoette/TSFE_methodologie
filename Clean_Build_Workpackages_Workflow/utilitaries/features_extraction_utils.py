@@ -1197,6 +1197,50 @@ def _process_single_patient(
 
 
 
+def build_tsfel_config(domains: Sequence[str] | None = None) -> dict:
+    """Build the TSFEL feature configuration used by the pipeline.
+
+    Starts from ``tsfel.get_features_by_domain()`` and applies the pipeline's
+    standing exclusions:
+
+    - Fractal features are excluded entirely.
+    - Histogram mode is excluded from statistical features (may crash on
+      constant signals).
+    - MFCC is excluded from spectral features (reduces explainability).
+
+    When ``domains`` is provided and non-empty, only the requested domains are
+    retained (e.g. ``("statistical",)`` for a statistical-only feature set, or
+    ``("statistical", "temporal")`` for statistical + temporal features).
+
+    Args:
+        domains:
+            Optional sequence of TSFEL domain names to retain. ``None`` or an
+            empty sequence keeps every domain that survives the exclusions
+            (statistical + temporal + spectral).
+
+    Returns:
+        The filtered TSFEL configuration mapping.
+    """
+    config = tsfel.get_features_by_domain()
+
+    # Fractal features are intentionally excluded from this pipeline.
+    config.pop("fractal", None)
+
+    # Histogram mode is excluded because it may crash on constant signals.
+    config["statistical"].pop("Histogram mode", None)
+
+    # MFCC is excluded because it reduces explainability.
+    config["spectral"].pop("MFCC", None)
+
+    if domains:
+        keep = set(domains)
+        for domain in list(config):
+            if domain not in keep:
+                config.pop(domain, None)
+
+    return config
+
+
 def extract_tsfel_per_patient(
     df: PolarsFrame,
     patient_col: str,
@@ -1207,6 +1251,7 @@ def extract_tsfel_per_patient(
     sampling_interval_hours: float = 1.0,
     checkpoint_dir: str | os.PathLike | None = None,
     chunk_size: int = 1000,
+    domains: Sequence[str] | None = None,
 ) -> pl.DataFrame:
     """Extract TSFEL features independently for each patient or ICU stay.
 
@@ -1305,16 +1350,7 @@ def extract_tsfel_per_patient(
         ]
     )
 
-    config = tsfel.get_features_by_domain()
-
-    # Fractal features are intentionally excluded from this pipeline.
-    config.pop("fractal", None)
-
-    # Histogram mode is excluded because it may crash on constant signals.
-    config["statistical"].pop("Histogram mode", None)
-
-    # MFCC is excluded because it reduces explainability.
-    config["spectral"].pop("MFCC", None)
+    config = build_tsfel_config(domains)
 
     # Log feature columns passed to TSFEL to detect static features leaking in.
     logger.info(

@@ -41,6 +41,11 @@ The original script command remains supported:
 python ICU_Models_Comparison.py
 ```
 
+Each run writes its artifacts (inputs, models, outputs, optuna.db, logs) into
+a dedicated `run_YYYYMMDD_HHMMSS[_<config>]/` directory next to the launch
+directory (per-run artifact layout, Phase 3). CHU 2017+ runs and the TSFEL
+feature-domain ablation are documented in `RUNS_CHU_2017.md`.
+
 ## Python API
 
 The top-level import is deliberately lightweight and does not import PyTorch,

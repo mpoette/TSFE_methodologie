@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "modes": ["smoke_chu100"],
+  "run_comparison": false,
+  "run_training": true,
+  "run_lasso": false,
+  "run_interpretability": false,
+  "run_test": true,
+  "figure_output_format": "pdf",
+  "population": "Tout",
+  "save_figure": false,
+  "transparent": false,
+  "dataset_path": "/tmp/opencode/chu100",
+  "target_columns": {
+    "Survie à 28 jours": "isDeceased_lt_28d"
+  },
+  "keep_duplicates": false,
+  "profiles": {
+    "smoke_chu100": {
+      "windowing_mode": "24h début réanimation sans remplissage",
+      "target_labels": ["Survie à 28 jours"],
+      "model_names": ["XGBoost TSFEL"],
+      "stratify_modes": ["target_col"],
+      "optuna_run_options": [false],
+      "feature_modes": ["Mode Commonly Used Without pmsi"],
+      "balancing_methods": ["Aucune Méthode"],
+      "mode_duplicates": "prio_first"
+    }
+  }
+}

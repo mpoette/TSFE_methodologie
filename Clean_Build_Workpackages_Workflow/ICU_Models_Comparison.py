@@ -6,12 +6,35 @@ windowing strategies, feature sets, balancing methods, and calibration
 modes. Supports both out-of-fold cross-validation and holdout evaluation.
 """
 
+import os
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
 from utilitaries.run_config import load_run_config_from_cli
+from utilitaries.path_utils import RunContext
 
 RUN_CONFIG = load_run_config_from_cli()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PER-RUN ARTIFACT DIRECTORY
+# Every run writes into a dedicated run_YYYYMMDD_HHMMSS[_config]/ folder so
+# that successive runs on the same dataset never share artifact trees.
+# ─────────────────────────────────────────────────────────────────────────────
+_CONFIG_SUFFIX = ""
+_argv_pre = sys.argv[1:]
+if "--config" in _argv_pre:
+    try:
+        _CONFIG_SUFFIX = Path(_argv_pre[_argv_pre.index("--config") + 1]).stem
+    except IndexError:
+        pass
+elif _argv_pre and _argv_pre[0].endswith(".json"):
+    _CONFIG_SUFFIX = Path(_argv_pre[0]).stem
+
+RUN_CONTEXT = RunContext.new(base_dir=".", suffix=_CONFIG_SUFFIX)
+LEGACY_CWD = Path(os.getcwd()).resolve()
+os.chdir(RUN_CONTEXT.run_dir)
+
 REFERENCE_MODE = RUN_CONFIG.reference
 SEED = RUN_CONFIG.seed
 seed = SEED
@@ -31,14 +54,16 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-sys.path.append(os.path.abspath('..'))
+# The pipeline chdir'd into the per-run artifact directory at startup; keep the
+# historical "parent of the launch directory" entry anchored to the original
+# launch location, not to the run directory.
+sys.path.append(os.path.abspath(str(LEGACY_CWD.parent)))
 import json
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING LAYER
 # All printed output and errors are duplicated to a log file.
 # ─────────────────────────────────────────────────────────────────────────────
-_SCRIPT_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-_LOG_DIR = _SCRIPT_DIR / "pipeline_logs"
+_LOG_DIR = RUN_CONTEXT.log_dir
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_PATH = _LOG_DIR / f"pipeline_{datetime.now():%Y%m%d_%H%M%S}_pid{os.getpid()}.log"
 _LOG_FILE = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)
@@ -209,15 +234,32 @@ POPULATION = RUN_CONFIG.population
 SAVE_FIGURE = RUN_CONFIG.save_figure
 TRANSPARENT = RUN_CONFIG.transparent
 DATASET_PATH = RUN_CONFIG.dataset_path
+if not os.path.isabs(DATASET_PATH):
+    DATASET_PATH = str((LEGACY_CWD / DATASET_PATH).resolve())
+
+with open(RUN_CONTEXT.run_dir / "run_metadata.json", "w", encoding="utf-8") as _meta_f:
+    json.dump(
+        {
+            "run_name": RUN_CONTEXT.run_name,
+            "run_dir": str(RUN_CONTEXT.run_dir),
+            "started_at": datetime.now().isoformat(),
+            "config": RUN_CONFIG.to_dict(),
+        },
+        _meta_f,
+        indent=4,
+        ensure_ascii=False,
+    )
 TARGET_COLUMNS = RUN_CONFIG.target_columns
 EXPERIMENT_INDEX = 0
 TOTAL_EXPERIMENTS = RUN_CONFIG.experiment_count()
+print(f"[RUN] Artifacts will be written to: {RUN_CONTEXT.run_dir}", flush=True)
 print(f"[PIPELINE] {TOTAL_EXPERIMENTS} experiment(s) scheduled.", flush=True)
 mode_duplicates = "prio_last"
 keep_duplicates = RUN_CONFIG.keep_duplicates
 for mode_run in mode_names:
     mode_config = RUN_CONFIG.profiles[mode_run]
     mode_duplicates = mode_config.mode_duplicates
+    TSFEL_DOMAINS = mode_config.tsfel_domains
     WINDOWING_MODE = mode_config.windowing_mode
     target_labels = mode_config.target_labels
     model_names = mode_config.model_names
@@ -277,6 +319,7 @@ for mode_run in mode_names:
                                 print(f"  Features     : {FEATURE_MODE}", flush=True)
                                 print(f"  Balancing    : {BALANCING_METHOD}", flush=True)
                                 print(f"  Optuna       : {RUN_OPTUNA}", flush=True)
+                                print(f"  TSFEL domains: {', '.join(TSFEL_DOMAINS) if TSFEL_DOMAINS else 'all (statistical+temporal+spectral)'}", flush=True)
                                 print("=" * 100, flush=True)
                                 update_progress("Creating the experiment configuration")
 
@@ -372,7 +415,7 @@ for mode_run in mode_names:
                                     'XGBoost TSFEL': {'n_estimators': 300, 'max_depth': 5, 'learning_rate': 0.05, 'subsample': 0.8, 'colsample_bytree': 0.8},
                                     'SVC TSFEL': {'C': 1.0, 'gamma': 'scale', 'kernel': 'rbf', 'class_weight': class_weight_choice.value[1:]}}
 
-                                exp = path_utils.Experiment(config_mode.name, config_cleaning, config_y, balance_method_prefix, modex, class_weight_choice, population_suffix, seed, stratify_mode=stratify_mode.value, calibrated_mode=calibration_mode.value if calibration.value else "", keep_duplicates = keep_duplicates, mode_duplicates = mode_duplicates)
+                                exp = path_utils.Experiment(config_mode.name, config_cleaning, config_y, balance_method_prefix, modex, class_weight_choice, population_suffix, seed, stratify_mode=stratify_mode.value, calibrated_mode=calibration_mode.value if calibration.value else "", keep_duplicates = keep_duplicates, mode_duplicates = mode_duplicates, run_context=RUN_CONTEXT, tsfel_domains=TSFEL_DOMAINS)
 
                                 dataset_path = DATASET_PATH
 
@@ -441,7 +484,8 @@ for mode_run in mode_names:
 
                                 custom_features = SimpleNamespace(value=CUSTOM_FEATURES if CUSTOM_FEATURES else df_clean_keep.columns)
 
-                                with open('../../Preprocessing_pipeline/preprocessing-pipelines/json/dynamic_features.json', 'r') as file:
+                                _dyn_features_json = LEGACY_CWD.parent.parent / "Preprocessing_pipeline" / "preprocessing-pipelines" / "json" / "dynamic_features.json"
+                                with open(_dyn_features_json, 'r') as file:
                                     feature_metadata = json.load(file)
                                 if modex.value == 'Mode All':
                                     selected_features = df_clean_keep.columns.copy()
@@ -646,7 +690,7 @@ for mode_run in mode_names:
                                     if extract_tsfel.value or not os.path.exists(raw_global_tsfel_path):
                                         print("Starting global TSFEL extraction for all patients")
                                         tsfel_features = [target_label for target_label in final_features if target_label not in static_feats]
-                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col, n_jobs = n_jobs, checkpoint_dir=str(raw_global_tsfel_path) + '.chunks')
+                                        tsfel_global_df = extract_feat.extract_tsfel_per_patient(df_clean_3, extract.ID_COL, extract.TIME_COL, tsfel_features, target_col, n_jobs = n_jobs, checkpoint_dir=str(raw_global_tsfel_path) + '.chunks', domains=TSFEL_DOMAINS)
                                         static_global_df = df_clean_3.select([extract.ID_COL, *static_feats]).unique()
     
                                         # robustness verification
@@ -1341,7 +1385,7 @@ for mode_run in mode_names:
                                         print(f"[DISK-SAVE] The best parameters will be saved to '{HYPERPARAMS_FILE}'.")
                                         if config_models.models_name == 'InceptionTimeModified':
                                             from utilitaries.optuna.optuna_inception_utils import run_stage1_search
-                                            study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             best_parameters = study.best_params
                                             best_parameters['out_channels'] = 2 ** best_parameters.pop('out_channels_exp')
                                             best_parameters['bottleneck_channels'] = 2 ** best_parameters.pop('bottleneck_channels_exp')
@@ -1349,7 +1393,7 @@ for mode_run in mode_names:
                                             saved_configs[config_models.models_name] = best_parameters
                                         elif config_models.models_name == 'LstmTimeModified':
                                             from utilitaries.optuna.optuna_lstm_utils import run_lstm_stage1_search
-                                            study = run_lstm_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            study = run_lstm_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             best_parameters = study.best_params
                                             best_parameters['hidden_size'] = 2 ** best_parameters.pop('hidden_size_exp')
                                             best_parameters['batch_size'] = 2 ** best_parameters.pop('batch_size_exp')
@@ -1358,7 +1402,7 @@ for mode_run in mode_names:
                                             saved_configs[config_models.models_name] = best_parameters
                                         elif config_models.models_name == 'VanillaTransformerModified':
                                             from utilitaries.optuna.optuna_vanilla_utils import run_stage1_search
-                                            study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            study = run_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             best_parameters = study.best_params
                                             best_parameters['d_model'] = 2 ** best_parameters.pop('d_model_exp')
                                             best_parameters['dim_feedforward'] = 2 ** best_parameters.pop('dim_feedforward_exp')
@@ -1366,15 +1410,15 @@ for mode_run in mode_names:
                                             saved_configs[config_models.models_name] = best_parameters
                                         elif config_models.models_name == 'XGBoost TSFEL':
                                             from utilitaries.optuna.optuna_xgb_utils import run_xgb_stage1_search
-                                            study = run_xgb_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, fixed_params = {"tree_method" : "hist", "device" : "cuda"})
+                                            study = run_xgb_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, fixed_params = {"tree_method" : "hist", "device" : "cuda"}, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             saved_configs[config_models.models_name] = study.best_params
                                         elif config_models.models_name == 'SVC TSFEL':
                                             from utilitaries.optuna.optuna_svc_utils import run_svc_stage1_search
-                                            study = run_svc_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            study = run_svc_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             saved_configs[config_models.models_name] = study.best_params
                                         elif config_models.models_name == 'RandomForest TSFEL':
                                             from utilitaries.optuna.optuna_rf_utils import run_rf_stage1_search
-                                            study = run_rf_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name)
+                                            study = run_rf_stage1_search(folds_X_train[0], folds_y_train[0], study_name=save_optuna_name, storage=f"sqlite:///{RUN_CONTEXT.optuna_db}")
                                             best_parameters = study.best_params
                                             if best_parameters.get('max_depth') == 0:
                                                 best_parameters['max_depth'] = None
@@ -3169,3 +3213,4 @@ for mode_run in mode_names:
 
 update_progress("All experiments have completed")
 print(f"[PIPELINE] Normal completion. Full log: {_LOG_PATH}", flush=True)
+os.chdir(LEGACY_CWD)

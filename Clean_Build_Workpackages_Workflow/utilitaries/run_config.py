@@ -30,6 +30,9 @@ class ModeConfig:
         feature_modes: Feature configurations evaluated by this mode.
         balancing_methods: Dataset-balancing configurations.
         mode_duplicates: Duplicate-resolution strategy.
+        tsfel_domains: TSFEL feature domains extracted for this mode
+            (e.g. ``("statistical",)``). Empty means all domains supported by
+            the pipeline (statistical + temporal + spectral).
     """
 
     windowing_mode: str
@@ -40,6 +43,7 @@ class ModeConfig:
     feature_modes: tuple[str, ...]
     balancing_methods: tuple[str, ...]
     mode_duplicates: str = "prio_first"
+    tsfel_domains: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ModeConfig":
@@ -67,6 +71,19 @@ class ModeConfig:
             for name in list_fields
         ):
             raise ValueError("Every mode matrix field must be a non-empty sequence.")
+        tsfel_domains_raw = data.get("tsfel_domains", [])
+        if not isinstance(tsfel_domains_raw, (list, tuple)):
+            raise ValueError("tsfel_domains must be a sequence of domain names.")
+        tsfel_domains = tuple(str(value) for value in tsfel_domains_raw)
+        unknown_domains = sorted(
+            set(tsfel_domains).difference({"statistical", "temporal", "spectral"})
+        )
+        if unknown_domains:
+            raise ValueError(
+                "Unknown tsfel_domains: "
+                + ", ".join(unknown_domains)
+                + " (valid: statistical, temporal, spectral)"
+            )
         return cls(
             windowing_mode=str(data["windowing_mode"]),
             target_labels=tuple(str(value) for value in data["target_labels"]),
@@ -76,6 +93,7 @@ class ModeConfig:
             feature_modes=tuple(str(value) for value in data["feature_modes"]),
             balancing_methods=tuple(str(value) for value in data["balancing_methods"]),
             mode_duplicates=str(data.get("mode_duplicates", "prio_first")),
+            tsfel_domains=tsfel_domains,
         )
 
 
@@ -99,6 +117,7 @@ class RunConfig:
     keep_duplicates: bool
     profiles: dict[str, ModeConfig]
     reference : bool = False
+    reuse_run_dir: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunConfig":
@@ -155,6 +174,9 @@ class RunConfig:
             keep_duplicates=bool(data["keep_duplicates"]),
             profiles=profiles,
             reference=bool(data.get("reference", False)),
+            reuse_run_dir=(
+                str(data["reuse_run_dir"]) if data.get("reuse_run_dir") else None
+            ),
         )
 
     def experiment_count(self) -> int:
